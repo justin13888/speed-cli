@@ -342,6 +342,7 @@ Create a config file for repeated testing:
 
 Contributions are welcome! This tool aims to be the most comprehensive network testing suite available. Areas for improvement:
 
+- Improve internal overhead of HTTP tests (e.g. to test against 25+ Gbps links)
 - Additional protocol support (QUIC, HTTP/3, SFTP, SMB)
 - More advanced topology analysis
 - Real-time monitoring capabilities
