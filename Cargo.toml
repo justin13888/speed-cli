@@ -13,3 +13,16 @@ chrono = { version = "0.4.41", features = ["serde"] }
 anyhow = "1.0"
 colored = "3.0.0"
 humansize = "2.1"
+reqwest = { version = "0.12.22", features = ["json", "stream", "rustls-tls"], default-features = false }
+hyper = { version = "1.0", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+rustls = "0.23"
+tokio-rustls = "0.26"
+url = "2.5"
+statistical = "1.0.0"
+trust-dns-resolver = "0.23"
+rand = "0.9"
+futures = "0.3"
+bytes = "1.5"
+urlencoding = "2.1"
