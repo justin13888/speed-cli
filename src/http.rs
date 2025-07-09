@@ -292,10 +292,7 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<T
             config.parallel_connections,
         )
         .await?;
-        debug!(
-            "Adaptive sizing enabled. Optimal test size determined: {} bytes",
-            optimal_size
-        );
+        debug!(            "Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
         vec![optimal_size]
     } else if !config.test_sizes.is_empty() {
         config.test_sizes.clone()
@@ -510,7 +507,7 @@ async fn determine_optimal_download_test_size(
             } else {
                 base_optimal_size
             };
-
+            
             // Clamp between 512KB and 100MB
             Ok(optimal_size.clamp(512 * 1024, 100 * 1024 * 1024))
         }
