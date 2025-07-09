@@ -273,17 +273,11 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<T
     // Determine test file size based on configuration
     let test_sizes = if config.adaptive_sizing {
         // Start with a small test to estimate speed, then adapt
-<<<<<<< HEAD
-        let optimal_size = determine_optimal_test_size(client, &config.server_url).await?;
-        println!("Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
-        optimal_size
-=======
         let optimal_size = determine_optimal_download_test_size(client, &config.server_url, config.parallel_connections).await?;
-        debug!("Adaptive sizing enabled. Optimal test size determined: {} bytes", optimal_size);
+        debug!("Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
         vec![optimal_size]
     } else if !config.test_sizes.is_empty() {
         config.test_sizes.clone()
->>>>>>> cc299891d64d8a4b8922686d0cb75a612f060c5a
     } else {
         vec![10 * 1024 * 1024] // 10MB default
     };
