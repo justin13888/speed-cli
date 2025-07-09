@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::network::*;
+use super::types::*;
 
 pub struct BandwidthMonitor {
     measurements: VecDeque<BandwidthMeasurement>,

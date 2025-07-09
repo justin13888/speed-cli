@@ -208,7 +208,9 @@ speed-cli server --help
 
 ## Example Output
 
-### HTTP Speed Test Results
+<!-- TODO: Decide whether to remove this -->
+
+<!-- ### HTTP Speed Test Results
 
 ```
 HTTP Speed Test Results
@@ -262,7 +264,7 @@ COMPREHENSIVE NETWORK DIAGNOSTIC RESULTS
 
 💡 RECOMMENDATIONS
    1. Your network performance looks excellent!
-```
+``` -->
 
 ## Technical Details
 
@@ -286,6 +288,7 @@ COMPREHENSIVE NETWORK DIAGNOSTIC RESULTS
 ### HTTP Test Endpoints
 
 When running `http-server`, the following endpoints are available:
+
 - `GET /download?size=<bytes>` - Download test data
 - `POST /upload` - Upload test endpoint
 - `GET /latency` - Minimal latency test

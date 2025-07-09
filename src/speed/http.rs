@@ -9,7 +9,7 @@ use tokio::time::sleep;
 use tracing::debug;
 use url::Url;
 
-use crate::network::*;
+use crate::network::types::*;
 
 #[derive(Debug, Clone)]
 pub struct HttpTestConfig {

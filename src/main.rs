@@ -1,159 +1,21 @@
-use clap::{Parser, Subcommand};
 use colored::*;
 use eyre::Result;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-mod bandwidth;
-mod client;
-mod diagnostics;
-mod export;
-mod http;
-mod http_server;
+mod cli;
 mod network;
-mod server;
+mod speed;
+mod utils;
 
-use client::*;
-use diagnostics::*;
-use http::*;
-use http_server::*;
-use server::*;
+use cli::{Cli, Commands};
+use speed::tcp::{TcpClientConfig, run_tcp_client};
+use speed::udp::{UdpClientConfig, run_udp_client};
+use speed::http::{HttpTestConfig, run_http_test};
+use speed::http_server::{HttpServerConfig, run_http_server};
+use speed::server::{ServerConfig, run_server};
+use speed::diagnostics::{ComprehensiveTestConfig, run_comprehensive_test};
 use tracing::debug;
-
-#[derive(Parser)]
-#[command(name = "speed-cli")]
-#[command(
-    about = "A comprehensive network performance measurement tool (iperf3 + HTTP speed tests)"
-)]
-#[command(
-    long_about = "A comprehensive network diagnostics tool that includes:\n• Traditional TCP/UDP throughput testing (like iperf3)\n• HTTP/1.1 and HTTP/2 speed tests (like Ookla/Cloudflare)\n• DNS performance analysis\n• Connection quality assessment\n• Network topology analysis\n• Geographic information and routing analysis"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-// TODO: Review definition and make it stricter
-#[derive(Subcommand)]
-enum Commands {
-    /// Run as client (default mode)
-    Client {
-        /// Server hostname or IP address
-        #[arg(short, long, default_value = "127.0.0.1")]
-        server: String,
-
-        /// Server port
-        #[arg(short, long, default_value = "5201")]
-        port: u16,
-
-        /// Test duration in seconds
-        #[arg(short, long, default_value = "10")]
-        time: u64,
-
-        /// Use UDP instead of TCP
-        #[arg(short, long)]
-        udp: bool,
-
-        /// Target bandwidth for UDP tests (Mbps)
-        #[arg(short, long, default_value = "1")]
-        bandwidth: f64,
-
-        /// Export results to file (json or csv)
-        #[arg(short, long)]
-        export: Option<String>,
-    },
-
-    /// Run as server
-    Server {
-        /// Listen port
-        #[arg(short, long, default_value = "5201")]
-        port: u16,
-
-        /// Bind to specific interface
-        #[arg(short, long, default_value = "0.0.0.0")]
-        bind: String,
-    },
-
-    /// Run HTTP speed test (similar to Ookla)
-    Http {
-        /// Server URL (e.g., http://localhost:8080)
-        #[arg(short, long, default_value = "http://localhost:8080")]
-        url: String,
-
-        /// Test duration in seconds
-        #[arg(short, long, default_value = "10")]
-        time: u64,
-
-        /// Number of parallel connections
-        #[arg(short, long, default_value = "4")]
-        parallel: usize,
-
-        /// HTTP version (http1, http2, auto)
-        #[arg(long, default_value = "auto")]
-        version: HttpVersion,
-
-        /// Test type (download, upload, bidirectional, latency, comprehensive)
-        #[arg(long = "type", default_value = "comprehensive")]
-        test_type: HttpTestType,
-
-        /// Export results to file (json or csv)
-        #[arg(short, long)]
-        export: Option<String>,
-
-        /// Enable adaptive test sizing
-        #[arg(long)]
-        adaptive: bool,
-    },
-
-    /// Run HTTP speed test server
-    HttpServer {
-        /// Listen port
-        #[arg(short, long, default_value = "8080")]
-        port: u16,
-
-        /// Bind to specific interface
-        #[arg(short, long, default_value = "0.0.0.0")]
-        bind: String,
-
-        /// Maximum upload size in MB
-        #[arg(long, default_value = "100")]
-        max_upload_mb: usize,
-
-        /// Enable CORS headers
-        #[arg(long, default_value = "true")]
-        cors: bool,
-    },
-
-    /// Run comprehensive network diagnostics
-    Diagnostics {
-        /// Server URL for testing
-        #[arg(short, long, default_value = "http://localhost:8080")]
-        url: String,
-
-        /// Test duration in seconds
-        #[arg(short, long, default_value = "30")]
-        time: u64,
-
-        /// Number of parallel connections for HTTP tests
-        #[arg(short, long, default_value = "4")]
-        parallel: usize,
-
-        /// Export results to file (json only)
-        #[arg(short, long)]
-        export: Option<String>,
-
-        /// Skip DNS performance tests
-        #[arg(long)]
-        skip_dns: bool,
-
-        /// Skip connection quality tests
-        #[arg(long)]
-        skip_quality: bool,
-
-        /// Skip network topology analysis
-        #[arg(long)]
-        skip_topology: bool,
-    },
-}
+use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -185,15 +47,25 @@ async fn main() -> Result<()> {
             export,
         } => {
             println!("{}", "Starting client mode...".green().bold());
-            let config = ClientConfig {
-                server_addr: server,
-                port,
-                duration: time,
-                use_udp: udp,
-                target_bandwidth: bandwidth,
-                export_file: export,
-            };
-            run_client(config).await?;
+            
+            if udp {
+                let config = UdpClientConfig {
+                    server_addr: server,
+                    port,
+                    duration: time,
+                    target_bandwidth: bandwidth,
+                    export_file: export,
+                };
+                run_udp_client(config).await?;
+            } else {
+                let config = TcpClientConfig {
+                    server_addr: server,
+                    port,
+                    duration: time,
+                    export_file: export,
+                };
+                run_tcp_client(config).await?;
+            }
         }
 
         Commands::Server { port, bind } => {

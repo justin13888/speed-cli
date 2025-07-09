@@ -6,8 +6,8 @@ use tokio::time::sleep;
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::*;
 
-use crate::http::*;
-use crate::network::*;
+use crate::speed::http::*;
+use crate::network::types::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComprehensiveTestResult {

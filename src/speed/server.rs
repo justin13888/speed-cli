@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-use crate::network::*;
+use crate::network::types::*;
 
 #[derive(Debug)]
 pub struct ServerConfig {

@@ -3,7 +3,7 @@ use std::fs::File;
 use std::path::Path;
 use thiserror::Error;
 
-use crate::network::TestResult;
+use crate::network::types::TestResult;
 
 #[derive(Debug, Error)]
 pub enum ExportError {
