@@ -279,7 +279,7 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<T
     let test_size = if config.adaptive_sizing {
         // Start with a small test to estimate speed, then adapt
         let optimal_size = determine_optimal_test_size(client, &config.server_url).await?;
-        debug!("Adaptive sizing enabled. Optimal test size determined: {} bytes", optimal_size);
+        println!("Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
         optimal_size
     } else {
         config.test_sizes.first().copied().unwrap_or(10 * 1024 * 1024) // 10MB default
@@ -431,12 +431,14 @@ async fn determine_optimal_test_size(client: &Client, base_url: &str) -> Result<
             // Aim for tests that take 5-10 seconds per chunk
             let target_duration = 7.0; // seconds
             let optimal_size = ((mbps * 1_000_000.0 / 8.0) * target_duration) as usize;
-            
+            debug!("Estimated speed: {:.2} Mbps, Optimal size: {} bytes", mbps, optimal_size);
+
             // Clamp between 1MB and 100MB
             Ok(optimal_size.clamp(1024 * 1024, 100 * 1024 * 1024))
         }
         Err(_) => {
             // Fallback to default size
+            debug!("Failed to determine optimal test size, using default 10MB");
             Ok(10 * 1024 * 1024) // 10MB
         }
     }
