@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use colored::*;
 use std::collections::HashMap;
-use rand::{prelude::*, rng};
+
 use std::sync::LazyLock;
 
 // TODO: Clean up this code vv
@@ -80,7 +80,7 @@ async fn handle_request(
     let query = req.uri().query().unwrap_or("");
     
     println!("{} {} {}", method.as_str().yellow(), path.cyan(), 
-             if !query.is_empty() { format!("?{}", query) } else { String::new() });
+             if !query.is_empty() { format!("?{query}") } else { String::new() });
     
     let response = match (method.as_str(), path) {
         ("GET", "/download") => handle_download(req, config.clone()).await,
@@ -131,24 +131,22 @@ async fn handle_download(
             }
             data
         }
+    } else if size <= PATTERN_BUFFER_1MB.len() {
+        // Use pre-computed pattern buffer
+        PATTERN_BUFFER_1MB[..size].to_vec()
     } else {
-        if size <= PATTERN_BUFFER_1MB.len() {
-            // Use pre-computed pattern buffer
-            PATTERN_BUFFER_1MB[..size].to_vec()
-        } else {
-            // Generate larger pattern data by repeating the 1MB buffer
-            let mut data = Vec::with_capacity(size);
-            let full_chunks = size / PATTERN_BUFFER_1MB.len();
-            let remainder = size % PATTERN_BUFFER_1MB.len();
-            
-            for _ in 0..full_chunks {
-                data.extend_from_slice(&PATTERN_BUFFER_1MB);
-            }
-            if remainder > 0 {
-                data.extend_from_slice(&PATTERN_BUFFER_1MB[..remainder]);
-            }
-            data
+        // Generate larger pattern data by repeating the 1MB buffer
+        let mut data = Vec::with_capacity(size);
+        let full_chunks = size / PATTERN_BUFFER_1MB.len();
+        let remainder = size % PATTERN_BUFFER_1MB.len();
+        
+        for _ in 0..full_chunks {
+            data.extend_from_slice(&PATTERN_BUFFER_1MB);
         }
+        if remainder > 0 {
+            data.extend_from_slice(&PATTERN_BUFFER_1MB[..remainder]);
+        }
+        data
     };
     
     println!("Sending {} of test data", crate::network::format_bytes(size as u64).yellow());
