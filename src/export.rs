@@ -25,7 +25,7 @@ impl std::fmt::Display for ExportError {
 pub async fn export_results(results: &[TestResult], filename: &str) -> Result<(), ExportError> {
     let path = Path::new(filename);
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-    
+
     match extension.to_lowercase().as_str() {
         "json" => export_json(results, filename).await,
         "csv" => export_csv(results, filename).await,
@@ -46,17 +46,17 @@ async fn export_json(results: &[TestResult], filename: &str) -> Result<(), Expor
 async fn export_csv(results: &[TestResult], filename: &str) -> Result<(), ExportError> {
     let file = File::create(filename)?;
     let mut writer = Writer::from_writer(file);
-    
+
     // Write header
     writer.write_record([
         "timestamp",
-        "bytes_transferred", 
+        "bytes_transferred",
         "duration_seconds",
         "bandwidth_mbps",
         "jitter_ms",
-        "packet_loss_percent"
+        "packet_loss_percent",
     ])?;
-    
+
     // Write data
     for result in results {
         writer.write_record(&[
@@ -68,7 +68,7 @@ async fn export_csv(results: &[TestResult], filename: &str) -> Result<(), Export
             result.packet_loss.map_or("".to_string(), |p| p.to_string()),
         ])?;
     }
-    
+
     writer.flush()?;
     Ok(())
 }

@@ -1,6 +1,6 @@
+use humansize::{BINARY, format_size};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use humansize::{format_size, BINARY};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
@@ -15,7 +15,7 @@ pub struct TestResult {
 impl TestResult {
     pub fn new(bytes: u64, duration: Duration) -> Self {
         let bandwidth_mbps = (bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
-        
+
         Self {
             bytes_transferred: bytes,
             duration,
@@ -25,12 +25,12 @@ impl TestResult {
             timestamp: chrono::Utc::now(),
         }
     }
-    
+
     pub fn with_jitter(mut self, jitter_ms: f64) -> Self {
         self.jitter_ms = Some(jitter_ms);
         self
     }
-    
+
     pub fn with_packet_loss(mut self, loss_percent: f64) -> Self {
         self.packet_loss = Some(loss_percent);
         self

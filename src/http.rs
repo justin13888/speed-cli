@@ -229,7 +229,7 @@ async fn measure_http_latency(
                 });
 
                 print!(".");
-                if (i + 1) % 10 == 0 {
+                if (i + 1).is_multiple_of(10) {
                     println!(" {}/{}", i + 1, count);
                 }
 
@@ -237,7 +237,7 @@ async fn measure_http_latency(
                 sleep(Duration::from_millis(100)).await;
             }
             Err(e) => {
-                eprintln!("Latency measurement failed: {}", e);
+                eprintln!("Latency measurement failed: {e}");
                 continue;
             }
         }
@@ -292,7 +292,7 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<T
             config.parallel_connections,
         )
         .await?;
-        debug!(            "Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
+        debug!("Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
         vec![optimal_size]
     } else if !config.test_sizes.is_empty() {
         config.test_sizes.clone()
@@ -507,7 +507,7 @@ async fn determine_optimal_download_test_size(
             } else {
                 base_optimal_size
             };
-            
+
             // Clamp between 512KB and 100MB
             Ok(optimal_size.clamp(512 * 1024, 100 * 1024 * 1024))
         }
@@ -635,9 +635,9 @@ fn print_http_results(result: &HttpTestResult) {
     }
 
     if let Some(latency) = result.latency_ms {
-        println!("Average Latency: {:.2} ms", latency);
+        println!("Average Latency: {latency:.2} ms");
         if let Some(jitter) = result.jitter_ms {
-            println!("Jitter: {:.2} ms", jitter);
+            println!("Jitter: {jitter:.2} ms");
         }
     }
 

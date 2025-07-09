@@ -1,13 +1,13 @@
-use eyre::Result;
-use tokio::net::{TcpListener, UdpSocket};
-use tokio::io::AsyncReadExt;
-use tokio::time::Duration;
-use std::time::Instant;
 use colored::*;
+use eyre::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::Mutex;
+use tokio::time::Duration;
 
 use crate::network::*;
 
@@ -19,13 +19,13 @@ pub struct ServerConfig {
 
 pub async fn run_server(config: ServerConfig) -> Result<()> {
     let addr = format!("{}:{}", config.bind_addr, config.port);
-    
+
     println!("Server listening on {}...", addr.cyan());
-    
+
     // Start both TCP and UDP servers concurrently
     let tcp_handle = tokio::spawn(run_tcp_server(addr.clone()));
     let udp_handle = tokio::spawn(run_udp_server(addr));
-    
+
     // Wait for either to complete (they should run indefinitely)
     tokio::select! {
         result = tcp_handle => {
@@ -39,34 +39,34 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
 
 async fn run_tcp_server(addr: String) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     println!("{}", "TCP server ready to accept connections...".green());
-    
+
     let connection_id = Arc::new(AtomicU64::new(0));
-    
+
     loop {
         let (mut socket, addr) = listener.accept().await?;
         println!("New TCP connection from {}", addr.to_string().cyan());
-        
+
         let connection_id = connection_id.fetch_add(1, Ordering::Relaxed);
         let handler = Arc::new(OptimizedTcpHandler::new(connection_id as usize));
-        
+
         tokio::spawn({
             let handler = handler.clone();
             async move {
                 let mut buffer = vec![0u8; 8192];
-                
+
                 loop {
                     match socket.read(&mut buffer).await {
                         Ok(0) => {
                             // Connection closed
                             let (total_bytes, duration, bandwidth_mbps) = handler.get_stats();
-                            
+
                             println!(
                                 "TCP connection from {} closed. {} received in {:.2}s ({})",
                                 addr,
@@ -78,11 +78,11 @@ async fn run_tcp_server(addr: String) -> Result<()> {
                         }
                         Ok(n) => {
                             handler.add_bytes(n as u64);
-                            
+
                             // Report progress if necessary
                             if handler.should_report() {
                                 let (total_bytes, _, bandwidth_mbps) = handler.get_stats();
-                                
+
                                 println!(
                                     "TCP {}: {} received, {} bandwidth",
                                     addr,
@@ -105,16 +105,17 @@ async fn run_tcp_server(addr: String) -> Result<()> {
 async fn run_udp_server(addr: String) -> Result<()> {
     let socket = UdpSocket::bind(&addr).await?;
     println!("{}", "UDP server ready to receive packets...".green());
-    
-    let clients: Arc<Mutex<HashMap<std::net::SocketAddr, UdpClientState>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    let clients: Arc<Mutex<HashMap<std::net::SocketAddr, UdpClientState>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let mut buffer = vec![0u8; 2048];
-    
+
     loop {
         match socket.recv_from(&mut buffer).await {
             Ok((size, client_addr)) => {
                 let clients = clients.clone();
                 let data = buffer[..size].to_vec();
-                
+
                 tokio::spawn(async move {
                     handle_udp_packet(clients, client_addr, data).await;
                 });
@@ -156,19 +157,24 @@ async fn handle_udp_packet(
     data: Vec<u8>,
 ) {
     let mut clients_map = clients.lock().await;
-    let client_state = clients_map.entry(client_addr).or_insert_with(UdpClientState::new);
-    
+    let client_state = clients_map
+        .entry(client_addr)
+        .or_insert_with(UdpClientState::new);
+
     // Check if this is a termination packet
     if data.len() >= 8 && data[0] == 0xFF && data[1] == 0xFF && data[2] == 0xFF && data[3] == 0xFF {
         let total_packets_sent = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let duration = client_state.start_time.elapsed();
-        let bandwidth_mbps = (client_state.total_bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
+        let bandwidth_mbps =
+            (client_state.total_bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
         let packet_loss = if total_packets_sent > 0 {
-            ((total_packets_sent - client_state.packets_received) as f64 / total_packets_sent as f64) * 100.0
+            ((total_packets_sent - client_state.packets_received) as f64
+                / total_packets_sent as f64)
+                * 100.0
         } else {
             0.0
         };
-        
+
         println!(
             "UDP session from {} completed: {} packets received/{} sent, {} received in {:.2}s ({}), {:.2}% packet loss",
             client_addr.to_string().cyan(),
@@ -179,25 +185,26 @@ async fn handle_udp_packet(
             format_bandwidth(bandwidth_mbps).green(),
             packet_loss
         );
-        
+
         clients_map.remove(&client_addr);
         return;
     }
-    
+
     // Regular data packet
     if data.len() >= 4 {
         let sequence = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         client_state.last_sequence = sequence;
         client_state.packets_received += 1;
     }
-    
+
     client_state.total_bytes += data.len() as u64;
-    
+
     // Report progress every 5 seconds
     if client_state.last_report.elapsed() >= Duration::from_secs(5) {
         let elapsed = client_state.start_time.elapsed();
-        let current_mbps = (client_state.total_bytes as f64 * 8.0) / (elapsed.as_secs_f64() * 1_000_000.0);
-        
+        let current_mbps =
+            (client_state.total_bytes as f64 * 8.0) / (elapsed.as_secs_f64() * 1_000_000.0);
+
         println!(
             "UDP {}: {} packets, {} received, {} bandwidth",
             client_addr,
@@ -205,7 +212,7 @@ async fn handle_udp_packet(
             format_bytes(client_state.total_bytes).yellow(),
             format_bandwidth(current_mbps).green()
         );
-        
+
         client_state.last_report = Instant::now();
     }
 }
@@ -229,11 +236,11 @@ impl OptimizedTcpHandler {
             connection_id,
         }
     }
-    
+
     fn add_bytes(&self, bytes: u64) {
         self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
-    
+
     fn should_report(&self) -> bool {
         let mut last_report = self.last_report.lock().unwrap();
         if last_report.elapsed() >= Duration::from_secs(5) {
@@ -243,7 +250,7 @@ impl OptimizedTcpHandler {
             false
         }
     }
-    
+
     fn get_stats(&self) -> (u64, Duration, f64) {
         let bytes = self.total_bytes.load(Ordering::Relaxed);
         let duration = self.start_time.elapsed();
