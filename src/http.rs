@@ -23,18 +23,22 @@ pub struct HttpTestConfig {
     pub export_file: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
 pub enum HttpTestType {
     Download,
     Upload,
     Bidirectional,
     LatencyOnly,
-    Comprehensive, // All tests
+    Comprehensive,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
 pub enum HttpVersion {
-    Http11,
+    Http1,
     Http2,
     Auto,
 }
@@ -184,7 +188,7 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         .use_rustls_tls();
 
     match version {
-        HttpVersion::Http11 => {
+        HttpVersion::Http1 => {
             builder = builder.http1_only();
         }
         HttpVersion::Http2 => {
@@ -651,4 +655,28 @@ fn print_http_results(result: &HttpTestResult) {
     }
 
     println!();
+}
+
+use std::fmt;
+
+impl fmt::Display for HttpTestType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HttpTestType::Download => write!(f, "download"),
+            HttpTestType::Upload => write!(f, "upload"),
+            HttpTestType::Bidirectional => write!(f, "bidirectional"),
+            HttpTestType::LatencyOnly => write!(f, "latency-only"),
+            HttpTestType::Comprehensive => write!(f, "comprehensive"),
+        }
+    }
+}
+
+impl fmt::Display for HttpVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HttpVersion::Http1 => write!(f, "http1"),
+            HttpVersion::Http2 => write!(f, "http2"),
+            HttpVersion::Auto => write!(f, "auto"),
+        }
+    }
 }

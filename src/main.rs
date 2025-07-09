@@ -89,11 +89,11 @@ enum Commands {
 
         /// HTTP version (http1, http2, auto)
         #[arg(long, default_value = "auto")]
-        version: String,
+        version: HttpVersion,
 
         /// Test type (download, upload, bidirectional, latency, comprehensive)
-        #[arg(long, default_value = "comprehensive")]
-        test_type: String,
+        #[arg(long = "type", default_value = "comprehensive")]
+        test_type: HttpTestType,
 
         /// Export results to file (json or csv)
         #[arg(short, long)]
@@ -216,34 +216,12 @@ async fn main() -> Result<()> {
         } => {
             println!("{}", "Starting HTTP speed test...".green().bold());
 
-            let http_version = match version.as_str() {
-                "http1" => HttpVersion::Http11,
-                "http2" => HttpVersion::Http2,
-                "auto" => HttpVersion::Auto,
-                _ => {
-                    eprintln!("Invalid HTTP version: {version}. Using auto.");
-                    HttpVersion::Auto
-                }
-            };
-
-            let test_type_enum = match test_type.as_str() {
-                "download" => HttpTestType::Download,
-                "upload" => HttpTestType::Upload,
-                "bidirectional" => HttpTestType::Bidirectional,
-                "latency" => HttpTestType::LatencyOnly,
-                "comprehensive" => HttpTestType::Comprehensive,
-                _ => {
-                    eprintln!("Invalid test type: {test_type}. Using comprehensive.");
-                    HttpTestType::Comprehensive
-                }
-            };
-
             let config = HttpTestConfig {
                 server_url: url,
                 duration: time,
                 parallel_connections: parallel,
-                test_type: test_type_enum,
-                http_version,
+                test_type,
+                http_version: version,
                 test_sizes: vec![1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024], // 1MB, 10MB, 100MB
                 adaptive_sizing: adaptive,
                 export_file: export,

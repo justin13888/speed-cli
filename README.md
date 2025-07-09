@@ -115,13 +115,16 @@ speed-cli http-server -p 9090 -b 0.0.0.0 --max-upload-mb 500
 speed-cli http --url http://localhost:8080
 
 # Download test only with HTTP/2
-speed-cli http --url http://localhost:8080 --test-type download --version http2
+speed-cli http --url http://localhost:8080 --type download --version http2
 
 # Upload test with multiple parallel connections
-speed-cli http --url http://localhost:8080 --test-type upload --parallel 8
+speed-cli http --url http://localhost:8080 --type upload --parallel 8
 
 # Bidirectional test with adaptive sizing
-speed-cli http --url http://localhost:8080 --test-type bidirectional --adaptive
+speed-cli http --url http://localhost:8080 --type bidirectional --adaptive
+
+# Latency-only test for minimum overhead
+speed-cli http --url http://localhost:8080 --type latency-only
 
 # Export HTTP results
 speed-cli http --url http://localhost:8080 --export http_results.json
