@@ -226,9 +226,6 @@ async fn main() -> Result<()> {
                 test_type: test_type_enum,
                 http_version,
                 test_sizes: vec![1024*1024, 10*1024*1024, 100*1024*1024], // 1MB, 10MB, 100MB
-                include_latency: true,
-                include_upload: true,
-                include_download: true,
                 adaptive_sizing: adaptive,
                 export_file: export,
             };

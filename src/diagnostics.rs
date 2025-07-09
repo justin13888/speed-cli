@@ -157,9 +157,6 @@ pub async fn run_comprehensive_test(config: ComprehensiveTestConfig) -> Result<C
         test_type: HttpTestType::Comprehensive,
         http_version: HttpVersion::Auto,
         test_sizes: vec![1024*1024, 10*1024*1024, 50*1024*1024], // 1MB, 10MB, 50MB
-        include_latency: true,
-        include_upload: true,
-        include_download: true,
         adaptive_sizing: true,
         export_file: None,
     };
@@ -298,7 +295,7 @@ async fn test_connection_quality(server_url: &str) -> Result<ConnectionQualityRe
     
     // Perform multiple latency measurements for jitter calculation
     let mut latencies = Vec::new();
-    let num_tests = 20;
+    let num_tests = 20usize;
     
     for i in 0..num_tests {
         if let Ok(client) = reqwest::Client::new().get(format!("{server_url}/latency")).build() {
@@ -309,7 +306,7 @@ async fn test_connection_quality(server_url: &str) -> Result<ConnectionQualityRe
             }
         }
         
-        if (i as usize).is_multiple_of(5) {
+        if i.is_multiple_of(5) {
             print!(".");
         }
         sleep(Duration::from_millis(100)).await;

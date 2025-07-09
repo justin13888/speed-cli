@@ -6,8 +6,6 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use colored::*;
 use futures::stream::StreamExt;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use rand::{prelude::*, rng};
 use url::Url;
 
@@ -21,9 +19,6 @@ pub struct HttpTestConfig {
     pub test_type: HttpTestType,
     pub http_version: HttpVersion,
     pub test_sizes: Vec<usize>, // Test with different payload sizes
-    pub include_latency: bool,
-    pub include_upload: bool,
-    pub include_download: bool,
     pub adaptive_sizing: bool,
     pub export_file: Option<String>,
 }
@@ -107,9 +102,10 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<HttpTestResult> {
     let dns_start = Instant::now();
     let url = Url::parse(&config.server_url)?;
     let host = url.host_str().unwrap_or("localhost");
+    let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
     
     // Simple DNS resolution timing (basic implementation)
-    let _ = tokio::net::lookup_host(format!("{}:80", host)).await?;
+    let _ = tokio::net::lookup_host(format!("{host}:{port}")).await?;
     result.dns_resolution_ms = dns_start.elapsed().as_secs_f64() * 1000.0;
 
     match config.test_type {
@@ -272,55 +268,76 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<T
     println!("Starting download test with {} parallel connections...", config.parallel_connections);
     
     let start_time = Instant::now();
-    let total_bytes = Arc::new(Mutex::new(0u64));
     let test_duration = Duration::from_secs(config.duration);
     
     // Determine test file size based on configuration
-    let test_size = if config.adaptive_sizing {
+    let test_sizes = if config.adaptive_sizing {
         // Start with a small test to estimate speed, then adapt
+<<<<<<< HEAD
         let optimal_size = determine_optimal_test_size(client, &config.server_url).await?;
         println!("Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
         optimal_size
+=======
+        let optimal_size = determine_optimal_download_test_size(client, &config.server_url, config.parallel_connections).await?;
+        debug!("Adaptive sizing enabled. Optimal test size determined: {} bytes", optimal_size);
+        vec![optimal_size]
+    } else if !config.test_sizes.is_empty() {
+        config.test_sizes.clone()
+>>>>>>> cc299891d64d8a4b8922686d0cb75a612f060c5a
     } else {
-        config.test_sizes.first().copied().unwrap_or(10 * 1024 * 1024) // 10MB default
+        vec![10 * 1024 * 1024] // 10MB default
     };
     
-    let mut tasks = Vec::new();
+    let mut total_downloaded = 0u64;
+    let test_start = start_time;
     
-    for i in 0..config.parallel_connections {
-        let client = client.clone();
-        let url = format!("{}/download?size={}&id={}", config.server_url, test_size, i);
-        let total_bytes = total_bytes.clone();
+    // Run tests for each configured size (typically just one unless specifically configured)
+    for (size_index, test_size) in test_sizes.iter().enumerate() {
+        let remaining_duration = test_duration.saturating_sub(test_start.elapsed());
+        if remaining_duration.is_zero() {
+            break; // No time left for more test sizes
+        }
         
-        let task = tokio::spawn(async move {
-            let mut connection_bytes = 0u64;
-            let connection_start = Instant::now();
+        let size_duration = if test_sizes.len() == 1 {
+            remaining_duration
+        } else {
+            // Divide remaining time among remaining test sizes
+            remaining_duration / (test_sizes.len() - size_index) as u32
+        };
+        
+        let mut tasks = Vec::new();
+        
+        for i in 0..config.parallel_connections {
+            let client = client.clone();
+            let url = format!("{}/download?size={}&id={}", config.server_url, test_size, i);
             
-            while connection_start.elapsed() < test_duration {
-                match download_chunk(&client, &url).await {
-                    Ok(bytes) => {
-                        connection_bytes += bytes;
-                        let mut total = total_bytes.lock().await;
-                        *total += bytes;
-                    }
-                    Err(e) => {
-                        eprintln!("Download error on connection {}: {}", i, e);
-                        break;
+            let task = tokio::spawn(async move {
+                let mut connection_bytes = 0u64;
+                let connection_start = Instant::now();
+                
+                while connection_start.elapsed() < size_duration {
+                    match download_chunk(&client, &url).await {
+                        Ok(bytes) => {
+                            connection_bytes += bytes;
+                        }
+                        Err(e) => {
+                            eprintln!("Download error on connection {i}: {e}");
+                            break;
+                        }
                     }
                 }
-            }
+                
+                connection_bytes
+            });
             
-            connection_bytes
-        });
+            tasks.push(task);
+        }
         
-        tasks.push(task);
-    }
-    
-    // Wait for all tasks to complete
-    let mut total_downloaded = 0u64;
-    for task in tasks {
-        if let Ok(bytes) = task.await {
-            total_downloaded += bytes;
+        // Wait for all tasks to complete for this test size
+        for task in tasks {
+            if let Ok(bytes) = task.await {
+                total_downloaded += bytes;
+            }
         }
     }
     
@@ -333,7 +350,6 @@ async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<Tes
     println!("Starting upload test with {} parallel connections...", config.parallel_connections);
     
     let start_time = Instant::now();
-    let total_bytes = Arc::new(Mutex::new(0u64));
     let test_duration = Duration::from_secs(config.duration);
     
     // Generate random data for upload
@@ -348,7 +364,6 @@ async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<Tes
         let client = client.clone();
         let url = format!("{}/upload?id={}", config.server_url, i);
         let data = upload_data.clone();
-        let total_bytes = total_bytes.clone();
         
         let task = tokio::spawn(async move {
             let mut connection_bytes = 0u64;
@@ -358,11 +373,9 @@ async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<Tes
                 match upload_chunk(&client, &url, &data).await {
                     Ok(bytes) => {
                         connection_bytes += bytes;
-                        let mut total = total_bytes.lock().await;
-                        *total += bytes;
                     }
                     Err(e) => {
-                        eprintln!("Upload error on connection {}: {}", i, e);
+                        eprintln!("Upload error on connection {i}: {e}");
                         break;
                     }
                 }
@@ -416,7 +429,8 @@ async fn upload_chunk(client: &Client, url: &str, data: &[u8]) -> Result<u64> {
     }
 }
 
-async fn determine_optimal_test_size(client: &Client, base_url: &str) -> Result<usize> {
+/// Determines the optimal download test size based on current connection download throughput.
+async fn determine_optimal_download_test_size(client: &Client, base_url: &str, parallel_connections: usize) -> Result<usize> {
     // Start with a small test to estimate connection speed
     let small_test_size = 1024 * 1024; // 1MB
     let url = format!("{base_url}/download?size={small_test_size}&test=true");
@@ -427,19 +441,30 @@ async fn determine_optimal_test_size(client: &Client, base_url: &str) -> Result<
             let duration = start.elapsed();
             let mbps = (bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
             
-            // Scale test size based on estimated speed
-            // Aim for tests that take 5-10 seconds per chunk
+            // Scale test size based on estimated speed and parallel connections
+            // Aim for tests that take 5-10 seconds per chunk, divided by number of connections
             let target_duration = 7.0; // seconds
-            let optimal_size = ((mbps * 1_000_000.0 / 8.0) * target_duration) as usize;
-            debug!("Estimated speed: {:.2} Mbps, Optimal size: {} bytes", mbps, optimal_size);
-
-            // Clamp between 1MB and 100MB
-            Ok(optimal_size.clamp(1024 * 1024, 100 * 1024 * 1024))
+            let base_optimal_size = ((mbps * 1_000_000.0 / 8.0) * target_duration) as usize;
+            
+            // Adjust for parallel connections - each connection should handle a reasonable chunk
+            let optimal_size = if parallel_connections > 1 {
+                (base_optimal_size / parallel_connections).max(512 * 1024) // At least 512KB per connection
+            } else {
+                base_optimal_size
+            };
+            debug!("Estimated download speed: {:.2} Mbps, Optimal test size: {} bytes", mbps, optimal_size);
+            
+            // Clamp between 512KB and 100MB
+            Ok(optimal_size.clamp(512 * 1024, 100 * 1024 * 1024))
         }
         Err(_) => {
-            // Fallback to default size
-            debug!("Failed to determine optimal test size, using default 10MB");
-            Ok(10 * 1024 * 1024) // 10MB
+            // Fallback to default size adjusted for parallel connections
+            let default_size = 10 * 1024 * 1024; // 10MB
+            Ok(if parallel_connections > 1 {
+                (default_size / parallel_connections).max(1024 * 1024) // At least 1MB per connection
+            } else {
+                default_size
+            })
         }
     }
 }
