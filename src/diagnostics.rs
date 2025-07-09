@@ -1,4 +1,4 @@
-use anyhow::Result;
+use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -497,7 +497,7 @@ async fn export_comprehensive_results(result: &ComprehensiveTestResult, path: &s
         tokio::fs::write(path, json_data).await?;
         println!("Comprehensive results exported to {}", path.green());
     } else {
-        return Err(anyhow::anyhow!("Only JSON export is supported for comprehensive results"));
+        return Err(eyre::anyhow!("Only JSON export is supported for comprehensive results"));
     }
     
     Ok(())

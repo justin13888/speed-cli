@@ -1,4 +1,4 @@
-use anyhow::Result;
+use eyre::Result;
 use tokio::net::TcpStream;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{sleep, Duration};

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use anyhow::Result;
 use colored::*;
+use eyre::Result;
 
 mod network;
 mod client;
@@ -16,6 +16,7 @@ use server::*;
 use http::*;
 use http_server::*;
 use diagnostics::*;
+use tracing::debug;
 
 #[derive(Parser)]
 #[command(name = "speed-cli")]
@@ -184,7 +185,7 @@ async fn main() -> Result<()> {
                 "http2" => HttpVersion::Http2,
                 "auto" => HttpVersion::Auto,
                 _ => {
-                    eprintln!("Invalid HTTP version: {}. Using auto.", version);
+                    eprintln!("Invalid HTTP version: {version}. Using auto.");
                     HttpVersion::Auto
                 }
             };
@@ -196,7 +197,7 @@ async fn main() -> Result<()> {
                 "latency" => HttpTestType::LatencyOnly,
                 "comprehensive" => HttpTestType::Comprehensive,
                 _ => {
-                    eprintln!("Invalid test type: {}. Using comprehensive.", test_type);
+                    eprintln!("Invalid test type: {test_type}. Using comprehensive.");
                     HttpTestType::Comprehensive
                 }
             };
@@ -214,6 +215,8 @@ async fn main() -> Result<()> {
                 adaptive_sizing: adaptive,
                 export_file: export,
             };
+
+            debug!("HTTP Test Config: {:?}", config);
             
             run_http_test(config).await?;
         },

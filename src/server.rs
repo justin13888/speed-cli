@@ -1,4 +1,4 @@
-use anyhow::Result;
+use eyre::Result;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::io::AsyncReadExt;
 use tokio::time::Duration;

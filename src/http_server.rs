@@ -1,4 +1,4 @@
-use anyhow::Result;
+use eyre::Result;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{body::Incoming as IncomingBody, Request, Response, StatusCode};

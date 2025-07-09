@@ -1,6 +1,7 @@
-use anyhow::{Result, Context};
+use eyre::{Result, Context};
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use colored::*;
@@ -277,7 +278,9 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<T
     // Determine test file size based on configuration
     let test_size = if config.adaptive_sizing {
         // Start with a small test to estimate speed, then adapt
-        determine_optimal_test_size(client, &config.server_url).await?
+        let optimal_size = determine_optimal_test_size(client, &config.server_url).await?;
+        debug!("Adaptive sizing enabled. Optimal test size determined: {} bytes", optimal_size);
+        optimal_size
     } else {
         config.test_sizes.first().copied().unwrap_or(10 * 1024 * 1024) // 10MB default
     };
@@ -409,14 +412,14 @@ async fn upload_chunk(client: &Client, url: &str, data: &[u8]) -> Result<u64> {
     if response.status().is_success() {
         Ok(data.len() as u64)
     } else {
-        anyhow::bail!("Upload failed with status: {}", response.status());
+        eyre::bail!("Upload failed with status: {}", response.status());
     }
 }
 
 async fn determine_optimal_test_size(client: &Client, base_url: &str) -> Result<usize> {
     // Start with a small test to estimate connection speed
     let small_test_size = 1024 * 1024; // 1MB
-    let url = format!("{}/download?size={}&test=true", base_url, small_test_size);
+    let url = format!("{base_url}/download?size={small_test_size}&test=true");
     
     let start = Instant::now();
     match download_chunk(client, &url).await {
@@ -430,7 +433,7 @@ async fn determine_optimal_test_size(client: &Client, base_url: &str) -> Result<
             let optimal_size = ((mbps * 1_000_000.0 / 8.0) * target_duration) as usize;
             
             // Clamp between 1MB and 100MB
-            Ok(optimal_size.max(1024 * 1024).min(100 * 1024 * 1024))
+            Ok(optimal_size.clamp(1024 * 1024, 100 * 1024 * 1024))
         }
         Err(_) => {
             // Fallback to default size

@@ -26,3 +26,6 @@ rand = "0.9"
 futures = "0.3"
 bytes = "1.5"
 urlencoding = "2.1"
+tracing = { version = "0.1.41", features = ["release_max_level_debug"] }
+eyre = "0.6.12"
+thiserror = "2.0.12"
