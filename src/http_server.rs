@@ -11,6 +11,7 @@ use std::sync::Arc;
 use colored::*;
 use std::collections::HashMap;
 use rand::{prelude::*, rng};
+use std::sync::LazyLock;
 
 // TODO: Clean up this code vv
 // TODO: Make it possible to run HTTP and TCP server side-by-side
@@ -110,20 +111,44 @@ async fn handle_download(
     let size = size.clamp(1024, 1024 * 1024 * 1024);
     
     // Generate random data or use a pattern
-    let use_random = params.get("random").map_or(false, |v| v == "true");
+    let use_random = params.get("random").is_some_and(|v| v == "true");
+    
     let data = if use_random {
-        let mut data = vec![0u8; size];
-        let mut rng = rng();
-        rng.fill_bytes(&mut data);
-        data
-    } else {
-        // Use a repeating pattern for deterministic testing
-        let pattern = b"SpeedTestData0123456789ABCDEF";
-        let mut data = Vec::with_capacity(size);
-        for i in 0..size {
-            data.push(pattern[i % pattern.len()]);
+        if size <= RANDOM_BUFFER_1MB.len() {
+            // Use pre-computed random buffer
+            RANDOM_BUFFER_1MB[..size].to_vec()
+        } else {
+            // Generate larger random data by repeating the 1MB buffer
+            let mut data = Vec::with_capacity(size);
+            let full_chunks = size / RANDOM_BUFFER_1MB.len();
+            let remainder = size % RANDOM_BUFFER_1MB.len();
+            
+            for _ in 0..full_chunks {
+                data.extend_from_slice(&RANDOM_BUFFER_1MB);
+            }
+            if remainder > 0 {
+                data.extend_from_slice(&RANDOM_BUFFER_1MB[..remainder]);
+            }
+            data
         }
-        data
+    } else {
+        if size <= PATTERN_BUFFER_1MB.len() {
+            // Use pre-computed pattern buffer
+            PATTERN_BUFFER_1MB[..size].to_vec()
+        } else {
+            // Generate larger pattern data by repeating the 1MB buffer
+            let mut data = Vec::with_capacity(size);
+            let full_chunks = size / PATTERN_BUFFER_1MB.len();
+            let remainder = size % PATTERN_BUFFER_1MB.len();
+            
+            for _ in 0..full_chunks {
+                data.extend_from_slice(&PATTERN_BUFFER_1MB);
+            }
+            if remainder > 0 {
+                data.extend_from_slice(&PATTERN_BUFFER_1MB[..remainder]);
+            }
+            data
+        }
     };
     
     println!("Sending {} of test data", crate::network::format_bytes(size as u64).yellow());
@@ -303,6 +328,23 @@ fn parse_query_params(query: &str) -> HashMap<String, String> {
     
     params
 }
+
+// Pre-generated test data buffers to avoid repeated generation
+static PATTERN_BUFFER_1MB: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let pattern = b"SpeedTestData0123456789ABCDEF";
+    let mut data = Vec::with_capacity(1024 * 1024);
+    for i in 0..(1024 * 1024) {
+        data.push(pattern[i % pattern.len()]);
+    }
+    data
+});
+
+static RANDOM_BUFFER_1MB: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let mut data = vec![0u8; 1024 * 1024];
+    use rand::RngCore;
+    rand::rng().fill_bytes(&mut data);
+    data
+});
 
 // Additional utility functions for HTTP/2 server (future enhancement)
 pub async fn run_http2_server(config: HttpServerConfig) -> Result<()> {
