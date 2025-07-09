@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use colored::*;
 use eyre::Result;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod network;
 mod client;
@@ -152,6 +153,22 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing subscriber for logging
+    let filter_layer = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .unwrap();
+    let fmt_layer = fmt::layer()
+        .pretty()
+        .with_thread_ids(true) 
+        .with_thread_names(true)
+        .with_file(true)
+        .with_line_number(true);
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
+        .init();
+
+    // Start parsing
     let cli = Cli::parse();
     
     match cli.command {

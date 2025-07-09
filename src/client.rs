@@ -150,7 +150,7 @@ async fn run_udp_client(config: ClientConfig) -> Result<()> {
     let result = TestResult::new(total_bytes, final_duration);
     
     println!("\n{}", "=== Test Results ===".bold().blue());
-    println!("Total packets sent: {}", packet_count);
+    println!("Total packets sent: {packet_count}");
     println!("Total bytes transferred: {}", format_bytes(result.bytes_transferred).yellow());
     println!("Test duration: {:.2}s", result.duration.as_secs_f64());
     println!("Average bandwidth: {}", format_bandwidth(result.bandwidth_mbps).green().bold());
