@@ -1,5 +1,7 @@
 # speed-cli
 
+> Disclaimer: Tool is under active development. Some features are to be improved in correctness and documentation. Open to contributions!
+
 A comprehensive network performance measurement tool with for TCP, UDP, and HTTP protocols.
 
 ## Why Another Network Testing Tool?
