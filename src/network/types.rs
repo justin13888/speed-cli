@@ -2,6 +2,9 @@ use humansize::{BINARY, format_size};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+// TODO: Pull this stuff out into separate modules
+
+// TODO: Overhaul this
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
     pub bytes_transferred: u64,

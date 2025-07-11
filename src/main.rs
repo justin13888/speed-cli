@@ -1,6 +1,7 @@
 use colored::*;
 use eyre::Result;
 use std::net::SocketAddr;
+use std::{fs, io};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use clap::Parser;
@@ -13,7 +14,10 @@ use tracing::debug;
 
 pub use utils::types::*;
 
+use crate::speed::http::run_http_test;
 use crate::speed::server::{run_tcp_server, run_udp_server};
+use crate::utils::export::export_results;
+use crate::utils::file::can_write;
 
 mod cli;
 mod network;
@@ -58,12 +62,41 @@ async fn main() -> Result<()> {
 
             // TODO: Do something about debug flag...
 
-            // Validate parallel is >0
-            if parallel == 0 {
-                return Err(eyre::eyre!("Parallel connections must be greater than 0"));
+            // Verify export file path is writable
+            // TODO: Validate this logic via unit tests
+            if let Some(export) = &export {
+                // Create parent directory if it doesn't exist
+                if let Some(parent) = export.parent()
+                    && !parent.exists()
+                {
+                    match fs::create_dir_all(parent) {
+                        Ok(_) => println!("Parent directory created or already exists."),
+                        Err(e) => {
+                            eprintln!("Error creating parent directory: {e}");
+                            return Err(e.into());
+                        }
+                    }
+                }
+
+                // Validate export file is writable
+                match can_write(export) {
+                    Ok(writeable) => {
+                        if writeable {
+                            println!("Export file is writable: {}", export.display());
+                        } else {
+                            return Err(eyre::eyre!(
+                                "Export file is not writable: {}",
+                                export.display()
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(eyre::eyre!("Error checking export file writability: {e}"));
+                    }
+                }
             }
 
-            // TODO: Verify export path is valid and writable (validate logic with unit tests)
+            let mut test_results = vec![];
 
             match mode {
                 ClientMode::TCP => {
@@ -71,7 +104,7 @@ async fn main() -> Result<()> {
                         server_addr: server,
                         port: port.unwrap_or(5201), // Default TCP port
                         duration: time,
-                        export_file: export,
+                        export_file: export.clone(),
                     };
                     run_tcp_client(config).await?;
                 }
@@ -81,7 +114,7 @@ async fn main() -> Result<()> {
                         port: port.unwrap_or(5201), // Default UDP port
                         duration: time,
                         target_bandwidth: 100.0, // TODO: get rid of this field
-                        export_file: export,
+                        export_file: export.clone(),
                     }; // TODO: Verify all attributes are being used
                     run_udp_client(config).await?;
                 }
@@ -96,17 +129,26 @@ async fn main() -> Result<()> {
                         http_version: speed::http::HttpVersion::HTTP1,
                         test_sizes: vec![1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024], // 1MB, 10MB, 100MB
                         adaptive_sizing: adaptive,
-                        export_file: export,
+                        export_file: export.clone(),
                     };
+
+                    run_http_test(config).await?;
                 }
                 ClientMode::HTTP2 => todo!(),
                 ClientMode::H2C => todo!(),
                 ClientMode::HTTP3 => todo!(),
             }
 
-            // debug!("HTTP Test Config: {:?}", config);
+            println!("{}", "Client test completed.".green().bold());
 
-            // run_http_test(config).await?;
+            // If export file is specified, write results
+            if let Some(export) = &export {
+                // TODO: Write test results to file as JSON or CSV
+                match export_results(&test_results, export).await {
+                    Ok(_) => println!("Results exported to {}", export.display()),
+                    Err(e) => eprintln!("Error exporting results: {e}"),
+                }
+            }
         }
 
         Commands::Server {
