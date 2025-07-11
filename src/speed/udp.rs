@@ -1,23 +1,13 @@
 use colored::*;
 use eyre::Result;
-use std::path::PathBuf;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, sleep};
 
-use crate::network::types::*;
-use crate::utils::export;
+use crate::report::{SimpleTestResult, TestReport, TestResult, UdpTestConfig};
+use crate::utils::format::{format_bandwidth, format_bytes};
 
-#[derive(Debug)]
-pub struct UdpClientConfig {
-    pub server_addr: String,
-    pub port: u16,
-    pub duration: u64,
-    pub target_bandwidth: f64,
-    pub export_file: Option<PathBuf>,
-}
-
-pub async fn run_udp_client(config: UdpClientConfig) -> Result<()> {
+pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let server_addr = format!("{}:{}", config.server_addr, config.port);
     socket.connect(&server_addr).await?;
@@ -77,7 +67,7 @@ pub async fn run_udp_client(config: UdpClientConfig) -> Result<()> {
     socket.send(&end_packet).await?;
 
     let final_duration = start_time.elapsed();
-    let result = TestResult::new(total_bytes, final_duration);
+    let result = SimpleTestResult::new(total_bytes, final_duration);
 
     println!("\n{}", "=== Test Results ===".bold().blue());
     println!("Total packets sent: {packet_count}");
@@ -91,13 +81,5 @@ pub async fn run_udp_client(config: UdpClientConfig) -> Result<()> {
         format_bandwidth(result.bandwidth_mbps).green().bold()
     );
 
-    if let Some(export_file) = config.export_file {
-        export::export_results(&[result], &export_file).await?;
-        println!(
-            "Results exported to: {}",
-            export_file.to_string_lossy().cyan()
-        );
-    }
-
-    Ok(())
+    Ok((config, result).into())
 }

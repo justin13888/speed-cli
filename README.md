@@ -48,7 +48,7 @@ It's difficult to have one tool that tests your network conditions between two d
 
 ### Export and Reporting
 
-- **Multiple formats:** JSON, CSV
+- **Multiple formats:** JSON, HTML
 - **Comprehensive results:** All metrics in single report
 - **Historical data:** Timestamp and metadata included
 - **Performance scoring:** Overall network quality assessment
@@ -88,7 +88,7 @@ speed-cli client --h2c -s <server-ip> # HTTP/2 cleartext test
 speed-cli client --http3 -s <server-ip> # HTTP/3 test
 
 # Run HTTP client test against specific server for 60 seconds
-speed-cli client --http -p 8080 -h 192.168.1.100 -t 60
+speed-cli client --http -p 8080 -h 192.168.1.100 -d 60
 
 # Run HTTP client test with 8 parallel connections, adaptive sizing, and export results to JSON
 speed-cli client --http -p 8080 -h 192.168.1.100 --parallel 8 --adaptive -e results.json
@@ -132,14 +132,14 @@ speed-cli diagnostics --url http://localhost:8080 --export full_diagnostics.json
 
 ### Exporting Results
 
-Add a `-e` or `--export` flag to `client` commands to save results in JSON or CSV format:
+Add a `-e` or `--export` flag to `client` commands to save results in JSON or HTML format:
 
 ```bash
 # Export to JSON
 speed-cli client --<mode> -s <server-ip> -e results.json
 
-# Export to CSV
-speed-cli client --<mode> -s <server-ip> -e results.csv
+# Export to HTML
+speed-cli client --<mode> -s <server-ip> -e results.html
 
 # If unknown extension, it assumes JSON
 speed-cli client --<mode> -s <server-ip> -e results.test
@@ -163,7 +163,7 @@ speed-cli client --<mode> -s <server-ip> -e results.test
 | Network Topology      | ✅         | ❌      | ❌               | ❌                     |
 | Geographic Info       | ✅         | ❌      | ✅               | ✅                     |
 | Bidirectional Testing | ✅         | ❌      | ❌               | ❌                     |
-| Export Formats        | JSON, CSV | ❌      | Limited         | Limited               |
+| Export Formats        | JSON      | ❌      | Limited         | Limited               |
 | Self-Hosted Server    | ✅         | ✅      | ❌               | ❌                     |
 | Cross-Platform        | ✅         | ✅      | ✅               | ✅                     |
 

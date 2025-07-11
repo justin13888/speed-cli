@@ -17,7 +17,7 @@ pub enum Commands {
 
         /// Test duration in seconds
         #[arg(short, long, default_value = "10")]
-        time: u64,
+        duration: u64,
 
         /// Protocol mode (tcp, udp, http)
         #[arg(short, long, default_value = "tcp", value_enum)]
@@ -54,7 +54,7 @@ pub enum Commands {
         #[clap(group = "protocol")]
         http3: bool,
 
-        /// Export results to file (json or csv)
+        /// Export results to file (JSON or HTML depending on extension)
         #[arg(short, long)]
         export: Option<PathBuf>,
 
@@ -151,7 +151,7 @@ pub enum Commands {
     // },
     /// Print previously saved results
     Report {
-        /// Path to the results file (json or csv)
+        /// Path to the results file (only JSON)
         #[arg(short, long)]
         file: PathBuf,
     },

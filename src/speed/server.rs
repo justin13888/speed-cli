@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-use crate::network::types::*;
+use crate::utils::format::{format_bandwidth, format_bytes};
 
 pub async fn run_tcp_server(addr: impl ToSocketAddrs) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;

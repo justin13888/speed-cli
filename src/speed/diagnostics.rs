@@ -7,7 +7,6 @@
 // use trust_dns_resolver::config::*;
 
 // use crate::speed::http::*;
-// use crate::network::types::*;
 
 // #[derive(Debug, Clone, Serialize, Deserialize)]
 // pub struct ComprehensiveTestResult {

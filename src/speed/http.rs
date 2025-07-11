@@ -5,26 +5,17 @@ use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, Instant},
 };
 use tokio::time::sleep;
 use tracing::debug;
 use url::Url;
 
-use crate::{TestType, network::types::*};
-
-#[derive(Debug, Clone)]
-pub struct HttpTestConfig {
-    pub server_url: String,
-    pub duration: u64,
-    pub parallel_connections: usize,
-    pub test_type: TestType,
-    pub http_version: HttpVersion,
-    pub test_sizes: Vec<usize>, // Test with different payload sizes
-    pub adaptive_sizing: bool,
-    pub export_file: Option<PathBuf>,
-}
+use crate::{
+    TestType,
+    report::{HttpTestConfig, HttpTestResult, SimpleTestResult, TestReport, TestResult},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,30 +43,10 @@ impl fmt::Display for HttpVersion {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpTestResult {
-    pub test_type: String,
-    pub http_version: String,
-    pub download_mbps: Option<f64>,
-    pub upload_mbps: Option<f64>,
-    pub latency_ms: Option<f64>,
-    pub jitter_ms: Option<f64>,
-    pub connection_time_ms: f64,
-    pub ssl_handshake_ms: Option<f64>,
-    pub dns_resolution_ms: f64,
-    pub parallel_connections: usize,
-    pub bytes_downloaded: u64,
-    pub bytes_uploaded: u64,
-    pub test_duration: Duration,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub server_url: String,
-    pub errors: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct LatencyMeasurement {
     pub rtt_ms: f64,
-    pub timestamp: Instant,
+    pub timestamp: Instant, // TODO: Are you sure to use Instant rather than a duration since start? if it's ok, should rename the field
 }
 
 #[derive(Debug)]
@@ -86,7 +57,7 @@ pub struct ConnectionMetrics {
     pub total_time: Duration,
 }
 
-pub async fn run_http_test(config: HttpTestConfig) -> Result<HttpTestResult> {
+pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     println!("Starting comprehensive HTTP speed test...");
 
     let mut result = HttpTestResult {
@@ -169,13 +140,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<HttpTestResult> {
         }
     }
 
-    // Export results if requested
-    if let Some(export_path) = &config.export_file {
-        export_http_results(&result, export_path).await?;
-    }
-
-    print_http_results(&result);
-    Ok(result)
+    Ok((config, result).into())
 }
 
 async fn create_http_client(version: &HttpVersion) -> Result<Client> {
@@ -273,7 +238,7 @@ async fn measure_http_latency(
     }))
 }
 
-async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<TestResult> {
+async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<SimpleTestResult> {
     println!(
         "Starting download test with {} parallel connections...",
         config.parallel_connections
@@ -354,10 +319,10 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<T
 
     let actual_duration = start_time.elapsed();
 
-    Ok(TestResult::new(total_downloaded, actual_duration))
+    Ok(SimpleTestResult::new(total_downloaded, actual_duration))
 }
 
-async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<TestResult> {
+async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<SimpleTestResult> {
     println!(
         "Starting upload test with {} parallel connections...",
         config.parallel_connections
@@ -447,7 +412,7 @@ async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<Tes
 
     let actual_duration = start_time.elapsed();
 
-    Ok(TestResult::new(total_uploaded, actual_duration))
+    Ok(SimpleTestResult::new(total_uploaded, actual_duration))
 }
 
 async fn download_chunk(client: &Client, url: &str) -> Result<u64> {
@@ -567,87 +532,4 @@ async fn determine_optimal_upload_test_size(
             })
         }
     }
-}
-
-async fn export_http_results(result: &HttpTestResult, path: &Path) -> Result<()> {
-    if path.ends_with(".json") {
-        let json_data = serde_json::to_string_pretty(result)?;
-        tokio::fs::write(path, json_data).await?;
-    } else if path.ends_with(".csv") {
-        // Convert to CSV format
-        let csv_content = format!(
-            "timestamp,test_type,http_version,download_mbps,upload_mbps,latency_ms,jitter_ms,dns_ms,connection_ms,parallel_connections,bytes_downloaded,bytes_uploaded,duration_s,server_url\n{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-            result.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-            result.test_type,
-            result.http_version,
-            result
-                .download_mbps
-                .map_or("".to_string(), |v| v.to_string()),
-            result.upload_mbps.map_or("".to_string(), |v| v.to_string()),
-            result.latency_ms.map_or("".to_string(), |v| v.to_string()),
-            result.jitter_ms.map_or("".to_string(), |v| v.to_string()),
-            result.dns_resolution_ms,
-            result.connection_time_ms,
-            result.parallel_connections,
-            result.bytes_downloaded,
-            result.bytes_uploaded,
-            result.test_duration.as_secs(),
-            result.server_url
-        );
-        tokio::fs::write(path, csv_content).await?;
-    }
-
-    println!("Results exported to {}", path.to_string_lossy().green());
-    Ok(())
-}
-
-fn print_http_results(result: &HttpTestResult) {
-    println!("\n{}", "HTTP Speed Test Results".green().bold());
-    println!("{}", "=".repeat(50).green());
-
-    println!("Test Type: {}", result.test_type.cyan());
-    println!("HTTP Version: {}", result.http_version.cyan());
-    println!("Server: {}", result.server_url.cyan());
-    println!(
-        "Parallel Connections: {}",
-        result.parallel_connections.to_string().yellow()
-    );
-    println!("Test Duration: {:.2}s", result.test_duration.as_secs_f64());
-
-    if let Some(download) = result.download_mbps {
-        println!(
-            "Download Speed: {}",
-            format_bandwidth(download).green().bold()
-        );
-        println!(
-            "Data Downloaded: {}",
-            format_bytes(result.bytes_downloaded).yellow()
-        );
-    }
-
-    if let Some(upload) = result.upload_mbps {
-        println!("Upload Speed: {}", format_bandwidth(upload).green().bold());
-        println!(
-            "Data Uploaded: {}",
-            format_bytes(result.bytes_uploaded).yellow()
-        );
-    }
-
-    if let Some(latency) = result.latency_ms {
-        println!("Average Latency: {latency:.2} ms");
-        if let Some(jitter) = result.jitter_ms {
-            println!("Jitter: {jitter:.2} ms");
-        }
-    }
-
-    println!("DNS Resolution: {:.2} ms", result.dns_resolution_ms);
-
-    if !result.errors.is_empty() {
-        println!("\n{}:", "Errors".red().bold());
-        for error in &result.errors {
-            println!("  • {}", error.red());
-        }
-    }
-
-    println!();
 }

@@ -1,15 +1,14 @@
-use csv::Writer;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thiserror::Error;
 
-use crate::network::types::TestResult;
+use crate::report::TestReport;
+use crate::utils::file;
 
 #[derive(Debug, Error)]
 pub enum ExportError {
     IO(#[from] std::io::Error),
     Serde(#[from] serde_json::Error),
-    Csv(#[from] csv::Error),
 }
 
 impl std::fmt::Display for ExportError {
@@ -17,58 +16,31 @@ impl std::fmt::Display for ExportError {
         match self {
             ExportError::IO(e) => write!(f, "I/O error: {e}"),
             ExportError::Serde(e) => write!(f, "Serialization error: {e}"),
-            ExportError::Csv(e) => write!(f, "CSV error: {e}"),
         }
     }
 }
 
-pub async fn export_results(results: &[TestResult], filename: &Path) -> Result<(), ExportError> {
-    let path = Path::new(filename);
-    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-
-    match extension.to_lowercase().as_str() {
-        "json" => export_json(results, filename).await,
-        "csv" => export_csv(results, filename).await,
+pub async fn export_report(reports: &[TestReport], filename: &Path) -> Result<(), ExportError> {
+    match filename.extension() {
+        Some(ext) if ext == "html" => {
+            todo!("Exporting to HTML is not yet implemented");
+        }
+        Some(ext) if ext == "json" => {
+            // JSON export
+            export_report_json(reports, filename).await
+        }
         _ => {
-            // Default to JSON if no extension or unknown extension
-            let json_filename = filename.with_extension("json");
-            export_json(results, &json_filename).await
+            println!(
+                "No known extension detected in file path. Exporting to JSON format by default."
+            );
+
+            export_report_json(reports, filename).await
         }
     }
 }
 
-async fn export_json(results: &[TestResult], filename: &Path) -> Result<(), ExportError> {
-    let json = serde_json::to_string_pretty(results)?;
+async fn export_report_json(reports: &[TestReport], filename: &Path) -> Result<(), ExportError> {
+    let json = serde_json::to_string_pretty(reports)?;
     tokio::fs::write(filename, json).await?;
-    Ok(())
-}
-
-async fn export_csv(results: &[TestResult], filename: &Path) -> Result<(), ExportError> {
-    let file = File::create(filename)?;
-    let mut writer = Writer::from_writer(file);
-
-    // Write header
-    writer.write_record([
-        "timestamp",
-        "bytes_transferred",
-        "duration_seconds",
-        "bandwidth_mbps",
-        "jitter_ms",
-        "packet_loss_percent",
-    ])?;
-
-    // Write data
-    for result in results {
-        writer.write_record(&[
-            result.timestamp.to_rfc3339(),
-            result.bytes_transferred.to_string(),
-            result.duration.as_secs_f64().to_string(),
-            result.bandwidth_mbps.to_string(),
-            result.jitter_ms.map_or("".to_string(), |j| j.to_string()),
-            result.packet_loss.map_or("".to_string(), |p| p.to_string()),
-        ])?;
-    }
-
-    writer.flush()?;
     Ok(())
 }

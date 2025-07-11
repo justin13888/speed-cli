@@ -14,6 +14,8 @@ use tokio::net::TcpListener;
 
 use std::sync::LazyLock;
 
+use crate::utils::format::format_bytes;
+
 // TODO: Clean up this code vv
 // TODO: Make it possible to run HTTP and TCP server side-by-side
 
@@ -154,10 +156,7 @@ async fn handle_download(
         data
     };
 
-    println!(
-        "Sending {} of test data",
-        crate::network::format_bytes(size as u64).yellow()
-    );
+    println!("Sending {} of test data", format_bytes(size).yellow());
 
     Response::builder()
         .status(StatusCode::OK)
@@ -188,10 +187,7 @@ async fn handle_upload(
                     .unwrap();
             }
 
-            println!(
-                "Received {} of upload data",
-                crate::network::format_bytes(size as u64).yellow()
-            );
+            println!("Received {} of upload data", format_bytes(size).yellow());
 
             // Return success response with upload statistics
             let response_data = serde_json::json!({

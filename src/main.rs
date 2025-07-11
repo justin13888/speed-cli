@@ -1,26 +1,27 @@
 use colored::*;
 use eyre::Result;
+use std::fs;
 use std::net::SocketAddr;
-use std::{fs, io};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use clap::Parser;
 use cli::{Cli, Commands};
-use speed::http::HttpTestConfig;
 use speed::http_server::{HttpServerConfig, run_http_server};
-use speed::tcp::{TcpClientConfig, run_tcp_client};
-use speed::udp::{UdpClientConfig, run_udp_client};
+use speed::tcp::run_tcp_client;
+use speed::udp::run_udp_client;
 use tracing::debug;
 
 pub use utils::types::*;
 
-use crate::speed::http::run_http_test;
+use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
+use crate::speed::http::{HttpVersion, run_http_test};
 use crate::speed::server::{run_tcp_server, run_udp_server};
-use crate::utils::export::export_results;
+use crate::utils::export::export_report;
 use crate::utils::file::can_write;
 
 mod cli;
 mod network;
+mod report;
 mod speed;
 mod utils;
 
@@ -49,7 +50,7 @@ async fn main() -> Result<()> {
         Commands::Client {
             server,
             port,
-            time,
+            duration,
             mode,
             export,
             parallel,
@@ -96,43 +97,36 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let mut test_results = vec![];
+            let mut test_reports: Vec<TestReport> = vec![];
 
             match mode {
                 ClientMode::TCP => {
-                    let config = TcpClientConfig {
-                        server_addr: server,
-                        port: port.unwrap_or(5201), // Default TCP port
-                        duration: time,
-                        export_file: export.clone(),
-                    };
-                    run_tcp_client(config).await?;
+                    let config = TcpTestConfig::new(server, port, duration);
+                    let tcp_report = run_tcp_client(config).await?;
+                    test_reports.push(tcp_report);
                 }
                 ClientMode::UDP => {
-                    let config = UdpClientConfig {
-                        server_addr: server,
-                        port: port.unwrap_or(5201), // Default UDP port
-                        duration: time,
-                        target_bandwidth: 100.0, // TODO: get rid of this field
-                        export_file: export.clone(),
-                    }; // TODO: Verify all attributes are being used
-                    run_udp_client(config).await?;
+                    let config = UdpTestConfig::new(server, port, duration);
+
+                    let udp_report = run_udp_client(config).await?;
+                    test_reports.push(udp_report);
                 }
                 ClientMode::HTTP1 => {
                     println!("{}", "Starting HTTP speed test...".green().bold());
 
-                    let config = HttpTestConfig {
-                        server_url: format!("http://{}:{}", server, port.unwrap_or(8080)), // Default HTTP port
-                        duration: time,
-                        parallel_connections: parallel,
+                    let config = HttpTestConfig::new(
+                        server,
+                        port,
+                        duration,
+                        parallel,
                         test_type,
-                        http_version: speed::http::HttpVersion::HTTP1,
-                        test_sizes: vec![1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024], // 1MB, 10MB, 100MB
-                        adaptive_sizing: adaptive,
-                        export_file: export.clone(),
-                    };
+                        HttpVersion::HTTP1,
+                        vec![1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024], // 1MB, 10MB, 100MB // TODO: Take this from configs
+                        adaptive,
+                    );
 
-                    run_http_test(config).await?;
+                    let http_report = run_http_test(config).await?;
+                    test_reports.push(http_report);
                 }
                 ClientMode::HTTP2 => todo!(),
                 ClientMode::H2C => todo!(),
@@ -140,11 +134,9 @@ async fn main() -> Result<()> {
             }
 
             println!("{}", "Client test completed.".green().bold());
-
             // If export file is specified, write results
             if let Some(export) = &export {
-                // TODO: Write test results to file as JSON or CSV
-                match export_results(&test_results, export).await {
+                match export_report(&test_reports, export).await {
                     Ok(_) => println!("Results exported to {}", export.display()),
                     Err(e) => eprintln!("Error exporting results: {e}"),
                 }
@@ -295,12 +287,15 @@ async fn main() -> Result<()> {
             if let Some(ext) = file.extension() {
                 match ext.to_string_lossy().as_ref() {
                     "json" => todo!(), // Handle JSON report
-                    "csv" => todo!(),  // Handle CSV report
-                    _ => {
+                    "html" => {
                         return Err(eyre::eyre!(
-                            "Unsupported report file extension: {}",
-                            ext.to_string_lossy()
+                            "HTML report format should be opened via a web browser: {}",
+                            file.display()
                         ));
+                    }
+                    _ => {
+                        todo!();
+                        // TODO: Give error if file fails to be parsed as JSON
                     }
                 }
             } else {

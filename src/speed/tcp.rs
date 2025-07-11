@@ -1,24 +1,16 @@
 use colored::*;
 use eyre::Result;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 
-use crate::network::types::*;
-use crate::utils::export;
+use crate::network::BandwidthMeasurement;
+use crate::report::{SimpleTestResult, TcpTestConfig, TestReport, TestResult};
+use crate::utils::format::{format_bandwidth, format_bytes};
 
-#[derive(Debug)]
-pub struct TcpClientConfig {
-    pub server_addr: String,
-    pub port: u16,
-    pub duration: u64,
-    pub export_file: Option<PathBuf>,
-}
-
-pub async fn run_tcp_client(config: TcpClientConfig) -> Result<()> {
+pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let addr = format!("{}:{}", config.server_addr, config.port);
     let mut stream = TcpStream::connect(&addr).await?;
 
@@ -60,7 +52,7 @@ pub async fn run_tcp_client(config: TcpClientConfig) -> Result<()> {
     }
 
     let final_duration = start_time.elapsed();
-    let result = TestResult::new(total_bytes, final_duration);
+    let result = SimpleTestResult::new(total_bytes, final_duration);
 
     println!("\n{}", "=== Test Results ===".bold().blue());
     println!(
@@ -73,13 +65,5 @@ pub async fn run_tcp_client(config: TcpClientConfig) -> Result<()> {
         format_bandwidth(result.bandwidth_mbps).green().bold()
     );
 
-    if let Some(export_file) = config.export_file {
-        export::export_results(&[result], &export_file).await?;
-        println!(
-            "Results exported to: {}",
-            export_file.to_string_lossy().cyan()
-        );
-    }
-
-    Ok(())
+    Ok((config, result).into())
 }

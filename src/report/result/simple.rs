@@ -1,21 +1,19 @@
-use humansize::{BINARY, format_size};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
 
-// TODO: Pull this stuff out into separate modules
-
-// TODO: Overhaul this
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestResult {
+pub struct SimpleTestResult {
     pub bytes_transferred: u64,
     pub duration: Duration,
     pub bandwidth_mbps: f64,
     pub jitter_ms: Option<f64>,
     pub packet_loss: Option<f64>,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: DateTime<Utc>,
 }
 
-impl TestResult {
+impl SimpleTestResult {
     pub fn new(bytes: u64, duration: Duration) -> Self {
         let bandwidth_mbps = (bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
 
@@ -37,32 +35,5 @@ impl TestResult {
     pub fn with_packet_loss(mut self, loss_percent: f64) -> Self {
         self.packet_loss = Some(loss_percent);
         self
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BandwidthMeasurement {
-    pub instant: Instant,
-    pub bytes: u64,
-}
-
-impl BandwidthMeasurement {
-    pub fn new(bytes: u64) -> Self {
-        Self {
-            instant: Instant::now(),
-            bytes,
-        }
-    }
-}
-
-pub fn format_bytes(bytes: u64) -> String {
-    format_size(bytes, BINARY)
-}
-
-pub fn format_bandwidth(mbps: f64) -> String {
-    if mbps >= 1000.0 {
-        format!("{:.2} Gbps", mbps / 1000.0)
-    } else {
-        format!("{mbps:.2} Mbps")
     }
 }

@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::types::*;
-
 pub struct BandwidthMonitor {
     measurements: VecDeque<BandwidthMeasurement>,
     window_size: Duration,
@@ -124,3 +122,19 @@ impl PacketLossTracker {
         self.expected_packets.saturating_sub(self.received_packets)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct BandwidthMeasurement {
+    pub instant: Instant,
+    pub bytes: u64,
+}
+
+impl BandwidthMeasurement {
+    pub fn new(bytes: u64) -> Self {
+        Self {
+            instant: Instant::now(),
+            bytes,
+        }
+    }
+}
+// TODO: Who is saving these measurements? It should be TCP/UDP tests
