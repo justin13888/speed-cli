@@ -8,6 +8,7 @@ use hyper::{Request, Response, StatusCode, body::Incoming as IncomingBody};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -18,32 +19,22 @@ use std::sync::LazyLock;
 
 #[derive(Debug, Clone)]
 pub struct HttpServerConfig {
-    pub bind_addr: String,
-    pub port: u16,
+    /// Bind address
+    pub bind_addr: SocketAddr,
+    /// Enable cors. Usually should be true.
     pub enable_cors: bool,
+    /// Max upload size in bytes
     pub max_upload_size: usize,
-    pub static_files_path: Option<String>,
-}
-
-impl Default for HttpServerConfig {
-    fn default() -> Self {
-        Self {
-            bind_addr: "0.0.0.0".to_string(),
-            port: 8080,
-            enable_cors: true,
-            max_upload_size: 100 * 1024 * 1024, // 100MB
-            static_files_path: None,
-        }
-    }
+    /// File paths for static files (if any)
+    pub static_files_path: Option<String>, // TODO: This should prob be removed
 }
 
 pub async fn run_http_server(config: HttpServerConfig) -> Result<()> {
-    let addr = format!("{}:{}", config.bind_addr, config.port);
-    let listener = TcpListener::bind(&addr).await?;
+    let listener = TcpListener::bind(&config.bind_addr).await?;
 
     println!(
         "{}",
-        format!("HTTP speed test server listening on {addr}")
+        format!("HTTP speed test server listening on {}", &config.bind_addr)
             .green()
             .bold()
     );

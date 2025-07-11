@@ -1,6 +1,7 @@
 use colored::*;
 use eyre::Result;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -14,7 +15,7 @@ pub struct TcpClientConfig {
     pub server_addr: String,
     pub port: u16,
     pub duration: u64,
-    pub export_file: Option<String>,
+    pub export_file: Option<PathBuf>,
 }
 
 pub async fn run_tcp_client(config: TcpClientConfig) -> Result<()> {
@@ -74,7 +75,10 @@ pub async fn run_tcp_client(config: TcpClientConfig) -> Result<()> {
 
     if let Some(export_file) = config.export_file {
         export::export_results(&[result], &export_file).await?;
-        println!("Results exported to: {}", export_file.cyan());
+        println!(
+            "Results exported to: {}",
+            export_file.to_string_lossy().cyan()
+        );
     }
 
     Ok(())

@@ -5,45 +5,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
+use tokio::net::ToSocketAddrs;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 use crate::network::types::*;
 
-#[derive(Debug)]
-pub struct ServerConfig {
-    pub bind_addr: String,
-    pub port: u16,
-}
-
-pub async fn run_server(config: ServerConfig) -> Result<()> {
-    let addr = format!("{}:{}", config.bind_addr, config.port);
-
-    println!("Server listening on {}...", addr.cyan());
-
-    // Start both TCP and UDP servers concurrently
-    let tcp_handle = tokio::spawn(run_tcp_server(addr.clone()));
-    let udp_handle = tokio::spawn(run_udp_server(addr));
-
-    // Wait for either to complete (they should run indefinitely)
-    tokio::select! {
-        result = tcp_handle => {
-            if let Err(e) = result? {
-                eprintln!("TCP server error: {e}");
-            }
-        }
-        result = udp_handle => {
-            if let Err(e) = result? {
-                eprintln!("UDP server error: {e}");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn run_tcp_server(addr: String) -> Result<()> {
+pub async fn run_tcp_server(addr: impl ToSocketAddrs) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     println!("{}", "TCP server ready to accept connections...".green());
 
@@ -102,7 +71,7 @@ async fn run_tcp_server(addr: String) -> Result<()> {
     }
 }
 
-async fn run_udp_server(addr: String) -> Result<()> {
+pub async fn run_udp_server(addr: impl ToSocketAddrs) -> Result<()> {
     let socket = UdpSocket::bind(&addr).await?;
     println!("{}", "UDP server ready to receive packets...".green());
 

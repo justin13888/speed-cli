@@ -1,6 +1,6 @@
 use csv::Writer;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::network::types::TestResult;
@@ -22,7 +22,7 @@ impl std::fmt::Display for ExportError {
     }
 }
 
-pub async fn export_results(results: &[TestResult], filename: &str) -> Result<(), ExportError> {
+pub async fn export_results(results: &[TestResult], filename: &Path) -> Result<(), ExportError> {
     let path = Path::new(filename);
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
@@ -31,19 +31,19 @@ pub async fn export_results(results: &[TestResult], filename: &str) -> Result<()
         "csv" => export_csv(results, filename).await,
         _ => {
             // Default to JSON if no extension or unknown extension
-            let json_filename = format!("{filename}.json");
+            let json_filename = filename.with_extension("json");
             export_json(results, &json_filename).await
         }
     }
 }
 
-async fn export_json(results: &[TestResult], filename: &str) -> Result<(), ExportError> {
+async fn export_json(results: &[TestResult], filename: &Path) -> Result<(), ExportError> {
     let json = serde_json::to_string_pretty(results)?;
     tokio::fs::write(filename, json).await?;
     Ok(())
 }
 
-async fn export_csv(results: &[TestResult], filename: &str) -> Result<(), ExportError> {
+async fn export_csv(results: &[TestResult], filename: &Path) -> Result<(), ExportError> {
     let file = File::create(filename)?;
     let mut writer = Writer::from_writer(file);
 

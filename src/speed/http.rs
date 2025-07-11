@@ -4,43 +4,52 @@ use futures::stream::StreamExt;
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 use tokio::time::sleep;
 use tracing::debug;
 use url::Url;
 
-use crate::network::types::*;
+use crate::{TestType, network::types::*};
 
 #[derive(Debug, Clone)]
 pub struct HttpTestConfig {
     pub server_url: String,
     pub duration: u64,
     pub parallel_connections: usize,
-    pub test_type: HttpTestType,
+    pub test_type: TestType,
     pub http_version: HttpVersion,
     pub test_sizes: Vec<usize>, // Test with different payload sizes
     pub adaptive_sizing: bool,
-    pub export_file: Option<String>,
+    pub export_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-#[clap(rename_all = "kebab-case")]
-pub enum HttpTestType {
-    Download,
-    Upload,
-    Bidirectional,
-    LatencyOnly,
-    Comprehensive,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-#[clap(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum HttpVersion {
-    Http1,
-    Http2,
-    Auto,
+    /// HTTP/1.1 without TLS
+    HTTP1,
+    /// HTTP/2 Cleartext (h2c)
+    H2C,
+    /// HTTP/2 with TLS
+    HTTP2,
+    /// HTTP/3 (QUIC)
+    HTTP3,
+}
+
+use std::fmt;
+
+impl fmt::Display for HttpVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HttpVersion::HTTP1 => write!(f, "HTTP/1.1"),
+            HttpVersion::H2C => write!(f, "HTTP/2 Cleartext (h2c)"),
+            HttpVersion::HTTP2 => write!(f, "HTTP/2 with TLS"),
+            HttpVersion::HTTP3 => write!(f, "HTTP/3 (QUIC)"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,23 +124,33 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<HttpTestResult> {
     result.dns_resolution_ms = dns_start.elapsed().as_secs_f64() * 1000.0;
 
     match config.test_type {
-        HttpTestType::LatencyOnly => {
+        TestType::LatencyOnly => {
             if let Some(latency) = measure_http_latency(&client, &config.server_url, 10).await? {
                 result.latency_ms = Some(latency.avg_rtt);
                 result.jitter_ms = Some(latency.jitter);
             }
         }
-        HttpTestType::Download => {
+        TestType::Download => {
             let download_result = run_download_test(&client, &config).await?;
             result.download_mbps = Some(download_result.bandwidth_mbps);
             result.bytes_downloaded = download_result.bytes_transferred;
         }
-        HttpTestType::Upload => {
+        TestType::Upload => {
             let upload_result = run_upload_test(&client, &config).await?;
             result.upload_mbps = Some(upload_result.bandwidth_mbps);
             result.bytes_uploaded = upload_result.bytes_transferred;
         }
-        HttpTestType::Bidirectional => {
+        TestType::Bidirectional => {
+            // Run download and upload sequentially
+            let download_result = run_download_test(&client, &config).await?;
+            result.download_mbps = Some(download_result.bandwidth_mbps);
+            result.bytes_downloaded = download_result.bytes_transferred;
+
+            let upload_result = run_upload_test(&client, &config).await?;
+            result.upload_mbps = Some(upload_result.bandwidth_mbps);
+            result.bytes_uploaded = upload_result.bytes_transferred;
+        }
+        TestType::Simultaneous => {
             // Run download and upload concurrently
             let (download_result, upload_result) = tokio::join!(
                 run_download_test(&client, &config),
@@ -146,26 +165,6 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<HttpTestResult> {
             if let Ok(ul) = upload_result {
                 result.upload_mbps = Some(ul.bandwidth_mbps);
                 result.bytes_uploaded = ul.bytes_transferred;
-            }
-        }
-        HttpTestType::Comprehensive => {
-            // Run all tests in sequence
-            println!("{}", "Phase 1: Latency measurement...".yellow());
-            if let Ok(Some(latency)) = measure_http_latency(&client, &config.server_url, 10).await {
-                result.latency_ms = Some(latency.avg_rtt);
-                result.jitter_ms = Some(latency.jitter);
-            }
-
-            println!("{}", "Phase 2: Download test...".yellow());
-            if let Ok(download_result) = run_download_test(&client, &config).await {
-                result.download_mbps = Some(download_result.bandwidth_mbps);
-                result.bytes_downloaded = download_result.bytes_transferred;
-            }
-
-            println!("{}", "Phase 3: Upload test...".yellow());
-            if let Ok(upload_result) = run_upload_test(&client, &config).await {
-                result.upload_mbps = Some(upload_result.bandwidth_mbps);
-                result.bytes_uploaded = upload_result.bytes_transferred;
             }
         }
     }
@@ -188,16 +187,12 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         .use_rustls_tls();
 
     match version {
-        HttpVersion::Http1 => {
+        HttpVersion::HTTP1 => {
             builder = builder.http1_only();
         }
-        HttpVersion::Http2 => {
-            // Note: reqwest automatically supports HTTP/2 when available
-            // We'll rely on the server negotiating HTTP/2
-        }
-        HttpVersion::Auto => {
-            // Use both HTTP/1.1 and HTTP/2
-        }
+        HttpVersion::HTTP2 => todo!(),
+        HttpVersion::H2C => todo!(),
+        HttpVersion::HTTP3 => todo!(),
     }
 
     builder.build().context("Failed to create HTTP client")
@@ -574,7 +569,7 @@ async fn determine_optimal_upload_test_size(
     }
 }
 
-async fn export_http_results(result: &HttpTestResult, path: &str) -> Result<()> {
+async fn export_http_results(result: &HttpTestResult, path: &Path) -> Result<()> {
     if path.ends_with(".json") {
         let json_data = serde_json::to_string_pretty(result)?;
         tokio::fs::write(path, json_data).await?;
@@ -602,7 +597,7 @@ async fn export_http_results(result: &HttpTestResult, path: &str) -> Result<()> 
         tokio::fs::write(path, csv_content).await?;
     }
 
-    println!("Results exported to {}", path.green());
+    println!("Results exported to {}", path.to_string_lossy().green());
     Ok(())
 }
 
@@ -655,28 +650,4 @@ fn print_http_results(result: &HttpTestResult) {
     }
 
     println!();
-}
-
-use std::fmt;
-
-impl fmt::Display for HttpTestType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HttpTestType::Download => write!(f, "download"),
-            HttpTestType::Upload => write!(f, "upload"),
-            HttpTestType::Bidirectional => write!(f, "bidirectional"),
-            HttpTestType::LatencyOnly => write!(f, "latency-only"),
-            HttpTestType::Comprehensive => write!(f, "comprehensive"),
-        }
-    }
-}
-
-impl fmt::Display for HttpVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HttpVersion::Http1 => write!(f, "http1"),
-            HttpVersion::Http2 => write!(f, "http2"),
-            HttpVersion::Auto => write!(f, "auto"),
-        }
-    }
 }

@@ -1,5 +1,6 @@
 use colored::*;
 use eyre::Result;
+use std::path::PathBuf;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, sleep};
@@ -13,7 +14,7 @@ pub struct UdpClientConfig {
     pub port: u16,
     pub duration: u64,
     pub target_bandwidth: f64,
-    pub export_file: Option<String>,
+    pub export_file: Option<PathBuf>,
 }
 
 pub async fn run_udp_client(config: UdpClientConfig) -> Result<()> {
@@ -92,7 +93,10 @@ pub async fn run_udp_client(config: UdpClientConfig) -> Result<()> {
 
     if let Some(export_file) = config.export_file {
         export::export_results(&[result], &export_file).await?;
-        println!("Results exported to: {}", export_file.cyan());
+        println!(
+            "Results exported to: {}",
+            export_file.to_string_lossy().cyan()
+        );
     }
 
     Ok(())

@@ -1,8 +1,8 @@
 # speed-cli
 
-> Disclaimer: Tool is under active development. Some features are to be improved in correctness and documentation. Open to contributions!
+> Disclaimer: Tool is under active development. Some features are to be improved in correctness/performance and documentation. Open to contributions!
 
-A comprehensive network performance measurement tool with for TCP, UDP, and HTTP protocols.
+This tool provides **comprehensive network performance measurements** across **TCP, UDP, and HTTP** protocols. Built with Rust, it prioritizes **maximum performance** to help you isolate and identify network or infrastructure-related bottlenecks.
 
 ## Why Another Network Testing Tool?
 
@@ -66,71 +66,53 @@ cargo install --path .
 
 The binary will be available at `target/release/speed-cli` (or `speed-cli.exe` on Windows).
 
-## Usage
+## Quick Start
 
-### Traditional TCP/UDP Testing (iperf3-style)
+```sh
+# Start server on default port
+speed-cli server --all # All protocols (TCP, UDP, HTTP, HTTPS)
+speed-cli server --tcp # TCP on default port 5201
+speed-cli server --udp # UDP on default port 5201
+speed-cli server --http # HTTP on default port 8080
+speed-cli server --https # HTTPS on default port 8443
 
-#### Start a Traditional Server
+# Run server with specific port and interface
+speed-cli server --http -p 8080 -b 192.168.1.100
 
-```bash
-# Start TCP/UDP server on default port (5201)
-speed-cli server
+# Run client test (with defaults)
+speed-cli client --tcp -s <server-ip> # TCP test
+speed-cli client --udp -s <server-ip> # UDP test
+speed-cli client --http1 -s <server-ip> # HTTP/1.1 test
+speed-cli client --http2 -s <server-ip> # HTTP/2 test
+speed-cli client --h2c -s <server-ip> # HTTP/2 cleartext test
+speed-cli client --http3 -s <server-ip> # HTTP/3 test
 
-# Start server on specific port and interface
-speed-cli server -p 8080 -b 192.168.1.100
+# Run HTTP client test against specific server for 60 seconds
+speed-cli client --http -p 8080 -h 192.168.1.100 -t 60
+
+# Run HTTP client test with 8 parallel connections, adaptive sizing, and export results to JSON
+speed-cli client --http -p 8080 -h 192.168.1.100 --parallel 8 --adaptive -e results.json
+
+# Run TCP client test against specific server
+speed-cli client --tcp -p 5201 -h 192.168.1.100
+
+# # Run full network diagnostics (server should be running with all protocols enabled `-a`)
+# speed-cli diagnostics -h 192.168.1.100 --http-port 8080 --tcp-port 5201 --udp-port 5201
+
+# Print previously saved result
+speed-cli report -f results.json
 ```
 
-#### Run Traditional Client Tests
+For more advanced usage, refer to help:
 
-```bash
-# Basic TCP test for 10 seconds (default)
-speed-cli client -s <server-ip>
-
-# TCP test for specific duration
-speed-cli client -s 192.168.1.100 -t 30
-
-# UDP test with target bandwidth
-speed-cli client -s 192.168.1.100 -u -b 100
-
-# Export results to file
-speed-cli client -s 192.168.1.100 -e results.json
+```sh
+speed-cli -h
+speed-cli client -h
+speed-cli server -h
 ```
 
-### HTTP Speed Tests (Ookla/Cloudflare-style)
-
-#### Start HTTP Test Server
-
-```bash
-# Start HTTP server on default port (8080)
-speed-cli http-server
-
-# Start server on specific port with custom settings
-speed-cli http-server -p 9090 -b 0.0.0.0 --max-upload-mb 500
-```
-
-#### Run HTTP Speed Tests
-
-```bash
-# Comprehensive HTTP test (includes download, upload, latency)
-speed-cli http --url http://localhost:8080
-
-# Download test only with HTTP/2
-speed-cli http --url http://localhost:8080 --type download --version http2
-
-# Upload test with multiple parallel connections
-speed-cli http --url http://localhost:8080 --type upload --parallel 8
-
-# Bidirectional test with adaptive sizing
-speed-cli http --url http://localhost:8080 --type bidirectional --adaptive
-
-# Latency-only test for minimum overhead
-speed-cli http --url http://localhost:8080 --type latency-only
-
-# Export HTTP results
-speed-cli http --url http://localhost:8080 --export http_results.json
-```
-
-### Comprehensive Network Diagnostics
+<!-- ### Comprehensive Network Diagnostics
+TODO: Remove this section?
 
 Run the most comprehensive network diagnostic available, essentially a superset of Ookla and Cloudflare tests:
 
@@ -146,19 +128,7 @@ speed-cli diagnostics --url http://localhost:8080 --skip-dns --skip-topology
 
 # Export comprehensive results
 speed-cli diagnostics --url http://localhost:8080 --export full_diagnostics.json
-```
-
-### Test Against Public Servers
-
-You can test against public HTTP speed test servers:
-
-```bash
-# Test against a public server (replace with actual server)
-speed-cli http --url https://speed.cloudflare.com
-
-# Comprehensive diagnostics against public server
-speed-cli diagnostics --url https://speed.cloudflare.com
-```
+``` -->
 
 ### Exporting Results
 
@@ -166,45 +136,36 @@ Add a `-e` or `--export` flag to `client` commands to save results in JSON or CS
 
 ```bash
 # Export to JSON
-speed-cli client -s 192.168.1.100 -e results.json
+speed-cli client --<mode> -s <server-ip> -e results.json
 
 # Export to CSV
-speed-cli client -s 192.168.1.100 -e results.csv
+speed-cli client --<mode> -s <server-ip> -e results.csv
 
 # If unknown extension, it assumes JSON
-speed-cli client -s 192.168.1.100 -e results.test
-```
-
-### Command Reference
-
-```bash
-# Show help
-speed-cli --help
-speed-cli client --help
-speed-cli server --help
+speed-cli client --<mode> -s <server-ip> -e results.test
 ```
 
 ## Comparison with Existing Tools
 
-<!-- TODO: Perhaps remove this -->
+<!-- TODO: Perhaps remove this. Would be more useful to categorize different tools and how this is separate. -->
 
-| Feature | speed-cli | iperf3 | Ookla Speedtest | Cloudflare Speed Test |
-|---------|-----------|--------|-----------------|----------------------|
-| TCP Throughput | ✅ | ✅ | ❌ | ❌ |
-| UDP Throughput | ✅ | ✅ | ❌ | ❌ |
-| HTTP/1.1 Speed Test | ✅ | ❌ | ✅ | ✅ |
-| HTTP/2 Speed Test | ✅ | ❌ | ✅ | ✅ |
-| Parallel Connections | ✅ | ❌ | ✅ | ✅ |
-| DNS Performance | ✅ | ❌ | ❌ | ❌ |
-| Jitter Measurement | ✅ | ✅ | ✅ | ✅ |
-| Packet Loss Detection | ✅ | ✅ | ✅ | ✅ |
-| MTU Discovery | ✅ | ❌ | ❌ | ❌ |
-| Network Topology | ✅ | ❌ | ❌ | ❌ |
-| Geographic Info | ✅ | ❌ | ✅ | ✅ |
-| Bidirectional Testing | ✅ | ❌ | ❌ | ❌ |
-| Export Formats | JSON, CSV | ❌ | Limited | Limited |
-| Self-Hosted Server | ✅ | ✅ | ❌ | ❌ |
-| Cross-Platform | ✅ | ✅ | ✅ | ✅ |
+| Feature               | speed-cli | iperf3 | Ookla Speedtest | Cloudflare Speed Test |
+| --------------------- | --------- | ------ | --------------- | --------------------- |
+| TCP Throughput        | ✅         | ✅      | ❌               | ❌                     |
+| UDP Throughput        | ✅         | ✅      | ❌               | ❌                     |
+| HTTP/1.1 Speed Test   | ✅         | ❌      | ✅               | ✅                     |
+| HTTP/2 Speed Test     | ✅         | ❌      | ✅               | ✅                     |
+| Parallel Connections  | ✅         | ❌      | ✅               | ✅                     |
+| DNS Performance       | ✅         | ❌      | ❌               | ❌                     |
+| Jitter Measurement    | ✅         | ✅      | ✅               | ✅                     |
+| Packet Loss Detection | ✅         | ✅      | ✅               | ✅                     |
+| MTU Discovery         | ✅         | ❌      | ❌               | ❌                     |
+| Network Topology      | ✅         | ❌      | ❌               | ❌                     |
+| Geographic Info       | ✅         | ❌      | ✅               | ✅                     |
+| Bidirectional Testing | ✅         | ❌      | ❌               | ❌                     |
+| Export Formats        | JSON, CSV | ❌      | Limited         | Limited               |
+| Self-Hosted Server    | ✅         | ✅      | ❌               | ❌                     |
+| Cross-Platform        | ✅         | ✅      | ✅               | ✅                     |
 
 ## Example Output
 
@@ -268,6 +229,8 @@ COMPREHENSIVE NETWORK DIAGNOSTIC RESULTS
 
 ## Technical Details
 
+<!-- TODO: Update this whole section vv -->
+
 ### Supported Protocols
 
 - **TCP**: Stream-based throughput testing
@@ -287,6 +250,8 @@ COMPREHENSIVE NETWORK DIAGNOSTIC RESULTS
 
 ### HTTP Test Endpoints
 
+<!-- TODO: Update this whole section vv -->
+
 When running `http-server`, the following endpoints are available:
 
 - `GET /download?size=<bytes>` - Download test data
@@ -295,54 +260,16 @@ When running `http-server`, the following endpoints are available:
 - `GET /health` - Server health check
 - `GET /info` - Server information
 
-## Advanced Usage
-
-### Custom Test Scenarios
-
-#### High-bandwidth Testing
-
-```bash
-# Test with large parallel connections for high-speed links
-speed-cli http --url http://server:8080 --parallel 16 --time 60
-```
-
-#### Low-latency Optimization
-
-```bash
-# Focus on latency testing
-speed-cli http --url http://server:8080 --test-type latency
-```
-
-#### Continuous Monitoring
-
-```bash
-# Run tests every 5 minutes and log results
-while true; do
-  speed-cli diagnostics --url http://server:8080 --export "results_$(date +%Y%m%d_%H%M%S).json"
-  sleep 300
-done
-```
-
-### Configuration Files
-
-Create a config file for repeated testing:
-
-```json
-{
-  "server_url": "http://your-server:8080",
-  "test_duration": 30,
-  "parallel_connections": 8,
-  "export_file": "daily_test.json"
-}
-```
-
 ## Future Improvements
 
 *There are several features/improvements that are planned.*
 
 - [ ] Support multiple incoming client connections (for server)
-- [ ] Docker/Kubernetes support (for server)
+- [ ] OCI Container images using all popular base images (necessary for representative performance testing)
+- [ ] Kubernetes support (for server)
+- [ ] HTTPS support for HTTP tests
 - [ ] QUIC support (HTTP/3)
+- [ ] gRPC support?
 - [ ] Rich HTML report generation
 - [ ] Incorporate more detailed DNS analysis
 
