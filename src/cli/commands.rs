@@ -172,6 +172,7 @@ impl Commands {
             ..
         } = self
         {
+            // Validate optional port values
             if tcp_port.is_some() && !tcp && !all {
                 return Err("tcp_port can only be specified when tcp or all is enabled".to_string());
             }
@@ -187,6 +188,13 @@ impl Commands {
                 return Err(
                     "https_port can only be specified when https or all is enabled".to_string(),
                 );
+            }
+
+            // Validate parallel > 0
+            if let Commands::Client { parallel, .. } = self
+                && *parallel == 0
+            {
+                return Err("parallel connections must be greater than 0".to_string());
             }
         }
         Ok(())
