@@ -19,6 +19,7 @@ use crate::performance::udp::server::run_udp_server;
 use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
 use crate::utils::export::export_report;
 use crate::utils::file::can_write;
+use crate::utils::import::import_report;
 
 mod cli;
 mod constants;
@@ -277,25 +278,30 @@ async fn main() -> Result<()> {
             if !file.is_file() {
                 return Err(eyre::eyre!("Report path is not a file: {}", file.display()));
             }
-            if !file.metadata()?.permissions().readonly() {
-                return Err(eyre::eyre!(
-                    "Report file is not readable: {}",
-                    file.display()
-                ));
-            }
             if let Some(ext) = file.extension() {
                 match ext.to_string_lossy().as_ref() {
-                    "json" => todo!(), // Handle JSON report
+                    "json" => {
+                        let reports = import_report(&file).await?;
+                        for report in reports {
+                            println!("{report:#}");
+                        }
+                    }
                     "html" => {
                         return Err(eyre::eyre!(
                             "HTML report format should be opened via a web browser: {}",
                             file.display()
                         ));
                     }
-                    _ => {
-                        todo!();
-                        // TODO: Give error if file fails to be parsed as JSON
-                    }
+                    _ => match import_report(&file).await {
+                        Ok(reports) => {
+                            for report in reports {
+                                println!("{report:#}");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error parsing report (assumed to be JSON): {e}");
+                        }
+                    },
                 }
             } else {
                 return Err(eyre::eyre!(

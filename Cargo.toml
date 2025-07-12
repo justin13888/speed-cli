@@ -29,3 +29,4 @@ tracing = { version = "0.1.41", features = ["release_max_level_debug"] }
 eyre = "0.6.12"
 thiserror = "2.0.12"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+num-format = "0.4.4"

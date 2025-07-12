@@ -1,7 +1,10 @@
+use std::fmt::{self, Display, Formatter};
 use std::{collections::HashSet, time::Duration};
 
+use colored::*;
 use serde::{Deserialize, Serialize};
 
+use crate::utils::format::format_bytes;
 use crate::{
     TestType,
     constants::{
@@ -164,5 +167,168 @@ impl HttpTestConfig {
             payload_sizes,
             http_version,
         }
+    }
+}
+
+impl Display for TestConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            TestConfig::Tcp(config) => write!(f, "{}", config),
+            TestConfig::Udp(config) => write!(f, "{}", config),
+            TestConfig::Http(config) => write!(f, "{}", config),
+        }
+    }
+}
+
+impl Display for TcpTestConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "  {}: {}",
+            "Protocol".bright_blue().bold(),
+            "TCP".green()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Server".bright_blue().bold(),
+            self.server.cyan()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Port".bright_blue().bold(),
+            self.port.to_string().yellow()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Duration".bright_blue().bold(),
+            format!("{}s", self.duration.as_secs()).magenta()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Parallel Connections".bright_blue().bold(),
+            self.parallel_connections.to_string().green()
+        )?;
+
+        let sizes: Vec<String> = self
+            .payload_sizes
+            .iter()
+            .map(|s| format_bytes(*s))
+            .collect();
+        writeln!(
+            f,
+            "  {}: [{}]",
+            "Payload Sizes".bright_blue().bold(),
+            sizes.join(", ").white()
+        )?;
+
+        Ok(())
+    }
+}
+
+impl Display for UdpTestConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "  {}: {}",
+            "Protocol".bright_blue().bold(),
+            "UDP".green()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Server".bright_blue().bold(),
+            self.server.cyan()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Port".bright_blue().bold(),
+            self.port.to_string().yellow()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Duration".bright_blue().bold(),
+            format!("{}s", self.duration).magenta()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Parallel Streams".bright_blue().bold(),
+            self.parallel_streams.to_string().green()
+        )?;
+
+        let sizes: Vec<String> = self
+            .payload_sizes
+            .iter()
+            .map(|s| format_bytes(*s))
+            .collect();
+        writeln!(
+            f,
+            "  {}: [{}]",
+            "Payload Sizes".bright_blue().bold(),
+            sizes.join(", ").white()
+        )?;
+
+        Ok(())
+    }
+}
+
+impl Display for HttpTestConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "  {}: {}",
+            "Protocol".bright_blue().bold(),
+            "HTTP".green()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Server URL".bright_blue().bold(),
+            self.server_url.cyan()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Duration".bright_blue().bold(),
+            format!("{}s", self.duration.as_secs()).magenta()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Parallel Connections".bright_blue().bold(),
+            self.parallel_connections.to_string().green()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Test Type".bright_blue().bold(),
+            format!("{:?}", self.test_type).yellow()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "HTTP Version".bright_blue().bold(),
+            format!("{:?}", self.http_version).yellow()
+        )?;
+
+        let sizes: Vec<String> = self
+            .payload_sizes
+            .iter()
+            .map(|s| format_bytes(*s))
+            .collect();
+        writeln!(
+            f,
+            "  {}: [{}]",
+            "Payload Sizes".bright_blue().bold(),
+            sizes.join(", ").white()
+        )?;
+
+        Ok(())
     }
 }

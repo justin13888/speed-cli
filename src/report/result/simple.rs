@@ -1,6 +1,9 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use colored::*;
+use humansize::{BINARY, BaseUnit, DECIMAL, format_size};
+use num_format::{Locale, ToFormattedString};
 use serde::{Deserialize, Serialize};
 
 use crate::report::ThroughputMeasurement;
@@ -18,14 +21,51 @@ pub struct ThroughputResult {
 
 impl fmt::Display for ThroughputResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
+        let data_transferred = format_size(self.bytes_transferred(), BINARY);
+        let avg_throughput = {
+            let bps = (self.bytes_transferred() as f64) / self.total_duration.as_secs_f64();
+            let formatted_size = format_size(bps as u64, DECIMAL.base_unit(BaseUnit::Bit));
+            format!("{formatted_size}/s")
+        };
+
+        writeln!(
             f,
-            "Test Result:\n  Bytes: {} MB\n  Duration: {:.2}s\n  Avg Throughput: {:.2} Mbps\n  Timestamp: {}",
-            self.bytes_transferred() / 1_000_000,
-            self.total_duration.as_secs_f64(),
-            self.avg_throughput(),
-            self.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
-        )
+            "  {}: {}",
+            "Data Transferred".bright_green().bold(),
+            data_transferred.cyan()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Duration".bright_green().bold(),
+            format!("{:.2}s", self.total_duration.as_secs_f64()).yellow()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Average Throughput".bright_green().bold(),
+            avg_throughput.magenta()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Measurements".bright_green().bold(),
+            self.measurements
+                .len()
+                .to_formatted_string(&Locale::en)
+                .white()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Timestamp".bright_green().bold(),
+            self.timestamp
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string()
+                .blue()
+        )?;
+
+        Ok(())
     }
 }
 

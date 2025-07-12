@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 pub use http::*;
 pub use latency::*;
@@ -22,5 +23,14 @@ impl From<ThroughputResult> for TestResult {
 impl From<HttpTestResult> for TestResult {
     fn from(result: HttpTestResult) -> Self {
         TestResult::Http(result)
+    }
+}
+
+impl Display for TestResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            TestResult::Simple(result) => write!(f, "{result}"),
+            TestResult::Http(result) => write!(f, "{result}"),
+        }
     }
 }

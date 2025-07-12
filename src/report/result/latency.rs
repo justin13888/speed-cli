@@ -1,6 +1,8 @@
+use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use colored::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,9 +97,104 @@ impl LatencyResult {
     }
 }
 
+impl Display for LatencyResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let total_count = self.count();
+        let successful_count = self.successful_count();
+        let dropped_count = self.dropped_count();
+        let loss_rate = if total_count > 0 {
+            (dropped_count as f64 / total_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        writeln!(
+            f,
+            "    {}: {}",
+            "Total Measurements".bright_blue().bold(),
+            total_count.to_string().white()
+        )?;
+        writeln!(
+            f,
+            "    {}: {}",
+            "Successful".bright_blue().bold(),
+            successful_count.to_string().green()
+        )?;
+        writeln!(
+            f,
+            "    {}: {}",
+            "Dropped".bright_blue().bold(),
+            dropped_count.to_string().red()
+        )?;
+        writeln!(
+            f,
+            "    {}: {}",
+            "Packet Loss".bright_blue().bold(),
+            format!("{:.2}%", loss_rate).red()
+        )?;
+
+        if let Some(avg) = self.avg_rtt() {
+            writeln!(
+                f,
+                "    {}: {}",
+                "Average RTT".bright_blue().bold(),
+                format!("{:.2} ms", avg).cyan()
+            )?;
+        }
+
+        if let Some(min) = self.min_rtt() {
+            writeln!(
+                f,
+                "    {}: {}",
+                "Min RTT".bright_blue().bold(),
+                format!("{:.2} ms", min).green()
+            )?;
+        }
+
+        if let Some(max) = self.max_rtt() {
+            writeln!(
+                f,
+                "    {}: {}",
+                "Max RTT".bright_blue().bold(),
+                format!("{:.2} ms", max).yellow()
+            )?;
+        }
+
+        if let Some(jitter) = self.jitter() {
+            writeln!(
+                f,
+                "    {}: {}",
+                "Jitter".bright_blue().bold(),
+                format!("{:.2} ms", jitter).magenta()
+            )?;
+        }
+
+        writeln!(
+            f,
+            "    {}: {}",
+            "Timestamp".bright_blue().bold(),
+            self.timestamp
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string()
+                .blue()
+        )?;
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LatencyMeasurement {
     /// RTT in milliseconds. If dropped, it is None.
     pub rtt_ms: Option<f64>,
     pub elapsed_time: Duration,
+}
+
+impl Display for LatencyMeasurement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.rtt_ms {
+            Some(rtt) => write!(f, "{:.2} ms", rtt),
+            None => write!(f, "{}", "dropped".red()),
+        }
+    }
 }

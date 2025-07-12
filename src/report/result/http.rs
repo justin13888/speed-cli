@@ -1,3 +1,4 @@
+use std::fmt::{self, Display, Formatter};
 use std::{collections::HashMap, time::Duration};
 
 use colored::Colorize as _;
@@ -5,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     TestType,
-    report::{LatencyResult, ThroughputResult},
     performance::http::HttpVersion,
+    report::{LatencyResult, ThroughputResult},
     utils::format::{format_bytes, format_throughput},
 };
 
@@ -70,3 +71,60 @@ pub struct HttpTestResult {
 
 //     println!();
 // }
+
+impl Display for HttpTestResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // Display latency if available
+        if let Some(latency) = &self.latency {
+            writeln!(f, "  {}", "Latency Results:".bright_green().bold())?;
+            write!(f, "{}", latency)?;
+            writeln!(f)?;
+        }
+
+        // Display download results
+        if !self.download.is_empty() {
+            writeln!(f, "  {}", "Download Results:".bright_green().bold())?;
+            for (size, result) in &self.download {
+                writeln!(
+                    f,
+                    "    {} ({} bytes):",
+                    "Payload Size".bright_blue(),
+                    size.to_string().yellow()
+                )?;
+                // Indent the throughput result output
+                let result_str = format!("{}", result);
+                for line in result_str.lines() {
+                    writeln!(f, "    {}", line)?;
+                }
+            }
+        }
+
+        // Display upload results
+        if !self.upload.is_empty() {
+            writeln!(f, "  {}", "Upload Results:".bright_green().bold())?;
+            for (size, result) in &self.upload {
+                writeln!(
+                    f,
+                    "    {} ({} bytes):",
+                    "Payload Size".bright_blue(),
+                    size.to_string().yellow()
+                )?;
+                // Indent the throughput result output
+                let result_str = format!("{}", result);
+                for line in result_str.lines() {
+                    writeln!(f, "    {}", line)?;
+                }
+            }
+        }
+
+        // Display errors if any
+        if !self.errors.is_empty() {
+            writeln!(f, "  {}:", "Errors".red().bold())?;
+            for error in &self.errors {
+                writeln!(f, "    • {}", error.red())?;
+            }
+        }
+
+        Ok(())
+    }
+}

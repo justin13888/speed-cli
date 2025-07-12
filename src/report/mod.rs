@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
+use colored::*;
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 mod config;
 mod measurement;
@@ -8,6 +10,7 @@ mod result;
 pub use config::*;
 pub use measurement::*;
 pub use result::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestReport {
     /// Start time
@@ -64,5 +67,49 @@ where
 {
     fn from((start_time, config, result): (T, C, R)) -> Self {
         Self::new(start_time.into(), config.into(), result.into(), Utc::now())
+    }
+}
+
+impl Display for TestReport {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{}",
+            "═══ Speed CLI Test Report ═══".bright_cyan().bold()
+        )?;
+        writeln!(
+            f,
+            "{}: {}",
+            "Version".bright_white().bold(),
+            self.version.green()
+        )?;
+        writeln!(
+            f,
+            "{}: {}",
+            "Start Time".bright_white().bold(),
+            self.start_time
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string()
+                .yellow()
+        )?;
+        writeln!(
+            f,
+            "{}: {}",
+            "Report Time".bright_white().bold(),
+            self.timestamp
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string()
+                .yellow()
+        )?;
+        writeln!(f)?;
+
+        writeln!(f, "{}", "Configuration:".bright_white().bold().underline())?;
+        write!(f, "{}", self.config)?;
+        writeln!(f)?;
+
+        writeln!(f, "{}", "Results:".bright_white().bold().underline())?;
+        write!(f, "{}", self.result)?;
+
+        Ok(())
     }
 }
