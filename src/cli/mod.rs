@@ -3,7 +3,7 @@ pub mod commands;
 use clap::Parser;
 pub use commands::*;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "speed-cli")]
 #[command(
     about = "A comprehensive network performance measurement tool (iperf3 + HTTP speed tests)"

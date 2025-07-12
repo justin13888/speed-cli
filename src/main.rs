@@ -2,6 +2,7 @@ use colored::*;
 use eyre::Result;
 use std::fs;
 use std::net::SocketAddr;
+use tracing::trace;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use clap::Parser;
@@ -47,18 +48,67 @@ async fn main() -> Result<()> {
     // Start parsing
     let cli = Cli::parse();
 
+    trace!("Parsed CLI arguments: {:#?}", cli);
+
     match cli.command {
         Commands::Client {
             server,
             port,
             duration,
             mode,
+            tcp,
+            udp,
+            http1,
+            http2,
+            h2c,
+            http3,
             export,
             parallel,
             test_sizes,
             test_type,
-            ..
+            debug,
         } => {
+            // Assert that exactly one specific protocol is enabled (no more, no less)
+            let mut protocol_count = 0;
+            if tcp {
+                protocol_count += 1;
+            }
+            if udp {
+                protocol_count += 1;
+            }
+            if http1 {
+                protocol_count += 1;
+            }
+            if http2 {
+                protocol_count += 1;
+            }
+            if h2c {
+                protocol_count += 1;
+            }
+            if http3 {
+                protocol_count += 1;
+            }
+            if protocol_count != 1 {
+                return Err(eyre::eyre!(
+                    "Exactly one protocol must be specified. Use --tcp, --udp, --http1, --http2, --h2c, or --http3."
+                ));
+            }
+            let mode: ClientMode = if tcp {
+                ClientMode::TCP
+            } else if udp {
+                ClientMode::UDP
+            } else if http1 {
+                ClientMode::HTTP1
+            } else if http2 {
+                ClientMode::HTTP2
+            } else if h2c {
+                ClientMode::H2C
+            } else if http3 {
+                ClientMode::HTTP3
+            } else {
+                unreachable!();
+            };
+
             println!("{}", "Starting client mode...".green().bold());
 
             // TODO: Do something about debug flag...

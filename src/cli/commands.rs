@@ -3,7 +3,7 @@ use std::{net::IpAddr, path::PathBuf};
 use crate::{ClientMode, TestType};
 use clap::Subcommand;
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Run as client
     Client {
@@ -19,13 +19,13 @@ pub enum Commands {
         #[arg(short, long, default_value = "10")]
         duration: u64,
 
-        /// Protocol mode (tcp, udp, http)
-        #[arg(short, long, default_value = "tcp", value_enum)]
+        /// Protocol mode (tcp, udp, http1, http2, h2c, http3)
+        #[arg(short, long, value_enum)]
         #[clap(group = "protocol")]
-        mode: ClientMode,
+        mode: Option<ClientMode>,
 
-        /// Use TCP protocol (default)
-        #[arg(long, default_value = "true")]
+        /// Use TCP protocol
+        #[arg(long)]
         #[clap(group = "protocol")]
         tcp: bool,
 
@@ -158,46 +158,46 @@ pub enum Commands {
     },
 }
 
-impl Commands {
-    pub fn validate(&self) -> Result<(), String> {
-        if let Commands::Server {
-            tcp_port,
-            udp_port,
-            http_port,
-            https_port,
-            tcp,
-            udp,
-            http,
-            https,
-            all,
-            ..
-        } = self
-        {
-            // Validate optional port values
-            if tcp_port.is_some() && !tcp && !all {
-                return Err("tcp_port can only be specified when tcp or all is enabled".to_string());
-            }
-            if udp_port.is_some() && !udp && !all {
-                return Err("udp_port can only be specified when udp or all is enabled".to_string());
-            }
-            if http_port.is_some() && !http && !all {
-                return Err(
-                    "http_port can only be specified when http or all is enabled".to_string(),
-                );
-            }
-            if https_port.is_some() && !https && !all {
-                return Err(
-                    "https_port can only be specified when https or all is enabled".to_string(),
-                );
-            }
+// impl Commands {
+//     pub fn validate(&self) -> Result<(), String> {
+//         if let Commands::Server {
+//             tcp_port,
+//             udp_port,
+//             http_port,
+//             https_port,
+//             tcp,
+//             udp,
+//             http,
+//             https,
+//             all,
+//             ..
+//         } = self
+//         {
+//             // Validate optional port values
+//             if tcp_port.is_some() && !tcp && !all {
+//                 return Err("tcp_port can only be specified when tcp or all is enabled".to_string());
+//             }
+//             if udp_port.is_some() && !udp && !all {
+//                 return Err("udp_port can only be specified when udp or all is enabled".to_string());
+//             }
+//             if http_port.is_some() && !http && !all {
+//                 return Err(
+//                     "http_port can only be specified when http or all is enabled".to_string(),
+//                 );
+//             }
+//             if https_port.is_some() && !https && !all {
+//                 return Err(
+//                     "https_port can only be specified when https or all is enabled".to_string(),
+//                 );
+//             }
 
-            // Validate parallel > 0
-            if let Commands::Client { parallel, .. } = self
-                && *parallel == 0
-            {
-                return Err("parallel connections must be greater than 0".to_string());
-            }
-        }
-        Ok(())
-    }
-}
+//             // Validate parallel > 0
+//             if let Commands::Client { parallel, .. } = self
+//                 && *parallel == 0
+//             {
+//                 return Err("parallel connections must be greater than 0".to_string());
+//             }
+//         }
+//         Ok(())
+//     }
+// }
