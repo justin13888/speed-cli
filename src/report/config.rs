@@ -8,7 +8,7 @@ use crate::{
         DEFAULT_HTTP_PACKET_SIZES, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PACKET_SIZES,
         DEFAULT_TCP_PORT, DEFAULT_UDP_PACKET_SIZES, DEFAULT_UDP_PORT,
     },
-    speed::http::HttpVersion,
+    performance::http::HttpVersion,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

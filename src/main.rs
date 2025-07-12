@@ -6,23 +6,23 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use clap::Parser;
 use cli::{Cli, Commands};
-use speed::http_server::{HttpServerConfig, run_http_server};
-use speed::tcp::run_tcp_client;
-use speed::udp::run_udp_client;
+use performance::http_server::{HttpServerConfig, run_http_server};
+use performance::tcp::run_tcp_client;
+use performance::udp::run_udp_client;
 
 pub use utils::types::*;
 
 use crate::constants::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT};
 use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
-use crate::speed::http::{HttpVersion, run_http_test};
-use crate::speed::server::{run_tcp_server, run_udp_server};
+use crate::performance::http::{HttpVersion, run_http_test};
+use crate::performance::server::{run_tcp_server, run_udp_server};
 use crate::utils::export::export_report;
 use crate::utils::file::can_write;
 
 mod cli;
 mod constants;
 mod report;
-mod speed;
+mod performance;
 mod utils;
 
 #[tokio::main]

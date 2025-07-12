@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     TestType,
     report::{LatencyResult, ThroughputResult},
-    speed::http::HttpVersion,
+    performance::http::HttpVersion,
     utils::format::{format_bytes, format_throughput},
 };
 
