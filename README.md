@@ -111,25 +111,6 @@ speed-cli client -h
 speed-cli server -h
 ```
 
-<!-- ### Comprehensive Network Diagnostics
-TODO: Remove this section?
-
-Run the most comprehensive network diagnostic available, essentially a superset of Ookla and Cloudflare tests:
-
-```bash
-# Full diagnostic suite (DNS, quality, HTTP performance, topology)
-speed-cli diagnostics --url http://localhost:8080
-
-# Quick diagnostics (30 seconds with all tests)
-speed-cli diagnostics --url http://localhost:8080 --time 30
-
-# Skip specific test phases
-speed-cli diagnostics --url http://localhost:8080 --skip-dns --skip-topology
-
-# Export comprehensive results
-speed-cli diagnostics --url http://localhost:8080 --export full_diagnostics.json
-``` -->
-
 ### Exporting Results
 
 Add a `-e` or `--export` flag to `client` commands to save results in JSON or HTML format:
@@ -144,28 +125,6 @@ speed-cli client --<mode> -s <server-ip> -e results.html
 # If unknown extension, it assumes JSON
 speed-cli client --<mode> -s <server-ip> -e results.test
 ```
-
-## Comparison with Existing Tools
-
-<!-- TODO: Perhaps remove this. Would be more useful to categorize different tools and how this is separate. -->
-
-| Feature               | speed-cli | iperf3 | Ookla Speedtest | Cloudflare Speed Test |
-| --------------------- | --------- | ------ | --------------- | --------------------- |
-| TCP Throughput        | ✅         | ✅      | ❌               | ❌                     |
-| UDP Throughput        | ✅         | ✅      | ❌               | ❌                     |
-| HTTP/1.1 Speed Test   | ✅         | ❌      | ✅               | ✅                     |
-| HTTP/2 Speed Test     | ✅         | ❌      | ✅               | ✅                     |
-| Parallel Connections  | ✅         | ❌      | ✅               | ✅                     |
-| DNS Performance       | ✅         | ❌      | ❌               | ❌                     |
-| Jitter Measurement    | ✅         | ✅      | ✅               | ✅                     |
-| Packet Loss Detection | ✅         | ✅      | ✅               | ✅                     |
-| MTU Discovery         | ✅         | ❌      | ❌               | ❌                     |
-| Network Topology      | ✅         | ❌      | ❌               | ❌                     |
-| Geographic Info       | ✅         | ❌      | ✅               | ✅                     |
-| Bidirectional Testing | ✅         | ❌      | ❌               | ❌                     |
-| Export Formats        | JSON      | ❌      | Limited         | Limited               |
-| Self-Hosted Server    | ✅         | ✅      | ❌               | ❌                     |
-| Cross-Platform        | ✅         | ✅      | ✅               | ✅                     |
 
 ## Example Output
 
@@ -189,43 +148,6 @@ Average Latency: 12.34 ms
 Jitter: 2.14 ms
 DNS Resolution: 8.45 ms
 ```
-
-### Comprehensive Diagnostics Results
-
-```
-════════════════════════════════════════════════════════════════════════════════
-COMPREHENSIVE NETWORK DIAGNOSTIC RESULTS
-════════════════════════════════════════════════════════════════════════════════
-
-🎯 Overall Score: 87.5/100
-
-🌐 DNS PERFORMANCE
-   Resolution Time: 12.34ms
-   IPv4 Support: ✓
-   IPv6 Support: ✓
-   DNS Server 8.8.8.8: 15.23ms ✓
-   DNS Server 1.1.1.1: 11.45ms ✓
-   DNS Server 208.67.222.222: 18.67ms ✓
-
-📡 CONNECTION QUALITY
-   Jitter: 3.21ms
-   Packet Loss: 0.00%
-   Stability: Excellent
-   Optimal MTU: 1500 bytes
-
-🚀 HTTP PERFORMANCE
-   Download Speed: 1.23 Gbps
-   Upload Speed: 987.45 Mbps
-   HTTP Latency: 12.34ms
-   Parallel Connections: 4
-
-🗺️  NETWORK TOPOLOGY
-   Hop Count: 8
-   Route Stability: Stable
-
-💡 RECOMMENDATIONS
-   1. Your network performance looks excellent!
-``` -->
 
 ## Technical Details
 
