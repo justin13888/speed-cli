@@ -12,6 +12,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TestConfig {
     Tcp(TcpTestConfig),
     Udp(UdpTestConfig),

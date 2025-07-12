@@ -57,8 +57,8 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
         timestamp: chrono::Utc::now(),
     }; // TODO: Review
 
-    println!("\n{}", "=== Test Results ===".bold().blue());
-    println!("{result:#?}");
+    // println!("\n{}", "=== Test Results ===".bold().blue());
+    // println!("{result:#?}");
 
     Ok((start_time, config, result).into())
 }

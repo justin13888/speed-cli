@@ -5,8 +5,8 @@ use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, sleep};
 
-use crate::report::{ThroughputMeasurement, ThroughputResult, TestReport, UdpTestConfig};
-use crate::utils::format::{format_throughput, format_bytes};
+use crate::report::{TestReport, ThroughputMeasurement, ThroughputResult, UdpTestConfig};
+use crate::utils::format::{format_bytes, format_throughput};
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -75,8 +75,8 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
         timestamp: chrono::Utc::now(),
     };
 
-    println!("\n{}", "=== Test Results ===".bold().blue());
-    println!("{result:#?}");
+    // println!("\n{}", "=== Test Results ===".bold().blue());
+    // println!("{result:#?}");
 
     Ok((start_time, config, result).into())
 }

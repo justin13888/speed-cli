@@ -2,11 +2,10 @@ use std::{fs::File, io, io::Write as _, path::Path};
 
 /// Attempts to simply check if a file could be written or overwritten at the specified path.
 pub fn can_write(file_path: &Path) -> io::Result<bool> {
-    // Try to open the file in write mode
-    match File::options().write(true).open(file_path) {
+    // Try to open the file in write mode, creating it if it doesn't exist
+    match File::options().write(true).create(true).open(file_path) {
         Ok(_) => Ok(true), // File can be written to
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false), // File does not exist
-        Err(e) => Err(e),  // Other errors (e.g., permission denied)
+        Err(e) => Err(e),  // Errors (e.g., permission denied)
     }
 }
 
