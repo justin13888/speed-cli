@@ -1,7 +1,7 @@
 use colored::*;
 use eyre::Result;
 use std::fs;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use clap::Parser;
@@ -9,7 +9,6 @@ use cli::{Cli, Commands};
 use speed::http_server::{HttpServerConfig, run_http_server};
 use speed::tcp::run_tcp_client;
 use speed::udp::run_udp_client;
-use tracing::debug;
 
 pub use utils::types::*;
 
@@ -57,7 +56,7 @@ async fn main() -> Result<()> {
             parallel,
             test_sizes,
             test_type,
-            debug,
+            
             ..
         } => {
             println!("{}", "Starting client mode...".green().bold());

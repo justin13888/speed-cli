@@ -1,15 +1,10 @@
-use colored::*;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use tracing::debug;
 use url::Url;
 
 use crate::{

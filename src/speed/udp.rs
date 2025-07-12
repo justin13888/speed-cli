@@ -4,7 +4,7 @@ use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, sleep};
 
-use crate::report::{SimpleTestResult, TestReport, TestResult, UdpTestConfig};
+use crate::report::{SimpleTestResult, TestReport, UdpTestConfig};
 use crate::utils::format::{format_bandwidth, format_bytes};
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {

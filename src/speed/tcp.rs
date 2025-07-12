@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio::time::Duration;
 
 use crate::network::BandwidthMeasurement;
-use crate::report::{SimpleTestResult, TcpTestConfig, TestReport, TestResult};
+use crate::report::{SimpleTestResult, TcpTestConfig, TestReport};
 use crate::utils::format::{format_bandwidth, format_bytes};
 
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {

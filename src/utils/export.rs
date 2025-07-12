@@ -1,9 +1,7 @@
-use std::fs::File;
 use std::path::Path;
 use thiserror::Error;
 
 use crate::report::TestReport;
-use crate::utils::file;
 
 #[derive(Debug, Error)]
 pub enum ExportError {
