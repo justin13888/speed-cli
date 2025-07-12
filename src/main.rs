@@ -238,7 +238,6 @@ async fn main() -> Result<()> {
                         bind_addr: http_addr,
                         enable_cors: true, // Always enable CORS as clients typically are at unexpected origins
                         max_upload_size: 10 * 1024 * 1024, // 10MB
-                        static_files_path: None,
                     })),
                 ));
             }
@@ -253,7 +252,6 @@ async fn main() -> Result<()> {
                         bind_addr: https_addr,
                         enable_cors: true, // Always enable CORS as clients typically are at unexpected origins
                         max_upload_size: 10 * 1024 * 1024, // 10MB
-                        static_files_path: None,
                     })),
                 )); // TODO: Replace this with actual HTTPS server logic
             }

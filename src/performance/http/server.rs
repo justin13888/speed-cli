@@ -27,8 +27,6 @@ pub struct HttpServerConfig {
     pub enable_cors: bool,
     /// Max upload size in bytes
     pub max_upload_size: usize,
-    /// File paths for static files (if any)
-    pub static_files_path: Option<String>, // TODO: This should prob be removed
 }
 
 pub async fn run_http_server(config: HttpServerConfig) -> Result<()> {
