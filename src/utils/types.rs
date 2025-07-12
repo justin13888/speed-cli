@@ -17,7 +17,7 @@ pub enum ClientMode {
     HTTP3,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
 pub enum TestType {

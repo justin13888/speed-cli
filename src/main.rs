@@ -21,7 +21,6 @@ use crate::utils::file::can_write;
 
 mod cli;
 mod constants;
-mod network;
 mod report;
 mod speed;
 mod utils;
@@ -56,7 +55,6 @@ async fn main() -> Result<()> {
             parallel,
             test_sizes,
             test_type,
-            
             ..
         } => {
             println!("{}", "Starting client mode...".green().bold());

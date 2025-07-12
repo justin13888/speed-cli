@@ -1,15 +1,17 @@
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub use config::*;
-pub use result::*;
-
 mod config;
+mod measurement;
 mod result;
 
+pub use config::*;
+pub use measurement::*;
+pub use result::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestReport {
+    /// Start time
+    pub start_time: DateTime<Utc>,
     /// Test configuration
     pub config: TestConfig,
     /// Test result
@@ -20,14 +22,32 @@ pub struct TestReport {
     pub version: String,
 }
 
-impl<C, R, T> From<(C, R, T)> for TestReport
+impl TestReport {
+    pub fn new(
+        start_time: DateTime<Utc>,
+        config: TestConfig,
+        result: TestResult,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            start_time,
+            config,
+            result,
+            timestamp,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+impl<T, C, R> From<(T, C, R, T)> for TestReport
 where
+    T: Into<DateTime<Utc>>,
     C: Into<TestConfig>,
     R: Into<TestResult>,
-    T: Into<DateTime<Utc>>,
 {
-    fn from((config, result, timestamp): (C, R, T)) -> Self {
+    fn from((start_time, config, result, timestamp): (T, C, R, T)) -> Self {
         Self {
+            start_time: start_time.into(),
             config: config.into(),
             result: result.into(),
             timestamp: timestamp.into(),
@@ -36,12 +56,13 @@ where
     }
 }
 
-impl<C, R> From<(C, R)> for TestReport
+impl<T, C, R> From<(T, C, R)> for TestReport
 where
+    T: Into<DateTime<Utc>>,
     C: Into<TestConfig>,
     R: Into<TestResult>,
 {
-    fn from((config, result): (C, R)) -> Self {
-        (config, result, Utc::now()).into()
+    fn from((start_time, config, result): (T, C, R)) -> Self {
+        Self::new(start_time.into(), config.into(), result.into(), Utc::now())
     }
 }

@@ -1,21 +1,25 @@
+use chrono::Utc;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tokio::time::sleep;
-use url::Url;
+use tracing::trace;
 
 use crate::{
     TestType,
     report::{
-        HttpTestConfig, HttpTestResult, LatencyMeasurement, LatencyResult, SimpleTestResult,
-        TestReport,
+        ThroughputMeasurement, ThroughputResult, HttpTestConfig, HttpTestResult, LatencyMeasurement,
+        LatencyResult, TestReport,
     },
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HttpVersion {
     /// HTTP/1.1 without TLS
@@ -44,84 +48,106 @@ impl fmt::Display for HttpVersion {
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     println!("Starting comprehensive HTTP speed test...");
 
+    let start_time = Utc::now();
+
     let mut result = HttpTestResult {
-        test_type: format!("{:?}", config.test_type),
-        http_version: format!("{:?}", config.http_version),
-        download_mbps: None,
-        upload_mbps: None,
-        latency_ms: None,
-        jitter_ms: None,
-        connection_time_ms: 0.0,
-        ssl_handshake_ms: None,
-        dns_resolution_ms: 0.0,
-        parallel_connections: config.parallel_connections,
-        bytes_downloaded: 0,
-        bytes_uploaded: 0,
-        test_duration: Duration::from_secs(config.duration),
-        timestamp: chrono::Utc::now(),
-        server_url: config.server_url.clone(),
+        latency: None,
+        download: HashMap::new(),
+        upload: HashMap::new(),
         errors: Vec::new(),
     };
 
     // Create HTTP client based on version preference
     let client = create_http_client(&config.http_version).await?;
 
-    // Measure DNS resolution time
-    let dns_start = Instant::now();
-    let url = Url::parse(&config.server_url)?;
-    let host = url.host_str().unwrap_or("localhost");
-    let port = url
-        .port()
-        .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
-
-    // Simple DNS resolution timing (basic implementation)
-    let _ = tokio::net::lookup_host(format!("{host}:{port}")).await?;
-    result.dns_resolution_ms = dns_start.elapsed().as_secs_f64() * 1000.0;
-
     match config.test_type {
         TestType::LatencyOnly => {
-            if let Some(latency) = measure_http_latency(&client, &config.server_url, 10).await? {}
+            result.latency = measure_http_latency(&client, &config.server_url, 10).await?;
         }
         TestType::Download => {
-            let download_result = run_download_test(&client, &config).await?;
-            result.download_mbps = Some(download_result.bandwidth_mbps);
-            result.bytes_downloaded = download_result.bytes_transferred;
+            for payload_size in &config.payload_sizes {
+                result.download.insert(
+                    *payload_size,
+                    run_download_test(
+                        &client,
+                        &config.server_url,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
+                );
+            }
         }
         TestType::Upload => {
-            let upload_result = run_upload_test(&client, &config).await?;
-            result.upload_mbps = Some(upload_result.bandwidth_mbps);
-            result.bytes_uploaded = upload_result.bytes_transferred;
+            for payload_size in &config.payload_sizes {
+                result.upload.insert(
+                    *payload_size,
+                    run_upload_test(
+                        &client,
+                        &config.server_url,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
+                );
+            }
         }
         TestType::Bidirectional => {
             // Run download and upload sequentially
-            let download_result = run_download_test(&client, &config).await?;
-            result.download_mbps = Some(download_result.bandwidth_mbps);
-            result.bytes_downloaded = download_result.bytes_transferred;
-
-            let upload_result = run_upload_test(&client, &config).await?;
-            result.upload_mbps = Some(upload_result.bandwidth_mbps);
-            result.bytes_uploaded = upload_result.bytes_transferred;
+            for payload_size in &config.payload_sizes {
+                result.download.insert(
+                    *payload_size,
+                    run_download_test(
+                        &client,
+                        &config.server_url,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
+                );
+                result.upload.insert(
+                    *payload_size,
+                    run_upload_test(
+                        &client,
+                        &config.server_url,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
+                );
+            }
         }
         TestType::Simultaneous => {
             // Run download and upload concurrently
-            let (download_result, upload_result) = tokio::join!(
-                run_download_test(&client, &config),
-                run_upload_test(&client, &config)
-            );
+            for payload_size in &config.payload_sizes {
+                let (download_result, upload_result) = tokio::join!(
+                    run_download_test(
+                        &client,
+                        &config.server_url,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    ),
+                    run_upload_test(
+                        &client,
+                        &config.server_url,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                );
 
-            if let Ok(dl) = download_result {
-                result.download_mbps = Some(dl.bandwidth_mbps);
-                result.bytes_downloaded = dl.bytes_transferred;
-            }
-
-            if let Ok(ul) = upload_result {
-                result.upload_mbps = Some(ul.bandwidth_mbps);
-                result.bytes_uploaded = ul.bytes_transferred;
+                result.download.insert(*payload_size, download_result?);
+                result.upload.insert(*payload_size, upload_result?);
             }
         }
     }
 
-    Ok((config, result).into())
+    Ok((start_time, config, result).into())
 }
 
 async fn create_http_client(version: &HttpVersion) -> Result<Client> {
@@ -160,7 +186,7 @@ async fn measure_http_latency(
             Ok(_response) => {
                 let rtt = start.elapsed().as_secs_f64() * 1000.0;
                 measurements.push(LatencyMeasurement {
-                    rtt_ms: rtt,
+                    rtt_ms: Some(rtt),
                     elapsed_time: start.elapsed(),
                 });
 
@@ -173,189 +199,160 @@ async fn measure_http_latency(
                 sleep(Duration::from_millis(100)).await;
             }
             Err(e) => {
-                eprintln!("Latency measurement failed: {e}");
-                continue;
+                measurements.push(LatencyMeasurement {
+                    rtt_ms: None,
+                    elapsed_time: start.elapsed(),
+                });
+                trace!("HTTP request error while measuring latency: {e}");
             }
         }
     }
-
-    println!();
 
     if measurements.is_empty() {
         return Ok(None);
     }
 
-    let rtts: Vec<f64> = measurements.iter().map(|m| m.rtt_ms).collect();
-    let avg_rtt = rtts.iter().sum::<f64>() / rtts.len() as f64;
-    let min_rtt = rtts.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let max_rtt = rtts.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-    // Calculate jitter (standard deviation of RTT)
-    let variance = rtts
-        .iter()
-        .map(|rtt| {
-            let diff = rtt - avg_rtt;
-            diff * diff
-        })
-        .sum::<f64>()
-        / rtts.len() as f64;
-    let jitter = variance.sqrt();
-
     Ok(Some(LatencyResult {
-        avg_rtt,
-        min_rtt,
-        max_rtt,
-        jitter,
         measurements,
+        timestamp: chrono::Utc::now(),
     }))
 }
 
-async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<SimpleTestResult> {
+async fn run_download_test(
+    client: &Client,
+    server_url: &str,
+    parallel_connections: usize,
+    payload_size: usize,
+    duration: Duration,
+) -> Result<ThroughputResult> {
     println!(
-        "Starting download test with {} parallel connections...",
-        config.parallel_connections
+        "Starting download test with {payload_size} payload size and {} parallel connections...",
+        parallel_connections
     );
 
+    let mut measurements = Vec::new();
     let start_time = Instant::now();
-    let test_duration = Duration::from_secs(config.duration);
 
-    // Determine test file size based on configuration
-    let test_sizes = &config.payload_sizes;
+    let mut tasks = Vec::new();
 
-    let mut total_downloaded = 0u64;
-    let test_start = start_time;
+    for i in 0..parallel_connections {
+        let client = client.clone();
+        let url = format!("{}/download?size={}&id={}", server_url, payload_size, i);
 
-    // Run tests for each configured size (typically just one unless specifically configured)
-    for (size_index, test_size) in test_sizes.iter().enumerate() {
-        let remaining_duration = test_duration.saturating_sub(test_start.elapsed());
-        if remaining_duration.is_zero() {
-            break; // No time left for more test sizes
-        }
-
-        let size_duration = if test_sizes.len() == 1 {
-            remaining_duration
-        } else {
-            // Divide remaining time among remaining test sizes
-            remaining_duration / (test_sizes.len() - size_index) as u32
-        };
-
-        let mut tasks = Vec::new();
-
-        for i in 0..config.parallel_connections {
-            let client = client.clone();
-            let url = format!("{}/download?size={}&id={}", config.server_url, test_size, i);
-
-            let task = tokio::spawn(async move {
-                let mut connection_bytes = 0u64;
-                let connection_start = Instant::now();
-
-                while connection_start.elapsed() < size_duration {
-                    match download_chunk(&client, &url).await {
-                        Ok(bytes) => {
-                            connection_bytes += bytes;
-                        }
-                        Err(e) => {
-                            eprintln!("Download error on connection {i}: {e}");
-                            break;
-                        }
+        let task = tokio::spawn(async move {
+            let mut measurements = Vec::new();
+            while start_time.elapsed() < duration {
+                let download_start = Instant::now();
+                match download_chunk(&client, &url).await {
+                    Ok(bytes) => {
+                        measurements.push(ThroughputMeasurement {
+                            bytes,
+                            duration: download_start.elapsed(),
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Download error on connection {i}: {e}");
+                        break;
                     }
                 }
+            }
 
-                connection_bytes
-            });
+            measurements
+        });
 
-            tasks.push(task);
-        }
+        tasks.push(task);
+    }
 
-        // Wait for all tasks to complete for this test size
-        for task in tasks {
-            if let Ok(bytes) = task.await {
-                total_downloaded += bytes;
+    for task in tasks {
+        match task.await {
+            Ok(task_measurements) => {
+                measurements.extend(task_measurements);
+            }
+            Err(e) => {
+                eprintln!("Task error: {e}");
             }
         }
     }
 
-    let actual_duration = start_time.elapsed();
+    let end_time = Instant::now();
 
-    Ok(SimpleTestResult::new(total_downloaded, actual_duration))
+    Ok(ThroughputResult {
+        measurements,
+        total_duration: end_time.duration_since(start_time),
+        timestamp: chrono::Utc::now(),
+    })
 }
 
-async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<SimpleTestResult> {
+async fn run_upload_test(
+    client: &Client,
+    server_url: &str,
+    parallel_connections: usize,
+    payload_size: usize,
+    duration: Duration,
+) -> Result<ThroughputResult> {
     println!(
-        "Starting upload test with {} parallel connections...",
-        config.parallel_connections
+        "Starting upload test with {payload_size} payload size and {parallel_connections} parallel connections...",
     );
 
+    let mut measurements = Vec::new();
     let start_time = Instant::now();
-    let test_duration = Duration::from_secs(config.duration);
 
-    // Determine test chunk size based on configuration (same logic as download test)
-    let test_sizes = &config.payload_sizes;
+    // Generate upload data
+    let mut upload_data = vec![0u8; payload_size];
+    rng().fill_bytes(&mut upload_data);
 
-    // Use the same size logic as download test for consistent testing
-    let mut total_uploaded = 0u64;
-    let test_start = start_time;
+    let mut tasks = Vec::new();
 
-    // Run tests for each configured size (typically just one unless specifically configured)
-    for (size_index, test_size) in test_sizes.iter().enumerate() {
-        let remaining_duration = test_duration.saturating_sub(test_start.elapsed());
-        if remaining_duration.is_zero() {
-            break; // No time left for more test sizes
-        }
+    for i in 0..parallel_connections {
+        let client = client.clone();
+        let url = format!("{}/upload?id={}", server_url, i);
+        let data = upload_data.clone();
 
-        let size_duration = if test_sizes.len() == 1 {
-            remaining_duration
-        } else {
-            // Divide remaining time among remaining test sizes
-            remaining_duration / (test_sizes.len() - size_index) as u32
-        };
-
-        // Generate upload data for this test size
-        let mut upload_data = vec![0u8; *test_size];
-        rng().fill_bytes(&mut upload_data);
-
-        let mut tasks = Vec::new();
-
-        for i in 0..config.parallel_connections {
-            let client = client.clone();
-            let url = format!("{}/upload?id={}", config.server_url, i);
-            let data = upload_data.clone();
-
-            let task = tokio::spawn(async move {
-                let mut connection_bytes = 0u64;
-                let connection_start = Instant::now();
-
-                while connection_start.elapsed() < size_duration {
-                    match upload_chunk(&client, &url, &data).await {
-                        Ok(bytes) => {
-                            connection_bytes += bytes;
-                        }
-                        Err(e) => {
-                            eprintln!("Upload error on connection {i}: {e}");
-                            break;
-                        }
+        let task = tokio::spawn(async move {
+            let mut measurements = Vec::new();
+            while start_time.elapsed() < duration {
+                let upload_start = Instant::now();
+                match upload_chunk(&client, &url, &data).await {
+                    Ok(bytes) => {
+                        measurements.push(ThroughputMeasurement {
+                            bytes,
+                            duration: upload_start.elapsed(),
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Upload error on connection {i}: {e}");
+                        break;
                     }
                 }
+            }
 
-                connection_bytes
-            });
+            measurements
+        });
 
-            tasks.push(task);
-        }
+        tasks.push(task);
+    }
 
-        // Wait for all tasks to complete for this test size
-        for task in tasks {
-            if let Ok(bytes) = task.await {
-                total_uploaded += bytes;
+    for task in tasks {
+        match task.await {
+            Ok(task_measurements) => {
+                measurements.extend(task_measurements);
+            }
+            Err(e) => {
+                eprintln!("Task error: {e}");
             }
         }
     }
 
-    let actual_duration = start_time.elapsed();
+    let end_time = Instant::now();
 
-    Ok(SimpleTestResult::new(total_uploaded, actual_duration))
+    Ok(ThroughputResult {
+        measurements,
+        total_duration: end_time.duration_since(start_time),
+        timestamp: chrono::Utc::now(),
+    })
 }
 
+/// Download a chunk of data from the server
 async fn download_chunk(client: &Client, url: &str) -> Result<u64> {
     let response = client.get(url).send().await?;
     let mut total_bytes = 0u64;
@@ -369,6 +366,7 @@ async fn download_chunk(client: &Client, url: &str) -> Result<u64> {
     Ok(total_bytes)
 }
 
+/// Upload a chunk of data to the server
 async fn upload_chunk(client: &Client, url: &str, data: &[u8]) -> Result<u64> {
     let response = client
         .post(url)
@@ -382,95 +380,5 @@ async fn upload_chunk(client: &Client, url: &str, data: &[u8]) -> Result<u64> {
         Ok(data.len() as u64)
     } else {
         eyre::bail!("Upload failed with status: {}", response.status());
-    }
-}
-
-/// Determines the optimal download test size based on current connection download throughput.
-async fn determine_optimal_download_test_size(
-    client: &Client,
-    base_url: &str,
-    parallel_connections: usize,
-) -> Result<usize> {
-    // Start with a small test to estimate connection speed
-    let small_test_size = 1024 * 1024; // 1MB
-    let url = format!("{base_url}/download?size={small_test_size}&test=true");
-
-    let start = Instant::now();
-    match download_chunk(client, &url).await {
-        Ok(bytes) => {
-            let duration = start.elapsed();
-            let mbps = (bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
-
-            // Scale test size based on estimated speed and parallel connections
-            // Aim for tests that take 5-10 seconds per chunk, divided by number of connections
-            let target_duration = 7.0; // seconds
-            let base_optimal_size = ((mbps * 1_000_000.0 / 8.0) * target_duration) as usize;
-
-            // Adjust for parallel connections - each connection should handle a reasonable chunk
-            let optimal_size = if parallel_connections > 1 {
-                (base_optimal_size / parallel_connections).max(512 * 1024) // At least 512KB per connection
-            } else {
-                base_optimal_size
-            };
-
-            // Clamp between 512KB and 100MB
-            Ok(optimal_size.clamp(512 * 1024, 100 * 1024 * 1024))
-        }
-        Err(_) => {
-            // Fallback to default size adjusted for parallel connections
-            let default_size = 10 * 1024 * 1024; // 10MB
-            Ok(if parallel_connections > 1 {
-                (default_size / parallel_connections).max(1024 * 1024) // At least 1MB per connection
-            } else {
-                default_size
-            })
-        }
-    }
-}
-
-/// Determines the optimal upload test size based on current connection upload throughput.
-async fn determine_optimal_upload_test_size(
-    client: &Client,
-    base_url: &str,
-    parallel_connections: usize,
-) -> Result<usize> {
-    // Start with a small test to estimate connection speed
-    let small_test_size = 1024 * 1024; // 1MB
-    let mut test_data = vec![0u8; small_test_size];
-    let mut rng = rng();
-    rng.fill_bytes(&mut test_data);
-
-    let url = format!("{base_url}/upload?test=true");
-
-    let start = Instant::now();
-    match upload_chunk(client, &url, &test_data).await {
-        Ok(bytes) => {
-            let duration = start.elapsed();
-            let mbps = (bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
-
-            // Scale test size based on estimated speed and parallel connections
-            // Aim for tests that take 5-10 seconds per chunk, divided by number of connections
-            let target_duration = 7.0; // seconds
-            let base_optimal_size = ((mbps * 1_000_000.0 / 8.0) * target_duration) as usize;
-
-            // Adjust for parallel connections - each connection should handle a reasonable chunk
-            let optimal_size = if parallel_connections > 1 {
-                (base_optimal_size / parallel_connections).max(512 * 1024) // At least 512KB per connection
-            } else {
-                base_optimal_size
-            };
-
-            // Clamp between 512KB and 100MB
-            Ok(optimal_size.clamp(512 * 1024, 100 * 1024 * 1024))
-        }
-        Err(_) => {
-            // Fallback to default size adjusted for parallel connections
-            let default_size = 10 * 1024 * 1024; // 10MB
-            Ok(if parallel_connections > 1 {
-                (default_size / parallel_connections).max(1024 * 1024) // At least 1MB per connection
-            } else {
-                default_size
-            })
-        }
     }
 }

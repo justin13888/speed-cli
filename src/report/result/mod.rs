@@ -9,12 +9,12 @@ mod simple;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TestResult {
-    Simple(SimpleTestResult),
+    Simple(ThroughputResult),
     Http(HttpTestResult),
 }
 
-impl From<SimpleTestResult> for TestResult {
-    fn from(result: SimpleTestResult) -> Self {
+impl From<ThroughputResult> for TestResult {
+    fn from(result: ThroughputResult) -> Self {
         TestResult::Simple(result)
     }
 }

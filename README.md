@@ -39,7 +39,7 @@ It's difficult to have one tool that tests your network conditions between two d
 
 ### Quality Metrics
 
-- **Bandwidth** (upload/download)
+- **Throughput** (upload/download)
 - **Latency** (round-trip time)
 - **Jitter** (latency variation)
 - **Packet Loss**
@@ -233,20 +233,19 @@ COMPREHENSIVE NETWORK DIAGNOSTIC RESULTS
 
 ### Supported Protocols
 
+<!-- TODO: Need to clarify these descriptions -->
+
 - **TCP**: Stream-based throughput testing
-- **UDP**: Packet-based testing with configurable bandwidth
+- **UDP**: Packet-based testing
 - **HTTP/1.1**: Standard HTTP speed testing
 - **HTTP/2**: Modern HTTP with multiplexing support
-- **DNS**: Resolution performance testing
 
 ### Quality Metrics Calculated
 
-- **Bandwidth**: Measured in Mbps/Gbps
+- **Throughput**: Measured in Mbps/Gbps
 - **Latency**: Round-trip time in milliseconds
 - **Jitter**: Standard deviation of latency measurements
 - **Packet Loss**: Percentage of lost packets
-- **Connection Stability**: Rated from Poor to Excellent
-- **DNS Performance**: Resolution time and server comparison
 
 ### HTTP Test Endpoints
 

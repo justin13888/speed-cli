@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-use crate::utils::format::{format_bandwidth, format_bytes};
+use crate::utils::format::{format_throughput, format_bytes};
 
 pub async fn run_tcp_server(addr: impl ToSocketAddrs) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
@@ -34,14 +34,14 @@ pub async fn run_tcp_server(addr: impl ToSocketAddrs) -> Result<()> {
                     match socket.read(&mut buffer).await {
                         Ok(0) => {
                             // Connection closed
-                            let (total_bytes, duration, bandwidth_mbps) = handler.get_stats();
+                            let (total_bytes, duration, throughput_mbps) = handler.get_stats();
 
                             println!(
                                 "TCP connection from {} closed. {} received in {:.2}s ({})",
                                 addr,
                                 format_bytes(total_bytes).yellow(),
                                 duration.as_secs_f64(),
-                                format_bandwidth(bandwidth_mbps).green()
+                                format_throughput(throughput_mbps).green()
                             );
                             break;
                         }
@@ -50,13 +50,13 @@ pub async fn run_tcp_server(addr: impl ToSocketAddrs) -> Result<()> {
 
                             // Report progress if necessary
                             if handler.should_report() {
-                                let (total_bytes, _, bandwidth_mbps) = handler.get_stats();
+                                let (total_bytes, _, throughput_mbps) = handler.get_stats();
 
                                 println!(
-                                    "TCP {}: {} received, {} bandwidth",
+                                    "TCP {}: {} received, {} throughput",
                                     addr,
                                     format_bytes(total_bytes).yellow(),
-                                    format_bandwidth(bandwidth_mbps).green()
+                                    format_throughput(throughput_mbps).green()
                                 );
                             }
                         }
@@ -134,7 +134,7 @@ async fn handle_udp_packet(
     if data.len() >= 8 && data[0] == 0xFF && data[1] == 0xFF && data[2] == 0xFF && data[3] == 0xFF {
         let total_packets_sent = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let duration = client_state.start_time.elapsed();
-        let bandwidth_mbps =
+        let throughput_mbps =
             (client_state.total_bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
         let packet_loss = if total_packets_sent > 0 {
             ((total_packets_sent - client_state.packets_received) as f64
@@ -151,7 +151,7 @@ async fn handle_udp_packet(
             total_packets_sent,
             format_bytes(client_state.total_bytes).yellow(),
             duration.as_secs_f64(),
-            format_bandwidth(bandwidth_mbps).green(),
+            format_throughput(throughput_mbps).green(),
             packet_loss
         );
 
@@ -175,11 +175,11 @@ async fn handle_udp_packet(
             (client_state.total_bytes as f64 * 8.0) / (elapsed.as_secs_f64() * 1_000_000.0);
 
         println!(
-            "UDP {}: {} packets, {} received, {} bandwidth",
+            "UDP {}: {} packets, {} received, {} throughput",
             client_addr,
             client_state.packets_received,
             format_bytes(client_state.total_bytes).yellow(),
-            format_bandwidth(current_mbps).green()
+            format_throughput(current_mbps).green()
         );
 
         client_state.last_report = Instant::now();
@@ -223,7 +223,7 @@ impl OptimizedTcpHandler {
     fn get_stats(&self) -> (u64, Duration, f64) {
         let bytes = self.total_bytes.load(Ordering::Relaxed);
         let duration = self.start_time.elapsed();
-        let bandwidth_mbps = (bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
-        (bytes, duration, bandwidth_mbps)
+        let throughput_mbps = (bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
+        (bytes, duration, throughput_mbps)
     }
 }

@@ -631,13 +631,13 @@
 //     if let Some(download) = result.http_performance.download_mbps {
 //         println!(
 //             "   Download Speed: {}",
-//             format_bandwidth(download).green().bold()
+//             format_throughput(download).green().bold()
 //         );
 //     }
 //     if let Some(upload) = result.http_performance.upload_mbps {
 //         println!(
 //             "   Upload Speed: {}",
-//             format_bandwidth(upload).green().bold()
+//             format_throughput(upload).green().bold()
 //         );
 //     }
 //     if let Some(latency) = result.http_performance.latency_ms {
