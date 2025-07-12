@@ -17,6 +17,8 @@ pub struct TestReport {
     pub result: TestResult,
     /// Report timestamp in seconds
     pub timestamp: DateTime<Utc>,
+    /// Version of speed-cli that generated this report
+    pub version: String,
 }
 
 impl<C, R, T> From<(C, R, T)> for TestReport
@@ -30,6 +32,7 @@ where
             config: config.into(),
             result: result.into(),
             timestamp: timestamp.into(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 }
@@ -40,10 +43,6 @@ where
     R: Into<TestResult>,
 {
     fn from((config, result): (C, R)) -> Self {
-        Self {
-            config: config.into(),
-            result: result.into(),
-            timestamp: chrono::Utc::now(),
-        }
+        (config, result, Utc::now()).into()
     }
 }

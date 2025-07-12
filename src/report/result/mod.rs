@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 pub use http::*;
+pub use latency::*;
 pub use simple::*;
 mod http;
+mod latency;
 mod simple;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

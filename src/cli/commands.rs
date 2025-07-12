@@ -5,7 +5,7 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run as client (default mode)
+    /// Run as client
     Client {
         /// Server hostname or IP address (e.g., 182.168.1.1, google.com). Defaults to 127.0.0.1
         #[arg(short, long, default_value = "127.0.0.1")]
@@ -58,13 +58,14 @@ pub enum Commands {
         #[arg(short, long)]
         export: Option<PathBuf>,
 
-        /// Number of parallel connections
+        /// Number of parallel connections or streams (means different things for different protocols)
         #[arg(long, default_value = "1")]
         parallel: usize,
 
-        /// Enable adaptive test sizing
-        #[arg(long)]
-        adaptive: bool,
+        /// Packet/payload sizes in bytes (e.g., 1024, 8192). If empty, uses default sizes.
+        /// Note: TCP automatically segments anyways but this argument is kept for consistency.
+        #[arg(long, num_args = 0.., value_delimiter = ',')]
+        test_sizes: Vec<usize>,
 
         /// Test type (download, upload, bidirectional, simultaneous, latency)
         #[arg(long = "type", default_value = "bidirectional")]
@@ -103,19 +104,19 @@ pub enum Commands {
         bind: IpAddr,
 
         /// Listen port for TCP server
-        #[arg(long, default_value = "5201")]
+        #[arg(long)]
         tcp_port: Option<u16>,
 
         /// Listen port for UDP server  
-        #[arg(long, default_value = "5201")]
+        #[arg(long)]
         udp_port: Option<u16>,
 
         /// Listen port for HTTP server
-        #[arg(long, default_value = "8080")]
+        #[arg(long)]
         http_port: Option<u16>,
 
         /// Listen port for HTTPS server
-        #[arg(long, default_value = "8443")]
+        #[arg(long)]
         https_port: Option<u16>,
     },
 

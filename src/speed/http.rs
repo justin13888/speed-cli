@@ -14,7 +14,10 @@ use url::Url;
 
 use crate::{
     TestType,
-    report::{HttpTestConfig, HttpTestResult, SimpleTestResult, TestReport, TestResult},
+    report::{
+        HttpTestConfig, HttpTestResult, LatencyMeasurement, LatencyResult, SimpleTestResult,
+        TestReport,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,20 +44,6 @@ impl fmt::Display for HttpVersion {
             HttpVersion::HTTP3 => write!(f, "HTTP/3 (QUIC)"),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct LatencyMeasurement {
-    pub rtt_ms: f64,
-    pub timestamp: Instant, // TODO: Are you sure to use Instant rather than a duration since start? if it's ok, should rename the field
-}
-
-#[derive(Debug)]
-pub struct ConnectionMetrics {
-    pub dns_time: Duration,
-    pub connect_time: Duration,
-    pub ssl_time: Option<Duration>,
-    pub total_time: Duration,
 }
 
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
@@ -96,10 +85,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     match config.test_type {
         TestType::LatencyOnly => {
-            if let Some(latency) = measure_http_latency(&client, &config.server_url, 10).await? {
-                result.latency_ms = Some(latency.avg_rtt);
-                result.jitter_ms = Some(latency.jitter);
-            }
+            if let Some(latency) = measure_http_latency(&client, &config.server_url, 10).await? {}
         }
         TestType::Download => {
             let download_result = run_download_test(&client, &config).await?;
@@ -163,15 +149,7 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
     builder.build().context("Failed to create HTTP client")
 }
 
-#[derive(Debug)]
-pub struct LatencyResult {
-    pub avg_rtt: f64,
-    pub min_rtt: f64,
-    pub max_rtt: f64,
-    pub jitter: f64,
-    pub measurements: Vec<LatencyMeasurement>,
-}
-
+/// Measure HTTP latency by simply sending HEAD requests to the server
 async fn measure_http_latency(
     client: &Client,
     url: &str,
@@ -181,15 +159,14 @@ async fn measure_http_latency(
 
     println!("Measuring HTTP latency with {count} requests...");
 
+    let start = Instant::now();
     for i in 0..count {
-        let start = Instant::now();
-
         match client.head(url).send().await {
             Ok(_response) => {
                 let rtt = start.elapsed().as_secs_f64() * 1000.0;
                 measurements.push(LatencyMeasurement {
                     rtt_ms: rtt,
-                    timestamp: start,
+                    elapsed_time: start.elapsed(),
                 });
 
                 print!(".");
@@ -248,21 +225,7 @@ async fn run_download_test(client: &Client, config: &HttpTestConfig) -> Result<S
     let test_duration = Duration::from_secs(config.duration);
 
     // Determine test file size based on configuration
-    let test_sizes = if config.adaptive_sizing {
-        // Start with a small test to estimate speed, then adapt
-        let optimal_size = determine_optimal_download_test_size(
-            client,
-            &config.server_url,
-            config.parallel_connections,
-        )
-        .await?;
-        debug!("Adaptive sizing enabled. Optimal test size determined: {optimal_size} bytes");
-        vec![optimal_size]
-    } else if !config.test_sizes.is_empty() {
-        config.test_sizes.clone()
-    } else {
-        vec![10 * 1024 * 1024] // 10MB default
-    };
+    let test_sizes = &config.payload_sizes;
 
     let mut total_downloaded = 0u64;
     let test_start = start_time;
@@ -332,24 +295,7 @@ async fn run_upload_test(client: &Client, config: &HttpTestConfig) -> Result<Sim
     let test_duration = Duration::from_secs(config.duration);
 
     // Determine test chunk size based on configuration (same logic as download test)
-    let test_sizes = if config.adaptive_sizing {
-        // Start with a small test to estimate speed, then adapt
-        let optimal_size = determine_optimal_upload_test_size(
-            client,
-            &config.server_url,
-            config.parallel_connections,
-        )
-        .await?;
-        debug!(
-            "Adaptive sizing enabled. Optimal upload chunk size determined: {} bytes",
-            optimal_size
-        );
-        vec![optimal_size]
-    } else if !config.test_sizes.is_empty() {
-        config.test_sizes.clone()
-    } else {
-        vec![10 * 1024 * 1024] // 10MB default (same as download)
-    };
+    let test_sizes = &config.payload_sizes;
 
     // Use the same size logic as download test for consistent testing
     let mut total_uploaded = 0u64;

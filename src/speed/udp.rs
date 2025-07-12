@@ -9,7 +9,7 @@ use crate::utils::format::{format_bandwidth, format_bytes};
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    let server_addr = format!("{}:{}", config.server_addr, config.port);
+    let server_addr = format!("{}:{}", config.server, config.port);
     socket.connect(&server_addr).await?;
 
     println!("Connecting to server {}...", server_addr.cyan());
@@ -22,9 +22,8 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
 
     // Calculate packet size and interval for target bandwidth
     let packet_size = 1024; // 1KB packets
-    let target_bps = config.target_bandwidth * 1_000_000.0; // Convert Mbps to bps
-    let packets_per_second = target_bps / (packet_size as f64 * 8.0);
-    let packet_interval = Duration::from_secs_f64(1.0 / packets_per_second);
+    // TODO: You're supposed to implement dynamic packet sizing to maximize throughput while avoiding overwhelming network (e.g. AIMD CUBIC)
+    let packet_interval = Duration::from_secs_f64(1.0 / 100.0); // 100 packets per second
 
     let mut data = vec![0u8; packet_size];
     let mut last_report = Instant::now();

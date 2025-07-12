@@ -90,8 +90,8 @@ speed-cli client --http3 -s <server-ip> # HTTP/3 test
 # Run HTTP client test against specific server for 60 seconds
 speed-cli client --http -p 8080 -h 192.168.1.100 -d 60
 
-# Run HTTP client test with 8 parallel connections, adaptive sizing, and export results to JSON
-speed-cli client --http -p 8080 -h 192.168.1.100 --parallel 8 --adaptive -e results.json
+# Run HTTP client test with 8 parallel connections, and export results to JSON
+speed-cli client --http -p 8080 -h 192.168.1.100 --parallel 4 -e results.json
 
 # Run TCP client test against specific server
 speed-cli client --tcp -p 5201 -h 192.168.1.100

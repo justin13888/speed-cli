@@ -17,7 +17,7 @@ pub enum ClientMode {
     HTTP3,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
 pub enum TestType {
@@ -26,17 +26,13 @@ pub enum TestType {
     /// Upload only
     Upload,
     /// Bidirectional (both download and upload)
+    #[default]
     Bidirectional,
     /// Simultaneous download and upload
     Simultaneous,
     /// Latency only
+    #[clap(alias = "latency")]
     LatencyOnly,
-}
-
-impl Default for TestType {
-    fn default() -> Self {
-        TestType::Bidirectional
-    }
 }
 
 use std::fmt;

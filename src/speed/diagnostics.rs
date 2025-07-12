@@ -172,7 +172,6 @@
 //         test_type: HttpTestType::Comprehensive,
 //         http_version: HttpVersion::Auto,
 //         test_sizes: vec![1024 * 1024, 10 * 1024 * 1024, 50 * 1024 * 1024], // 1MB, 10MB, 50MB
-//         adaptive_sizing: true,
 //         export_file: None,
 //     };
 //     let http_result = run_http_test(http_config).await?;

@@ -1,7 +1,7 @@
 use colored::*;
 use eyre::Result;
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use clap::Parser;
@@ -13,6 +13,7 @@ use tracing::debug;
 
 pub use utils::types::*;
 
+use crate::constants::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT};
 use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
 use crate::speed::http::{HttpVersion, run_http_test};
 use crate::speed::server::{run_tcp_server, run_udp_server};
@@ -20,6 +21,7 @@ use crate::utils::export::export_report;
 use crate::utils::file::can_write;
 
 mod cli;
+mod constants;
 mod network;
 mod report;
 mod speed;
@@ -45,7 +47,6 @@ async fn main() -> Result<()> {
     // Start parsing
     let cli = Cli::parse();
 
-    // TODO: Make all constants (e.g. default ports) be offloaded to the `Commands` struct
     match cli.command {
         Commands::Client {
             server,
@@ -54,7 +55,7 @@ async fn main() -> Result<()> {
             mode,
             export,
             parallel,
-            adaptive,
+            test_sizes,
             test_type,
             debug,
             ..
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
             println!("{}", "Starting client mode...".green().bold());
 
             // TODO: Do something about debug flag...
+            // TODO: if debug on, debug log everything (config, test progress verbosely, etc.)
 
             // Verify export file path is writable
             // TODO: Validate this logic via unit tests
@@ -101,12 +103,12 @@ async fn main() -> Result<()> {
 
             match mode {
                 ClientMode::TCP => {
-                    let config = TcpTestConfig::new(server, port, duration);
+                    let config = TcpTestConfig::new(server, port, duration, parallel, test_sizes);
                     let tcp_report = run_tcp_client(config).await?;
                     test_reports.push(tcp_report);
                 }
                 ClientMode::UDP => {
-                    let config = UdpTestConfig::new(server, port, duration);
+                    let config = UdpTestConfig::new(server, port, duration, parallel, test_sizes);
 
                     let udp_report = run_udp_client(config).await?;
                     test_reports.push(udp_report);
@@ -120,9 +122,8 @@ async fn main() -> Result<()> {
                         duration,
                         parallel,
                         test_type,
+                        test_sizes,
                         HttpVersion::HTTP1,
-                        vec![1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024], // 1MB, 10MB, 100MB // TODO: Take this from configs
-                        adaptive,
                     );
 
                     let http_report = run_http_test(config).await?;
@@ -168,19 +169,19 @@ async fn main() -> Result<()> {
 
             // Setup TCP
             if all || tcp {
-                let tcp_addr = SocketAddr::new(bind, tcp_port.unwrap_or(5201));
+                let tcp_addr = SocketAddr::new(bind, tcp_port.unwrap_or(DEFAULT_TCP_PORT));
                 handles.push(("TCP", tokio::spawn(run_tcp_server(tcp_addr))));
             }
 
             // Setup UDP
             if all || udp {
-                let udp_addr = SocketAddr::new(bind, udp_port.unwrap_or(5201));
+                let udp_addr = SocketAddr::new(bind, udp_port.unwrap_or(DEFAULT_UDP_PORT));
                 handles.push(("UDP", tokio::spawn(run_udp_server(udp_addr))));
             }
 
             // Setup HTTP server modes (i.e. HTTP/1.1 without TLS, h2c)
             if all || http {
-                let http_addr = SocketAddr::new(bind, http_port.unwrap_or(8080));
+                let http_addr = SocketAddr::new(bind, http_port.unwrap_or(DEFAULT_HTTP_PORT));
 
                 handles.push((
                     "HTTP",
@@ -195,7 +196,7 @@ async fn main() -> Result<()> {
 
             // Setup HTTPS server modes (i.e. HTTP/2, HTTP/3)
             if all || https {
-                let https_addr = SocketAddr::new(bind, https_port.unwrap_or(8443));
+                let https_addr = SocketAddr::new(bind, https_port.unwrap_or(DEFAULT_HTTPS_PORT));
 
                 handles.push((
                     "HTTPS",

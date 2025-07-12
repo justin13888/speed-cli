@@ -11,13 +11,13 @@ use crate::report::{SimpleTestResult, TcpTestConfig, TestReport, TestResult};
 use crate::utils::format::{format_bandwidth, format_bytes};
 
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
-    let addr = format!("{}:{}", config.server_addr, config.port);
+    let addr = format!("{}:{}", config.server, config.port);
     let mut stream = TcpStream::connect(&addr).await?;
 
     println!("Connecting to server {}...", addr.cyan());
     println!("{}", "Connected! Starting TCP bandwidth test...".green());
 
-    let test_duration = Duration::from_secs(config.duration);
+    let test_duration = config.duration;
     let start_time = Instant::now();
     let mut total_bytes = 0u64;
     let mut measurements = VecDeque::new();
