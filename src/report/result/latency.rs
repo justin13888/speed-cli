@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct LatencyResult {
     /// List of RTT measurements in milliseconds
     pub measurements: Vec<LatencyMeasurement>,
-
     pub timestamp: DateTime<Utc>,
 }
 
@@ -38,16 +37,6 @@ impl LatencyResult {
             .iter()
             .filter(|m| m.rtt_ms.is_none())
             .count()
-    }
-
-    /// Returns total elapsed time for all measurements
-    pub fn total_elapsed(&self) -> Duration {
-        // Take the maximum elapsed time from all measurements
-        self.measurements
-            .iter()
-            .map(|m| m.elapsed_time)
-            .max()
-            .unwrap_or(Duration::ZERO)
     }
 
     /// Returns average RTT. If no measurements, returns 0.0

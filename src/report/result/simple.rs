@@ -23,8 +23,10 @@ impl fmt::Display for ThroughputResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let data_transferred = format_size(self.bytes_transferred(), BINARY);
         let avg_throughput = {
-            let bps = (self.bytes_transferred() as f64) / self.total_duration.as_secs_f64();
-            let formatted_size = format_size(bps as u64, DECIMAL.base_unit(BaseUnit::Bit));
+            let formatted_size = format_size(
+                self.avg_throughput() as u64,
+                DECIMAL.base_unit(BaseUnit::Bit),
+            );
             format!("{formatted_size}/s")
         };
 
@@ -75,12 +77,12 @@ impl ThroughputResult {
         self.measurements.iter().map(|m| m.bytes).sum()
     }
 
-    /// Returns the average throughput in Mbps
+    /// Returns the average throughput in bytes per second
     pub fn avg_throughput(&self) -> f64 {
         if self.total_duration.is_zero() {
             return 0.0;
         }
 
-        (self.bytes_transferred() as f64 * 8.0) / (self.total_duration.as_secs_f64() * 1_000_000.0)
+        (self.bytes_transferred() as f64) / self.total_duration.as_secs_f64()
     }
 }

@@ -41,7 +41,6 @@ pub async fn run_udp_server(addr: impl ToSocketAddrs) -> Result<()> {
 struct UdpClientState {
     start_time: Instant,
     last_sequence: u32,
-    total_packets: u32,
     total_bytes: u64,
     packets_received: u32,
     last_report: Instant,
@@ -53,7 +52,6 @@ impl UdpClientState {
         Self {
             start_time: now,
             last_sequence: 0,
-            total_packets: 0,
             total_bytes: 0,
             packets_received: 0,
             last_report: now,

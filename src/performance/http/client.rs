@@ -3,7 +3,6 @@ use eyre::{Context, Result};
 use futures::stream::StreamExt;
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
