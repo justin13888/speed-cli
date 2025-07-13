@@ -72,13 +72,22 @@ impl LatencyResult {
             return None;
         }
         let mut rtts = self.rtts();
-        rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let index = ((n / 100.0) * rtts.len() as f64).round() as usize;
-        if index < rtts.len() {
-            Some(rtts[index])
-        } else {
-            None
+        if rtts.is_empty() {
+            return None;
         }
+        rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Handle edge cases
+        if n == 0.0 {
+            return Some(rtts[0]);
+        }
+        if n == 100.0 {
+            return Some(rtts[rtts.len() - 1]);
+        }
+
+        // Calculate index using the nearest-rank method
+        let index = ((n / 100.0) * (rtts.len() - 1) as f64).round() as usize;
+        Some(rtts[index])
     }
 
     /// Returns maximum RTT if available, otherwise None.
@@ -230,5 +239,85 @@ impl Display for LatencyMeasurement {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-// TODO: Add unit test for nth percentile calculation
+    fn create_test_latency_result(rtts: Vec<Option<f64>>) -> LatencyResult {
+        let measurements = rtts
+            .into_iter()
+            .map(|rtt_ms| LatencyMeasurement {
+                rtt_ms,
+                elapsed_time: Duration::from_millis(0),
+            })
+            .collect();
+
+        LatencyResult {
+            measurements,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_percentile_calculation() {
+        // Test with sorted values: [10, 20, 30, 40, 50]
+        let result = create_test_latency_result(vec![
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            Some(40.0),
+            Some(50.0),
+        ]);
+
+        assert_eq!(result.percentile_rtt(0.0), Some(10.0));
+        assert_eq!(result.percentile_rtt(25.0), Some(20.0));
+        assert_eq!(result.percentile_rtt(50.0), Some(30.0));
+        assert_eq!(result.percentile_rtt(75.0), Some(40.0));
+        assert_eq!(result.percentile_rtt(100.0), Some(50.0));
+    }
+
+    #[test]
+    fn test_percentile_with_unsorted_values() {
+        let result = create_test_latency_result(vec![
+            Some(50.0),
+            Some(10.0),
+            Some(30.0),
+            Some(20.0),
+            Some(40.0),
+        ]);
+
+        assert_eq!(result.percentile_rtt(0.0), Some(10.0));
+        assert_eq!(result.percentile_rtt(50.0), Some(30.0));
+        assert_eq!(result.percentile_rtt(100.0), Some(50.0));
+    }
+
+    #[test]
+    fn test_percentile_with_dropped_measurements() {
+        let result =
+            create_test_latency_result(vec![Some(10.0), None, Some(30.0), None, Some(50.0)]);
+
+        assert_eq!(result.percentile_rtt(0.0), Some(10.0));
+        assert_eq!(result.percentile_rtt(50.0), Some(30.0));
+        assert_eq!(result.percentile_rtt(100.0), Some(50.0));
+    }
+
+    #[test]
+    fn test_percentile_invalid_range() {
+        let result = create_test_latency_result(vec![Some(10.0), Some(20.0)]);
+
+        assert_eq!(result.percentile_rtt(-1.0), None);
+        assert_eq!(result.percentile_rtt(101.0), None);
+    }
+
+    #[test]
+    fn test_percentile_empty_measurements() {
+        let result = create_test_latency_result(vec![]);
+        assert_eq!(result.percentile_rtt(50.0), None);
+    }
+
+    #[test]
+    fn test_percentile_all_dropped() {
+        let result = create_test_latency_result(vec![None, None, None]);
+        assert_eq!(result.percentile_rtt(50.0), None);
+    }
+}

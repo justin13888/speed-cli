@@ -177,7 +177,16 @@ async fn main() -> Result<()> {
                     let udp_report = run_udp_client(config).await?;
                     reports.push(udp_report);
                 }
-                ClientMode::HTTP1 => {
+                ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
+                    // For HTTP modes, we need to determine the HTTP version
+                    let http_version = match mode {
+                        ClientMode::HTTP1 => HttpVersion::HTTP1,
+                        ClientMode::HTTP2 => HttpVersion::HTTP2,
+                        ClientMode::H2C => HttpVersion::H2C,
+                        ClientMode::HTTP3 => HttpVersion::HTTP3,
+                        _ => unreachable!(),
+                    };
+
                     let config = HttpTestConfig::new(
                         server,
                         port,
@@ -185,28 +194,12 @@ async fn main() -> Result<()> {
                         parallel,
                         test_type,
                         test_sizes,
-                        HttpVersion::HTTP1,
+                        http_version,
                     );
 
                     let http_report = run_http_test(config).await?;
                     reports.push(http_report);
                 }
-                ClientMode::HTTP2 => {
-                    let config = HttpTestConfig::new(
-                        server,
-                        port,
-                        duration,
-                        parallel,
-                        test_type,
-                        test_sizes,
-                        HttpVersion::HTTP2,
-                    );
-
-                    let http_report = run_http_test(config).await?;
-                    reports.push(http_report);
-                }
-                ClientMode::H2C => todo!(),
-                ClientMode::HTTP3 => todo!(),
             }
 
             println!("{}", "Client test completed.".green().bold());

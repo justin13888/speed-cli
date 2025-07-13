@@ -32,6 +32,8 @@ fn ensure_crypto_provider() {
     });
 }
 
+// TODO: Need to optimize HTTPS (e.g. HTTP/2) tests for throughput
+
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     println!("{}", "Starting HTTP speed test...".green().bold());
 

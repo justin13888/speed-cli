@@ -12,6 +12,8 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::utils::format::{format_bytes, format_throughput};
 
+// TODO: Try pushing this to 100gig connection
+
 #[derive(Debug, Clone)]
 pub struct TcpServerConfig {
     /// Maximum number of concurrent connections

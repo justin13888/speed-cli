@@ -2,9 +2,6 @@ pub const DEFAULT_TCP_PORT: u16 = 5201;
 pub const DEFAULT_UDP_PORT: u16 = 5201;
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub const DEFAULT_HTTPS_PORT: u16 = 8443;
-pub const DEFAULT_TEST_DURATION: u64 = 10;
-
-pub const DEFAULT_PARALLEL_CONNECTIONS: usize = 4;
 
 pub const DEFAULT_TCP_PACKET_SIZES: &[usize] = &[1024, 8192, 65536]; // 1KB, 8KB, 64KB
 pub const DEFAULT_UDP_PACKET_SIZES: &[usize] = &[1024, 8192, 65536]; // 1KB, 8KB, 64KB

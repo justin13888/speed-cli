@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(clap::ValueEnum, Clone, Debug)]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Eq)]
 #[clap(rename_all = "lowercase")]
 pub enum ClientMode {
     /// TCP
