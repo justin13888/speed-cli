@@ -203,8 +203,8 @@ async fn measure_http_latency(
                 pb.set_position(elapsed);
 
                 // Calculate and display running average latency
-                if let Ok(measurements) = measurements_for_stats.lock() {
-                    if !measurements.is_empty() {
+                if let Ok(measurements) = measurements_for_stats.lock()
+                    && !measurements.is_empty() {
                         let valid_measurements: Vec<f64> =
                             measurements.iter().filter_map(|m| m.rtt_ms).collect();
 
@@ -221,7 +221,6 @@ async fn measure_http_latency(
                             ));
                         }
                     }
-                }
 
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -356,8 +355,8 @@ async fn run_download_test(
                 pb.set_position(elapsed);
 
                 // Calculate and display running average throughput
-                if let Ok(measurements) = measurements_for_stats.lock() {
-                    if !measurements.is_empty() {
+                if let Ok(measurements) = measurements_for_stats.lock()
+                    && !measurements.is_empty() {
                         let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
                         let elapsed_secs = start_time.elapsed().as_secs_f64();
                         let throughput_mbps =
@@ -371,7 +370,6 @@ async fn run_download_test(
                             measurements.len()
                         ));
                     }
-                }
 
                 // Update every 100ms
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -492,8 +490,8 @@ async fn run_upload_test(
                 pb.set_position(elapsed);
 
                 // Calculate and display running average throughput
-                if let Ok(measurements) = measurements_for_stats.lock() {
-                    if !measurements.is_empty() {
+                if let Ok(measurements) = measurements_for_stats.lock()
+                    && !measurements.is_empty() {
                         let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
                         let elapsed_secs = start_time.elapsed().as_secs_f64();
                         let throughput_mbps =
@@ -507,7 +505,6 @@ async fn run_upload_test(
                             measurements.len()
                         ));
                     }
-                }
 
                 // Update every 100ms
                 tokio::time::sleep(Duration::from_millis(100)).await;
