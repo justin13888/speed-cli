@@ -173,9 +173,9 @@ impl HttpTestConfig {
 impl Display for TestConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            TestConfig::Tcp(config) => write!(f, "{}", config),
-            TestConfig::Udp(config) => write!(f, "{}", config),
-            TestConfig::Http(config) => write!(f, "{}", config),
+            TestConfig::Tcp(config) => write!(f, "{config}"),
+            TestConfig::Udp(config) => write!(f, "{config}"),
+            TestConfig::Http(config) => write!(f, "{config}"),
         }
     }
 }

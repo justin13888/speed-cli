@@ -1,4 +1,4 @@
-use chrono::{Utc, format};
+use chrono::Utc;
 use colored::Colorize as _;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
@@ -234,7 +234,7 @@ async fn run_download_test(
 
     for i in 0..parallel_connections {
         let client = client.clone();
-        let url = format!("{}/download?size={}&id={}", server_url, payload_size, i);
+        let url = format!("{server_url}/download?size={payload_size}&id={i}");
 
         let task = tokio::spawn(async move {
             let mut measurements = Vec::new();
@@ -297,14 +297,17 @@ async fn run_upload_test(
     let start_time = Instant::now();
 
     // Generate upload data
-    let mut upload_data = vec![0u8; payload_size];
-    rng().fill_bytes(&mut upload_data);
+    let upload_data = {
+        let mut data = vec![0u8; payload_size];
+        rng().fill_bytes(&mut data);
+        data
+    };
 
     let mut tasks = Vec::new();
 
     for i in 0..parallel_connections {
         let client = client.clone();
-        let url = format!("{}/upload?id={}", server_url, i);
+        let url = format!("{server_url}/upload?id={i}");
         let data = upload_data.clone();
 
         let task = tokio::spawn(async move {

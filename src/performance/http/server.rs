@@ -4,19 +4,15 @@ use axum::{
     extract::{DefaultBodyLimit, Query},
     http::{Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, head, post},
+    routing::{get, post},
 };
 use axum_server::tls_rustls::RustlsConfig;
-use bytes::Bytes;
 use eyre::Result;
 use futures::StreamExt as _;
-use futures_util::stream::Stream;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::BodyExt;
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, sync::Once};
-use tokio::fs::File;
-use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::debug;
 

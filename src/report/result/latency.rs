@@ -119,7 +119,7 @@ impl Display for LatencyResult {
             f,
             "    {}: {}",
             "Packet Loss".bright_blue().bold(),
-            format!("{:.2}%", loss_rate).red()
+            format!("{loss_rate:.2}%").red()
         )?;
 
         if let Some(avg) = self.avg_rtt() {
@@ -127,7 +127,7 @@ impl Display for LatencyResult {
                 f,
                 "    {}: {}",
                 "Average RTT".bright_blue().bold(),
-                format!("{:.2} ms", avg).cyan()
+                format!("{avg:.2} ms").cyan()
             )?;
         }
 
@@ -136,7 +136,7 @@ impl Display for LatencyResult {
                 f,
                 "    {}: {}",
                 "Min RTT".bright_blue().bold(),
-                format!("{:.2} ms", min).green()
+                format!("{min:.2} ms").green()
             )?;
         }
 
@@ -145,7 +145,7 @@ impl Display for LatencyResult {
                 f,
                 "    {}: {}",
                 "Max RTT".bright_blue().bold(),
-                format!("{:.2} ms", max).yellow()
+                format!("{max:.2} ms").yellow()
             )?;
         }
 
@@ -154,7 +154,7 @@ impl Display for LatencyResult {
                 f,
                 "    {}: {}",
                 "Jitter".bright_blue().bold(),
-                format!("{:.2} ms", jitter).magenta()
+                format!("{jitter:.2} ms").magenta()
             )?;
         }
 
@@ -182,7 +182,7 @@ pub struct LatencyMeasurement {
 impl Display for LatencyMeasurement {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self.rtt_ms {
-            Some(rtt) => write!(f, "{:.2} ms", rtt),
+            Some(rtt) => write!(f, "{rtt:.2} ms"),
             None => write!(f, "{}", "dropped".red()),
         }
     }

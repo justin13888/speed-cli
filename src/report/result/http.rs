@@ -1,14 +1,12 @@
 use std::fmt::{self, Display, Formatter};
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use colored::Colorize as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    TestType,
-    performance::http::HttpVersion,
     report::{LatencyResult, ThroughputResult},
-    utils::format::{format_bytes, format_throughput},
+    utils::format::format_bytes,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +75,7 @@ impl Display for HttpTestResult {
         // Display latency if available
         if let Some(latency) = &self.latency {
             writeln!(f, "  {}", "Latency Results:".bright_green().bold())?;
-            write!(f, "{}", latency)?;
+            write!(f, "{latency}")?;
             writeln!(f)?;
         }
 
@@ -92,9 +90,9 @@ impl Display for HttpTestResult {
                     format_bytes(*size).yellow()
                 )?;
                 // Indent the throughput result output
-                let result_str = format!("{}", result);
+                let result_str = format!("{result}");
                 for line in result_str.lines() {
-                    writeln!(f, "    {}", line)?;
+                    writeln!(f, "    {line}")?;
                 }
             }
         }
@@ -110,9 +108,9 @@ impl Display for HttpTestResult {
                     format_bytes(*size).yellow()
                 )?;
                 // Indent the throughput result output
-                let result_str = format!("{}", result);
+                let result_str = format!("{result}");
                 for line in result_str.lines() {
-                    writeln!(f, "    {}", line)?;
+                    writeln!(f, "    {line}")?;
                 }
             }
         }

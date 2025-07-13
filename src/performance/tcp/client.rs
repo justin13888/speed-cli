@@ -6,8 +6,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 
-use crate::report::{ThroughputMeasurement, ThroughputResult, TcpTestConfig, TestReport};
-use crate::utils::format::{format_throughput, format_bytes};
+use crate::report::{TcpTestConfig, TestReport, ThroughputMeasurement, ThroughputResult};
+use crate::utils::format::{format_bytes, format_throughput};
 
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let addr = format!("{}:{}", config.server, config.port);

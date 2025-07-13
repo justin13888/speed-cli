@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
 
             // Print test reports
             for report in &reports {
-                println!("{:#}", report);
+                println!("{report:#}");
             }
 
             // If export file is specified, write results
