@@ -1,7 +1,8 @@
 use std::fmt::{self, Display, Formatter};
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
 use colored::*;
+use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
 
 use crate::utils::format::format_bytes;
@@ -48,7 +49,7 @@ pub struct TcpTestConfig {
     /// Number of parallel TCP connections
     pub parallel_connections: usize,
     /// Payload sizes to use for the test, in bytes. Note this doesn't make sense for TCP but included anyways.
-    pub payload_sizes: HashSet<usize>,
+    pub payload_sizes: IndexSet<usize>,
 }
 
 impl TcpTestConfig {
@@ -62,14 +63,14 @@ impl TcpTestConfig {
     where
         T: IntoIterator<Item = usize>,
     {
-        let payload_sizes: HashSet<usize> = payload_sizes.into_iter().collect();
+        let payload_sizes: IndexSet<usize> = payload_sizes.into_iter().collect();
         Self {
             server,
             port: port.unwrap_or(DEFAULT_TCP_PORT), // Default TCP port
             duration: Duration::from_secs(duration),
             parallel_connections: parallel_connections.max(1),
             payload_sizes: if payload_sizes.is_empty() {
-                HashSet::from_iter(DEFAULT_TCP_PACKET_SIZES.iter().copied())
+                IndexSet::from_iter(DEFAULT_TCP_PACKET_SIZES.iter().copied())
             } else {
                 payload_sizes
             },
@@ -85,7 +86,7 @@ pub struct UdpTestConfig {
     /// Number of parallel UDP streams. This is somewhat less relevant for UDP but included for consistency.
     pub parallel_streams: usize,
     /// Payload sizes to use for the test, in bytes.
-    pub payload_sizes: HashSet<usize>,
+    pub payload_sizes: IndexSet<usize>,
 }
 
 impl UdpTestConfig {
@@ -99,14 +100,14 @@ impl UdpTestConfig {
     where
         T: IntoIterator<Item = usize>,
     {
-        let payload_sizes: HashSet<usize> = payload_sizes.into_iter().collect();
+        let payload_sizes: IndexSet<usize> = payload_sizes.into_iter().collect();
         Self {
             server,
             port: port.unwrap_or(DEFAULT_UDP_PORT), // Default UDP port
             duration,
             parallel_streams: parallel_streams.max(1),
             payload_sizes: if payload_sizes.is_empty() {
-                HashSet::from_iter(DEFAULT_UDP_PACKET_SIZES.iter().copied())
+                IndexSet::from_iter(DEFAULT_UDP_PACKET_SIZES.iter().copied())
             } else {
                 payload_sizes
             },
@@ -124,7 +125,7 @@ pub struct HttpTestConfig {
     pub parallel_connections: usize,
     pub test_type: TestType,
     /// Payload sizes for testing.
-    pub payload_sizes: HashSet<usize>,
+    pub payload_sizes: IndexSet<usize>,
     pub http_version: HttpVersion,
 }
 
@@ -141,7 +142,7 @@ impl HttpTestConfig {
     where
         T: IntoIterator<Item = usize>,
     {
-        let payload_sizes: HashSet<usize> = payload_sizes.into_iter().collect();
+        let payload_sizes: IndexSet<usize> = payload_sizes.into_iter().collect();
         let is_secure = match http_version {
             HttpVersion::HTTP1 | HttpVersion::H2C => false,
             HttpVersion::HTTP2 | HttpVersion::HTTP3 => true,
@@ -155,7 +156,7 @@ impl HttpTestConfig {
         let server_url = format!("{scheme}://{server}:{port}");
 
         let payload_sizes = if payload_sizes.is_empty() {
-            HashSet::from_iter(DEFAULT_HTTP_PACKET_SIZES.iter().copied())
+            IndexSet::from_iter(DEFAULT_HTTP_PACKET_SIZES.iter().copied())
         } else {
             payload_sizes
         };
