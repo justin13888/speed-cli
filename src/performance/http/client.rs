@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Utc, format};
 use colored::Colorize as _;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
@@ -20,6 +20,7 @@ use crate::{
         HttpTestConfig, HttpTestResult, LatencyMeasurement, LatencyResult, TestReport,
         ThroughputMeasurement, ThroughputResult,
     },
+    utils::format::format_bytes,
 };
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
@@ -214,8 +215,9 @@ async fn run_download_test(
     duration: Duration,
 ) -> Result<ThroughputResult> {
     println!(
-        "Starting download test with {payload_size} payload size and {} parallel connections...",
-        parallel_connections
+        "Starting download test with {} payload size and {} parallel connections...",
+        format_bytes(payload_size).yellow(),
+        parallel_connections.to_string().yellow()
     );
 
     let mut measurements = Vec::new();
@@ -279,7 +281,9 @@ async fn run_upload_test(
     duration: Duration,
 ) -> Result<ThroughputResult> {
     println!(
-        "Starting upload test with {payload_size} payload size and {parallel_connections} parallel connections...",
+        "Starting upload test with {} payload size and {} parallel connections...",
+        format_bytes(payload_size).yellow(),
+        parallel_connections.to_string().yellow()
     );
 
     let mut measurements = Vec::new();

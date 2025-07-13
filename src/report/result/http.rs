@@ -87,9 +87,9 @@ impl Display for HttpTestResult {
             for (size, result) in &self.download {
                 writeln!(
                     f,
-                    "    {} ({} bytes):",
+                    "    {} ({}):",
                     "Payload Size".bright_blue(),
-                    size.to_string().yellow()
+                    format_bytes(*size).yellow()
                 )?;
                 // Indent the throughput result output
                 let result_str = format!("{}", result);
@@ -105,9 +105,9 @@ impl Display for HttpTestResult {
             for (size, result) in &self.upload {
                 writeln!(
                     f,
-                    "    {} ({} bytes):",
+                    "    {} ({}):",
                     "Payload Size".bright_blue(),
-                    size.to_string().yellow()
+                    format_bytes(*size).yellow()
                 )?;
                 // Indent the throughput result output
                 let result_str = format!("{}", result);

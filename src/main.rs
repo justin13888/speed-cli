@@ -150,19 +150,19 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let mut test_reports: Vec<TestReport> = vec![];
+            let mut reports: Vec<TestReport> = vec![];
 
             match mode {
                 ClientMode::TCP => {
                     let config = TcpTestConfig::new(server, port, duration, parallel, test_sizes);
                     let tcp_report = run_tcp_client(config).await?;
-                    test_reports.push(tcp_report);
+                    reports.push(tcp_report);
                 }
                 ClientMode::UDP => {
                     let config = UdpTestConfig::new(server, port, duration, parallel, test_sizes);
 
                     let udp_report = run_udp_client(config).await?;
-                    test_reports.push(udp_report);
+                    reports.push(udp_report);
                 }
                 ClientMode::HTTP1 => {
                     let config = HttpTestConfig::new(
@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
                     );
 
                     let http_report = run_http_test(config).await?;
-                    test_reports.push(http_report);
+                    reports.push(http_report);
                 }
                 ClientMode::HTTP2 => todo!(),
                 ClientMode::H2C => todo!(),
@@ -184,10 +184,19 @@ async fn main() -> Result<()> {
             }
 
             println!("{}", "Client test completed.".green().bold());
+
+            // Print test reports
+            for report in &reports {
+                println!("{:#}", report);
+            }
+
             // If export file is specified, write results
             if let Some(export) = &export {
-                match export_report(&test_reports, export).await {
-                    Ok(_) => println!("Results exported to {}", export.display()),
+                match export_report(&reports, export).await {
+                    Ok(_) => println!(
+                        "{}",
+                        format!("Results exported to {}", export.to_string_lossy()).cyan()
+                    ),
                     Err(e) => eprintln!("Error exporting results: {e}"),
                 }
             }

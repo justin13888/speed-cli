@@ -13,8 +13,15 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
     socket.connect(&server_addr).await?;
 
-    println!("Connecting to server {}...", server_addr.cyan());
-    println!("{}", "Connected! Starting UDP throughput test...".green());
+    println!(
+        "{}",
+        format!(
+            "Starting UDP throughput test to server {}...",
+            server_addr.cyan()
+        )
+        .green()
+        .bold()
+    );
 
     let test_duration = Duration::from_secs(config.duration);
     let mut total_bytes = 0u64;
