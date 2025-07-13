@@ -38,7 +38,7 @@ impl fmt::Display for ThroughputResult {
             "  {}: {}",
             "Average Throughput".bright_green().bold(),
             format_size(
-                self.avg_throughput() as u64,
+                (self.avg_throughput() * 8.0) as u64,
                 DECIMAL.base_unit(BaseUnit::Bit).suffix("/s"),
             )
             .magenta()
