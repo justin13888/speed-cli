@@ -30,7 +30,18 @@ mod performance;
 mod report;
 mod utils;
 
-#[tokio::main]
+/// Creates an optimized Tokio runtime for network performance testing
+fn create_optimized_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_cpus::get())
+        .thread_name("speed-cli-worker")
+        .enable_all()
+        .thread_stack_size(2 * 1024 * 1024) // 2MB stack size
+        .build()
+        .expect("Failed to create optimized Tokio runtime")
+}
+
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     // Initialize tracing subscriber for logging
     let filter_layer = EnvFilter::try_from_default_env()
@@ -311,7 +322,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        
+
         Commands::Report { file } => {
             println!("{}", "Loading report...".yellow().bold());
 

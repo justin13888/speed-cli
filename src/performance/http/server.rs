@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_server::tls_rustls::RustlsConfig;
+use bytes::Bytes;
 use eyre::Result;
 use futures::StreamExt as _;
 use futures::stream;
@@ -14,10 +15,17 @@ use http_body_util::BodyExt;
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
-use std::{net::SocketAddr, path::PathBuf, sync::Once};
+use std::sync::LazyLock as SyncLazy;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, sync::Once};
 use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::debug;
+
+/// Static buffer for download operations to avoid allocations
+static ZERO_BUFFER: SyncLazy<Arc<Bytes>> = SyncLazy::new(|| {
+    // 64KB zero buffer - large enough to avoid frequent copying but small enough for L1/L2 cache
+    Arc::new(Bytes::from(vec![0u8; 65536]))
+});
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
@@ -58,6 +66,7 @@ pub async fn run_http_server(config: HttpServerConfig) -> Result<()> {
 
     tracing::info!("HTTP server listening on {}", config.bind_addr);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
+
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -72,6 +81,8 @@ pub async fn run_https_server(config: HttpsServerConfig) -> Result<()> {
     let tls_config = RustlsConfig::from_pem_file(config.cert_path, config.key_path).await?;
 
     tracing::info!("HTTPS server listening on {}", config.bind_addr);
+
+    // For axum_server, we bind and serve directly
     axum_server::bind_rustls(config.bind_addr, tls_config)
         .serve(app.into_make_service())
         .await?;
@@ -97,15 +108,24 @@ fn create_router(enable_cors: bool, max_upload_size: usize) -> Router {
         );
     }
 
-    router = router.layer(tower_http::trace::TraceLayer::new_for_http().on_response(
-        |response: &Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
-            debug!(
-                status = ?response.status(),
-                latency = ?latency,
-                "HTTP response"
-            );
-        },
-    ));
+    // // Use sampling-based tracing for high-throughput scenarios
+    // router = router.layer(
+    //     tower_http::trace::TraceLayer::new_for_http()
+    //         .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::DEBUG))
+    //         .on_response(
+    //             |response: &Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
+    //                 // Only log a subset of responses to reduce overhead during high load
+    //                 if rand::random::<f32>() < 0.1 {
+    //                     // 10% sampling rate
+    //                     debug!(
+    //                         status = ?response.status(),
+    //                         latency = ?latency,
+    //                         "HTTP response"
+    //                     );
+    //                 }
+    //             },
+    //         ),
+    // );
 
     router
 }
@@ -113,18 +133,28 @@ fn create_router(enable_cors: bool, max_upload_size: usize) -> Router {
 #[derive(Deserialize)]
 struct DownloadQuery {
     size: usize,
+    #[serde(default = "default_chunk_size")]
+    chunk_size: usize,
+}
+
+fn default_chunk_size() -> usize {
+    65536 // 64KB default chunk size
 }
 
 async fn download_handler(Query(query): Query<DownloadQuery>) -> impl IntoResponse {
-    // Create a stream that yields chunks of data
-    let chunk_size = 8192; // 8KB chunks
+    // Use the static buffer to avoid allocations
     let total_size = query.size;
+    let chunk_size = query.chunk_size;
     let chunks = total_size.div_ceil(chunk_size); // Round up division
 
-    let stream = stream::iter(0..chunks).map(move |i| {
-        let remaining = total_size - (i * chunk_size);
-        let current_chunk_size = chunk_size.min(remaining);
-        Ok::<_, std::io::Error>(vec![0u8; current_chunk_size])
+    let buffer_ref = Arc::clone(&ZERO_BUFFER);
+
+    let mut remaining_bytes = total_size;
+    let stream = stream::iter(0..chunks).map(move |_| {
+        let current_chunk_size = chunk_size.min(remaining_bytes);
+        remaining_bytes = remaining_bytes.saturating_sub(current_chunk_size);
+        let bytes = buffer_ref.clone().slice(0..current_chunk_size);
+        Ok::<_, std::io::Error>(bytes)
     });
 
     let body = Body::from_stream(stream);
@@ -141,7 +171,14 @@ async fn upload_handler(body: Body) -> impl IntoResponse {
     let mut body_reader = body.into_data_stream();
     let mut total_bytes = 0;
     while let Some(chunk) = body_reader.next().await {
-        total_bytes += chunk.unwrap().len();
+        match chunk {
+            Ok(data) => {
+                total_bytes += data.len();
+                // Immediately drop data to minimize memory pressure
+                drop(data); // Explicit but just in case
+            }
+            Err(_) => break,
+        }
     }
     (
         StatusCode::OK,

@@ -44,8 +44,11 @@ h3 = "0.0.8"
 indexmap = { version = "2.10.0", features = ["serde"] }
 indicatif = { version = "0.18.0", features = ["tokio"] }
 tracing-indicatif = "0.3.11"
+num_cpus = "1.16.0"
 
 [profile.release]
 lto = true
 codegen-units = 1
 panic = "abort"
+# opt-level = 3
+strip = true
