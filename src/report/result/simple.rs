@@ -21,20 +21,11 @@ pub struct ThroughputResult {
 
 impl fmt::Display for ThroughputResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data_transferred = format_size(self.bytes_transferred(), BINARY);
-        let avg_throughput = {
-            let formatted_size = format_size(
-                self.avg_throughput() as u64,
-                DECIMAL.base_unit(BaseUnit::Bit),
-            );
-            format!("{formatted_size}/s")
-        };
-
         writeln!(
             f,
             "  {}: {}",
             "Data Transferred".bright_green().bold(),
-            data_transferred.cyan()
+            format_size(self.bytes_transferred(), BINARY).cyan()
         )?;
         writeln!(
             f,
@@ -46,7 +37,11 @@ impl fmt::Display for ThroughputResult {
             f,
             "  {}: {}",
             "Average Throughput".bright_green().bold(),
-            avg_throughput.magenta()
+            format_size(
+                self.avg_throughput() as u64,
+                DECIMAL.base_unit(BaseUnit::Bit).suffix("/s"),
+            )
+            .magenta()
         )?;
         writeln!(
             f,
