@@ -124,7 +124,9 @@ async fn main() -> Result<()> {
                     && !parent.exists()
                 {
                     match fs::create_dir_all(parent) {
-                        Ok(_) => println!("Parent directory created or already exists."),
+                        Ok(_) => {
+                            // println!("Parent directory created or already exists.")
+                        }
                         Err(e) => {
                             eprintln!("Error creating parent directory: {e}");
                             return Err(e.into());
@@ -136,7 +138,7 @@ async fn main() -> Result<()> {
                 match can_write(export) {
                     Ok(writeable) => {
                         if writeable {
-                            println!("Export file is writable: {}", export.display());
+                            // println!("Export file is writable: {}", export.display());
                         } else {
                             return Err(eyre::eyre!(
                                 "Export file is not writable: {}",
@@ -178,7 +180,20 @@ async fn main() -> Result<()> {
                     let http_report = run_http_test(config).await?;
                     reports.push(http_report);
                 }
-                ClientMode::HTTP2 => todo!(),
+                ClientMode::HTTP2 => {
+                    let config = HttpTestConfig::new(
+                        server,
+                        port,
+                        duration,
+                        parallel,
+                        test_type,
+                        test_sizes,
+                        HttpVersion::HTTP2,
+                    );
+
+                    let http_report = run_http_test(config).await?;
+                    reports.push(http_report);
+                }
                 ClientMode::H2C => todo!(),
                 ClientMode::HTTP3 => todo!(),
             }

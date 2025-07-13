@@ -18,7 +18,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Once};
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::trace;
+use tracing::debug;
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
@@ -100,7 +100,7 @@ fn create_router(enable_cors: bool, max_upload_size: usize) -> Router {
 
     router = router.layer(tower_http::trace::TraceLayer::new_for_http().on_response(
         |response: &Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
-            trace!(
+            debug!(
                 status = ?response.status(),
                 latency = ?latency,
                 "HTTP response"

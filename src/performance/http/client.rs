@@ -145,15 +145,22 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10)
-        .use_rustls_tls();
+        .use_rustls_tls()
+        .danger_accept_invalid_certs(true);
 
     match version {
         HttpVersion::HTTP1 => {
             builder = builder.http1_only();
         }
-        HttpVersion::HTTP2 => todo!(),
-        HttpVersion::H2C => todo!(),
-        HttpVersion::HTTP3 => todo!(),
+        HttpVersion::HTTP2 => {
+            builder = builder.http2_prior_knowledge();
+        }
+        HttpVersion::H2C => {
+            builder = builder.http2_prior_knowledge();
+        }
+        HttpVersion::HTTP3 => {
+            builder = builder.http3_prior_knowledge();
+        }
     }
 
     builder.build().context("Failed to create HTTP client")
