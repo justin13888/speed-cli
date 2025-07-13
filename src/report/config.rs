@@ -143,14 +143,14 @@ impl HttpTestConfig {
     {
         let payload_sizes: HashSet<usize> = payload_sizes.into_iter().collect();
         let is_secure = match http_version {
-            HttpVersion::HTTP1 | HttpVersion::H2C => true,
+            HttpVersion::HTTP1 | HttpVersion::H2C => false,
             HttpVersion::HTTP2 | HttpVersion::HTTP3 => true,
         };
         let scheme = if is_secure { "https" } else { "http" };
         let port = port.unwrap_or(if is_secure {
-            DEFAULT_HTTP_PORT
-        } else {
             DEFAULT_HTTPS_PORT
+        } else {
+            DEFAULT_HTTP_PORT
         });
         let server_url = format!("{scheme}://{server}:{port}");
 

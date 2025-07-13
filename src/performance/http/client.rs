@@ -1,10 +1,13 @@
 use chrono::Utc;
+use colored::Colorize as _;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
+use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use std::{
     collections::HashMap,
+    sync::Once,
     time::{Duration, Instant},
 };
 use tokio::time::sleep;
@@ -19,8 +22,16 @@ use crate::{
     },
 };
 
+static CRYPTO_PROVIDER_INIT: Once = Once::new();
+
+fn ensure_crypto_provider() {
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        let _ = CryptoProvider::install_default(aws_lc_rs::default_provider());
+    });
+}
+
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
-    println!("Starting comprehensive HTTP speed test...");
+    println!("{}", "Starting HTTP speed test...".green().bold());
 
     let start_time = Utc::now();
 
@@ -125,6 +136,9 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 }
 
 async fn create_http_client(version: &HttpVersion) -> Result<Client> {
+    // Ensure crypto provider is initialized before creating TLS client
+    ensure_crypto_provider();
+
     let mut builder = ClientBuilder::new()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))

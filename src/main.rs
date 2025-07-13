@@ -2,6 +2,7 @@ use colored::*;
 use eyre::Result;
 use std::fs;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tracing::trace;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -14,6 +15,7 @@ use performance::udp::client::run_udp_client;
 pub use utils::types::*;
 
 use crate::constants::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT};
+use crate::performance::http::server::{HttpsServerConfig, run_https_server};
 use crate::performance::http::{HttpVersion, client::run_http_test};
 use crate::performance::tcp::server::run_tcp_server;
 use crate::performance::udp::server::run_udp_server;
@@ -163,8 +165,6 @@ async fn main() -> Result<()> {
                     test_reports.push(udp_report);
                 }
                 ClientMode::HTTP1 => {
-                    println!("{}", "Starting HTTP speed test...".green().bold());
-
                     let config = HttpTestConfig::new(
                         server,
                         port,
@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
                 let http_addr = SocketAddr::new(bind, http_port.unwrap_or(DEFAULT_HTTP_PORT));
 
                 handles.push((
-                    "HTTP",
+                    "HTTPS",
                     tokio::spawn(run_http_server(HttpServerConfig {
                         bind_addr: http_addr,
                         enable_cors: true, // Always enable CORS as clients typically are at unexpected origins
@@ -247,13 +247,15 @@ async fn main() -> Result<()> {
                 let https_addr = SocketAddr::new(bind, https_port.unwrap_or(DEFAULT_HTTPS_PORT));
 
                 handles.push((
-                    "HTTPS",
-                    tokio::spawn(run_http_server(HttpServerConfig {
+                    "HTTP",
+                    tokio::spawn(run_https_server(HttpsServerConfig {
                         bind_addr: https_addr,
                         enable_cors: true, // Always enable CORS as clients typically are at unexpected origins
                         max_upload_size: 10 * 1024 * 1024, // 10MB
+                        cert_path: PathBuf::from("cert.pem"), // TODO: Replace with actual cert path
+                        key_path: PathBuf::from("key.pem"), // TODO: Replace with actual key
                     })),
-                )); // TODO: Replace this with actual HTTPS server logic
+                ));
             }
 
             // Log servers to be startup
