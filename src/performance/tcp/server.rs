@@ -10,6 +10,8 @@ use tokio::time::Duration;
 
 use crate::utils::format::{format_bytes, format_throughput};
 
+// TODO: Optimize TCP implementation
+
 pub async fn run_tcp_server(addr: impl ToSocketAddrs) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     println!("{}", "TCP server ready to accept connections...".green());

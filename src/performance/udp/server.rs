@@ -10,6 +10,8 @@ use tokio::time::Duration;
 
 use crate::utils::format::{format_bytes, format_throughput};
 
+// TODO: Optimize UDP implementation
+
 pub async fn run_udp_server(addr: impl ToSocketAddrs) -> Result<()> {
     let socket = UdpSocket::bind(&addr).await?;
     println!("{}", "UDP server ready to receive packets...".green());

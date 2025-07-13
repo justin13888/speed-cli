@@ -239,6 +239,8 @@ async fn main() -> Result<()> {
             udp_port,
             http_port,
             https_port,
+            cert,
+            key,
         } => {
             // Assert that at least one server mode is enabled
             if !all && !tcp && !udp && !http && !https {
@@ -246,6 +248,24 @@ async fn main() -> Result<()> {
                     "At least one server mode must be enabled. Use --all to enable all modes."
                 ));
             }
+
+            // If HTTPS is enabled, cert and key should be provided or files exist at the default paths
+            const FALLBACK_CERT_PATH: &str = "cert.pem";
+            const FALLBACK_KEY_PATH: &str = "key.pem";
+            if https || all {
+                if cert.is_none() && !PathBuf::from(FALLBACK_CERT_PATH).exists() {
+                    return Err(eyre::eyre!(
+                        "HTTPS mode requires a TLS certificate. Provide --cert or ensure {FALLBACK_CERT_PATH} exists."
+                    ));
+                }
+                if key.is_none() && !PathBuf::from(FALLBACK_KEY_PATH).exists() {
+                    return Err(eyre::eyre!(
+                        "HTTPS mode requires a TLS private key. Provide --key or ensure {FALLBACK_KEY_PATH} exists."
+                    ));
+                }
+            }
+            let cert = cert.unwrap_or(PathBuf::from(FALLBACK_CERT_PATH));
+            let key = key.unwrap_or(PathBuf::from(FALLBACK_KEY_PATH));
 
             println!("{}", "Starting server mode...".blue().bold());
 
@@ -287,8 +307,8 @@ async fn main() -> Result<()> {
                         bind_addr: https_addr,
                         enable_cors: true, // Always enable CORS as clients typically are at unexpected origins
                         max_upload_size: 10 * 1024 * 1024, // 10MB
-                        cert_path: PathBuf::from("cert.pem"), // TODO: Replace with actual cert path
-                        key_path: PathBuf::from("key.pem"), // TODO: Replace with actual key
+                        cert_path: cert,
+                        key_path: key,
                     })),
                 ));
             }

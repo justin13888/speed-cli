@@ -9,6 +9,8 @@ use tokio::time::Duration;
 use crate::report::{TcpTestConfig, TestReport, ThroughputMeasurement, ThroughputResult};
 use crate::utils::format::{format_bytes, format_throughput};
 
+// TODO: Optimize TCP implementation
+
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let addr = format!("{}:{}", config.server, config.port);
     let mut stream = TcpStream::connect(&addr).await?;
@@ -55,7 +57,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
         measurements,
         total_duration,
         timestamp: chrono::Utc::now(),
-    }; // TODO: Review
+    };
 
     // println!("\n{}", "=== Test Results ===".bold().blue());
     // println!("{result:#?}");

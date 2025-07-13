@@ -8,6 +8,8 @@ use tokio::time::{Duration, sleep};
 use crate::report::{TestReport, ThroughputMeasurement, ThroughputResult, UdpTestConfig};
 use crate::utils::format::{format_bytes, format_throughput};
 
+// TODO: Optimize UDP implementation
+
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let server_addr = format!("{}:{}", config.server, config.port);

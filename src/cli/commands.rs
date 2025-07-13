@@ -118,6 +118,16 @@ pub enum Commands {
         /// Listen port for HTTPS server
         #[arg(long)]
         https_port: Option<u16>,
+
+        /// TLS certificate file path (*.pem).
+        /// If not specified, defaults to `cert.pem` in the current directory.
+        #[arg(long)]
+        cert: Option<PathBuf>,
+
+        /// TLS private key file path (*.pem).
+        /// If not specified, defaults to `key.pem` in the current directory.
+        #[arg(long)]
+        key: Option<PathBuf>,
     },
 
     /// Print previously saved results

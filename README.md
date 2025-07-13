@@ -10,50 +10,11 @@ It's difficult to have one tool that tests your network conditions between two d
 
 ## Features
 
-<!-- TODO: Update this whole section -->
-
-### Core Network Testing
-
-- **TCP/UDP Throughput Testing** (similar to iperf3)
-- **HTTP/1.1 and HTTP/2 Speed Tests** (similar to Ookla)
-- **Multi-connection Parallel Testing**
-- **Bidirectional Testing** (simultaneous upload/download)
-
-### Advanced Diagnostics
-
-- **DNS Performance Analysis**
-  - Resolution time measurement
-  - Multiple DNS server testing
-  - IPv4/IPv6 support detection
-- **Connection Quality Assessment**
-  - Jitter measurement
-  - Packet loss detection
-  - Latency consistency analysis
-  - Connection stability scoring
-- **Network Topology Analysis**
-  - MTU discovery
-  - Route stability detection
-  - Congestion analysis
-- **Geographic Information**
-  - IP geolocation
-  - Distance calculations
-  - Theoretical vs actual latency comparison
-
-### Quality Metrics
-
-- **Throughput** (upload/download)
-- **Latency** (round-trip time)
-- **Jitter** (latency variation)
-- **Packet Loss**
-- **Connection Stability**
-- **DNS Resolution Performance**
-
-### Export and Reporting
-
-- **Multiple formats:** JSON, HTML
-- **Comprehensive results:** All metrics in single report
-- **Historical data:** Timestamp and metadata included
-- **Performance scoring:** Overall network quality assessment
+- **Multi-protocol support**: TCP, UDP, HTTP/1.1, HTTP/2, HTTP/3
+- **High-performance**: Built with Rust, optimized for high throughput and efficient resource usage
+- **Comprehensive metrics**: Throughput, latency, jitter, packet loss, DNS performance
+- **Exporting**: Results in JSON and HTML formats
+- **Cross-platform**: Optimized for popular platforms (Linux, macOS, Windows) and architectures (x86_64, ARM)
 
 ## Installation
 
@@ -66,7 +27,7 @@ cd speed-cli
 cargo install --path .
 ```
 
-The binary will be available at `target/release/speed-cli` (or `speed-cli.exe` on Windows).
+The binary name is `speed-cli`. Note, for the HTTPS server, you may need to provide your own TLS certificate and key files, or they are assumed to be `cert.pem` and `key.pem` in the current directory. A convenience script `./gen-cert.sh` is provided to generate self-signed certificates for testing purposes. This is not suitable for production use.
 
 ## Quick Start
 
@@ -125,60 +86,17 @@ speed-cli client --<mode> -s <server-ip> -e results.html
 speed-cli client --<mode> -s <server-ip> -e results.test
 ```
 
-## Example Output
-
-<!-- TODO: Decide whether to remove this -->
-
-<!-- ### HTTP Speed Test Results
-
-```
-HTTP Speed Test Results
-==================================================
-Test Type: Comprehensive
-HTTP Version: Auto
-Server: http://localhost:8080
-Parallel Connections: 4
-Test Duration: 30.00s
-Download Speed: 1.23 Gbps
-Data Downloaded: 4.61 GB
-Upload Speed: 987.45 Mbps
-Data Uploaded: 3.69 GB
-Average Latency: 12.34 ms
-Jitter: 2.14 ms
-DNS Resolution: 8.45 ms
-```
-
-## Technical Details
-
-<!-- TODO: Update this whole section vv -->
-
-### Supported Protocols
-
-<!-- TODO: Need to clarify these descriptions -->
-
-- **TCP**: Stream-based throughput testing
-- **UDP**: Packet-based testing
-- **HTTP/1.1**: Standard HTTP speed testing
-- **HTTP/2**: Modern HTTP with multiplexing support
-
-### Quality Metrics Calculated
-
-- **Throughput**: Measured in Mbps/Gbps
-- **Latency**: Round-trip time in milliseconds
-- **Jitter**: Standard deviation of latency measurements
-- **Packet Loss**: Percentage of lost packets
+## Developer Notes
 
 ### HTTP Test Endpoints
 
-<!-- TODO: Update this whole section vv -->
+When running server with HTTP, the following endpoints are available:
 
-When running `http-server`, the following endpoints are available:
-
-- `GET /download?size=<bytes>` - Download test data
+- `GET /download?size=<total_size>?chunk=<chunk_size>` - Download test data
 - `POST /upload` - Upload test endpoint
 - `GET /latency` - Minimal latency test
-- `GET /health` - Server health check
 - `GET /info` - Server information
+- `GET /health` - Server health check
 
 ## Future Improvements
 
@@ -192,6 +110,8 @@ When running `http-server`, the following endpoints are available:
 - [ ] gRPC support?
 - [ ] Rich HTML report generation
 - [ ] Incorporate more detailed DNS analysis
+- [ ] Support for more niche protocols (e.g. SFTP, SMB)
+- [ ] Mobile app support (iOS/Android)
 
 ## Contributing
 
