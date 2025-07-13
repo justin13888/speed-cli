@@ -10,6 +10,8 @@ It's difficult to have one tool that tests your network conditions between two d
 
 ## Features
 
+<!-- TODO: Update this whole section -->
+
 ### Core Network Testing
 
 - **TCP/UDP Throughput Testing** (similar to iperf3)
@@ -95,9 +97,6 @@ speed-cli client --http -p 8080 -h 192.168.1.100 --parallel 4 -e results.json
 
 # Run TCP client test against specific server
 speed-cli client --tcp -p 5201 -h 192.168.1.100
-
-# # Run full network diagnostics (server should be running with all protocols enabled `-a`)
-# speed-cli diagnostics -h 192.168.1.100 --http-port 8080 --tcp-port 5201 --udp-port 5201
 
 # Print previously saved result
 speed-cli report -f results.json

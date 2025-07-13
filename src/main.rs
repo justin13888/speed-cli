@@ -311,34 +311,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        // Commands::Diagnostics {
-        //     url,
-        //     time,
-        //     parallel,
-        //     export,
-        //     skip_dns,
-        //     skip_quality,
-        //     skip_topology,
-        // } => {
-        //     println!(
-        //         "{}",
-        //         "Starting comprehensive network diagnostics..."
-        //             .green()
-        //             .bold()
-        //     );
-
-        //     let config = ComprehensiveTestConfig {
-        //         server_url: url,
-        //         test_duration: time,
-        //         include_dns_tests: !skip_dns,
-        //         include_quality_tests: !skip_quality,
-        //         include_topology_tests: !skip_topology,
-        //         parallel_connections: parallel,
-        //         export_file: export,
-        //     };
-
-        //     run_comprehensive_test(config).await?;
-        // }
+        
         Commands::Report { file } => {
             println!("{}", "Loading report...".yellow().bold());
 

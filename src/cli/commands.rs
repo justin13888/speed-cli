@@ -120,36 +120,6 @@ pub enum Commands {
         https_port: Option<u16>,
     },
 
-    // /// Run comprehensive network diagnostics
-    // Diagnostics {
-    //     /// Server URL for testing
-    //     #[arg(short, long, default_value = "http://localhost:8080")]
-    //     url: String,
-
-    //     /// Test duration in seconds
-    //     #[arg(short, long, default_value = "30")]
-    //     time: u64,
-
-    //     /// Number of parallel connections for HTTP tests
-    //     #[arg(short, long, default_value = "4")]
-    //     parallel: usize,
-
-    //     /// Export results to file (json only)
-    //     #[arg(short, long)]
-    //     export: Option<String>,
-
-    //     /// Skip DNS performance tests
-    //     #[arg(long)]
-    //     skip_dns: bool,
-
-    //     /// Skip connection quality tests
-    //     #[arg(long)]
-    //     skip_quality: bool,
-
-    //     /// Skip network topology analysis
-    //     #[arg(long)]
-    //     skip_topology: bool,
-    // },
     /// Print previously saved results
     Report {
         /// Path to the results file (only JSON)

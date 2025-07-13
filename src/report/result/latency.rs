@@ -65,6 +65,22 @@ impl LatencyResult {
         })
     }
 
+    /// Returns n-th percentile RTT.
+    /// If n is out of bounds, returns None.
+    pub fn percentile_rtt(&self, n: f64) -> Option<f64> {
+        if !(0.0..=100.0).contains(&n) {
+            return None;
+        }
+        let mut rtts = self.rtts();
+        rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let index = ((n / 100.0) * rtts.len() as f64).round() as usize;
+        if index < rtts.len() {
+            Some(rtts[index])
+        } else {
+            None
+        }
+    }
+
     /// Returns maximum RTT if available, otherwise None.
     pub fn max_rtt(&self) -> Option<f64> {
         self.rtts().into_iter().fold(None, |acc, rtt| {
@@ -140,6 +156,33 @@ impl Display for LatencyResult {
             )?;
         }
 
+        if let Some(p25) = self.percentile_rtt(25.0) {
+            writeln!(
+                f,
+                "    {}: {}",
+                "25th Percentile RTT".bright_blue().bold(),
+                format!("{p25:.2} ms").yellow()
+            )?;
+        }
+
+        if let Some(p50) = self.percentile_rtt(50.0) {
+            writeln!(
+                f,
+                "    {}: {}",
+                "Median RTT".bright_blue().bold(),
+                format!("{p50:.2} ms").yellow()
+            )?;
+        }
+
+        if let Some(p75) = self.percentile_rtt(75.0) {
+            writeln!(
+                f,
+                "    {}: {}",
+                "75th Percentile RTT".bright_blue().bold(),
+                format!("{p75:.2} ms").yellow()
+            )?;
+        }
+
         if let Some(max) = self.max_rtt() {
             writeln!(
                 f,
@@ -187,3 +230,5 @@ impl Display for LatencyMeasurement {
         }
     }
 }
+
+// TODO: Add unit test for nth percentile calculation

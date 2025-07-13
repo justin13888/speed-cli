@@ -2,6 +2,7 @@ use chrono::Utc;
 use colored::Colorize as _;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
@@ -48,7 +49,8 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     match config.test_type {
         TestType::LatencyOnly => {
-            result.latency = measure_http_latency(&client, &config.server_url, 10).await?;
+            result.latency =
+                measure_http_latency(&client, &config.server_url, config.duration).await?;
         }
         TestType::Download => {
             for payload_size in &config.payload_sizes {
@@ -170,39 +172,102 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
 async fn measure_http_latency(
     client: &Client,
     url: &str,
-    count: usize,
+    duration: Duration,
 ) -> Result<Option<LatencyResult>> {
     let mut measurements = Vec::new();
 
-    println!("Measuring HTTP latency with {count} requests...");
+    println!("Measuring HTTP latency for {duration:?}...");
+
+    // Create progress bar for latency measurement
+    let progress_bar = ProgressBar::new(duration.as_secs());
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.yellow/blue} {pos}s/{len}s {msg}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    progress_bar.set_message("Measuring latency...");
 
     let start = Instant::now();
-    for i in 0..count {
-        match client.head(url).send().await {
-            Ok(_response) => {
-                let rtt = start.elapsed().as_secs_f64() * 1000.0;
-                measurements.push(LatencyMeasurement {
-                    rtt_ms: Some(rtt),
-                    elapsed_time: start.elapsed(),
-                });
 
-                print!(".");
-                if (i + 1).is_multiple_of(10) {
-                    println!(" {}/{}", i + 1, count);
+    // Shared state for real-time statistics
+    let measurements_clone =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<LatencyMeasurement>::new()));
+    let measurements_for_stats = measurements_clone.clone();
+
+    let progress_task = {
+        let pb = progress_bar.clone();
+        tokio::spawn(async move {
+            while start.elapsed() < duration {
+                let elapsed = start.elapsed().as_secs();
+                pb.set_position(elapsed);
+
+                // Calculate and display running average latency
+                if let Ok(measurements) = measurements_for_stats.lock() {
+                    if !measurements.is_empty() {
+                        let valid_measurements: Vec<f64> =
+                            measurements.iter().filter_map(|m| m.rtt_ms).collect();
+
+                        if !valid_measurements.is_empty() {
+                            let avg_latency = valid_measurements.iter().sum::<f64>()
+                                / valid_measurements.len() as f64;
+                            let request_rate =
+                                measurements.len() as f64 / start.elapsed().as_secs_f64();
+                            pb.set_message(format!(
+                                "Avg latency: {:.2}ms | Req/s: {:.1} | Requests: {}",
+                                avg_latency,
+                                request_rate,
+                                measurements.len()
+                            ));
+                        }
+                    }
                 }
 
-                // Wait between requests to avoid overwhelming the server
-                sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            pb.set_position(duration.as_secs());
+        })
+    };
+
+    while start.elapsed() < duration {
+        let request_start = Instant::now();
+        match client.head(url).send().await {
+            Ok(_response) => {
+                let rtt = request_start.elapsed().as_secs_f64() * 1000.0;
+                let measurement = LatencyMeasurement {
+                    rtt_ms: Some(rtt),
+                    elapsed_time: start.elapsed(),
+                };
+                measurements.push(measurement.clone());
+
+                // Update shared measurements for real-time stats
+                if let Ok(mut shared_measurements) = measurements_clone.lock() {
+                    shared_measurements.push(measurement);
+                }
             }
             Err(e) => {
-                measurements.push(LatencyMeasurement {
+                let measurement = LatencyMeasurement {
                     rtt_ms: None,
                     elapsed_time: start.elapsed(),
-                });
+                };
+                measurements.push(measurement.clone());
+
+                // Update shared measurements for real-time stats
+                if let Ok(mut shared_measurements) = measurements_clone.lock() {
+                    shared_measurements.push(measurement);
+                }
+
                 trace!("HTTP request error while measuring latency: {e}");
             }
         }
+
+        // Wait between requests to avoid overwhelming the server
+        sleep(Duration::from_millis(100)).await;
     }
+
+    // Wait for progress task to complete and finish the progress bar
+    let _ = progress_task.await;
+    progress_bar.finish_with_message("Latency measurement complete");
 
     if measurements.is_empty() {
         return Ok(None);
@@ -227,25 +292,47 @@ async fn run_download_test(
         parallel_connections.to_string().yellow()
     );
 
+    // Create progress bar
+    let progress_bar = ProgressBar::new(duration.as_secs());
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}s/{len}s {msg}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    progress_bar.set_message("Downloading...");
+
     let mut measurements = Vec::new();
     let start_time = Instant::now();
+
+    // Shared state for real-time throughput statistics
+    let measurements_clone =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
+    let measurements_for_stats = measurements_clone.clone();
 
     let mut tasks = Vec::new();
 
     for i in 0..parallel_connections {
         let client = client.clone();
         let url = format!("{server_url}/download?size={payload_size}&id={i}");
+        let measurements_task = measurements_clone.clone();
 
         let task = tokio::spawn(async move {
-            let mut measurements = Vec::new();
+            let mut local_measurements = Vec::new();
             while start_time.elapsed() < duration {
                 let download_start = Instant::now();
                 match download_chunk(&client, &url).await {
                     Ok(bytes) => {
-                        measurements.push(ThroughputMeasurement {
+                        let measurement = ThroughputMeasurement {
                             bytes,
                             duration: download_start.elapsed(),
-                        });
+                        };
+                        local_measurements.push(measurement.clone());
+
+                        // Update shared measurements for real-time stats
+                        if let Ok(mut shared_measurements) = measurements_task.lock() {
+                            shared_measurements.push(measurement);
+                        }
                     }
                     Err(e) => {
                         eprintln!("Download error on connection {i}: {e}");
@@ -254,14 +341,50 @@ async fn run_download_test(
                 }
             }
 
-            measurements
+            local_measurements
         });
 
         tasks.push(task);
     }
 
-    for task in tasks {
-        match task.await {
+    // Update progress bar in a separate task
+    let progress_task = {
+        let pb = progress_bar.clone();
+        tokio::spawn(async move {
+            while start_time.elapsed() < duration {
+                let elapsed = start_time.elapsed().as_secs();
+                pb.set_position(elapsed);
+
+                // Calculate and display running average throughput
+                if let Ok(measurements) = measurements_for_stats.lock() {
+                    if !measurements.is_empty() {
+                        let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                        let elapsed_secs = start_time.elapsed().as_secs_f64();
+                        let throughput_mbps =
+                            (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+                        let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
+
+                        pb.set_message(format!(
+                            "Avg: {:.2} Mbps | {} | Chunks: {}",
+                            throughput_mbps,
+                            format_bytes(throughput_bytes_per_sec as usize),
+                            measurements.len()
+                        ));
+                    }
+                }
+
+                // Update every 100ms
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            pb.set_position(duration.as_secs());
+        })
+    };
+
+    // Wait for all tasks to complete concurrently
+    let results = futures::future::join_all(tasks).await;
+
+    for result in results {
+        match result {
             Ok(task_measurements) => {
                 measurements.extend(task_measurements);
             }
@@ -270,6 +393,10 @@ async fn run_download_test(
             }
         }
     }
+
+    // Wait for progress task to complete and finish the progress bar
+    let _ = progress_task.await;
+    progress_bar.finish_with_message("Download complete");
 
     let end_time = Instant::now();
 
@@ -293,6 +420,16 @@ async fn run_upload_test(
         parallel_connections.to_string().yellow()
     );
 
+    // Create progress bar
+    let progress_bar = ProgressBar::new(duration.as_secs());
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.green/blue} {pos}s/{len}s {msg}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    progress_bar.set_message("Uploading...");
+
     let mut measurements = Vec::new();
     let start_time = Instant::now();
 
@@ -303,23 +440,35 @@ async fn run_upload_test(
         data
     };
 
+    // Shared state for real-time throughput statistics
+    let measurements_clone =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
+    let measurements_for_stats = measurements_clone.clone();
+
     let mut tasks = Vec::new();
 
     for i in 0..parallel_connections {
         let client = client.clone();
         let url = format!("{server_url}/upload?id={i}");
         let data = upload_data.clone();
+        let measurements_task = measurements_clone.clone();
 
         let task = tokio::spawn(async move {
-            let mut measurements = Vec::new();
+            let mut local_measurements = Vec::new();
             while start_time.elapsed() < duration {
                 let upload_start = Instant::now();
                 match upload_chunk(&client, &url, &data).await {
                     Ok(bytes) => {
-                        measurements.push(ThroughputMeasurement {
+                        let measurement = ThroughputMeasurement {
                             bytes,
                             duration: upload_start.elapsed(),
-                        });
+                        };
+                        local_measurements.push(measurement.clone());
+
+                        // Update shared measurements for real-time stats
+                        if let Ok(mut shared_measurements) = measurements_task.lock() {
+                            shared_measurements.push(measurement);
+                        }
                     }
                     Err(e) => {
                         eprintln!("Upload error on connection {i}: {e}");
@@ -328,14 +477,50 @@ async fn run_upload_test(
                 }
             }
 
-            measurements
+            local_measurements
         });
 
         tasks.push(task);
     }
 
-    for task in tasks {
-        match task.await {
+    // Update progress bar in a separate task
+    let progress_task = {
+        let pb = progress_bar.clone();
+        tokio::spawn(async move {
+            while start_time.elapsed() < duration {
+                let elapsed = start_time.elapsed().as_secs();
+                pb.set_position(elapsed);
+
+                // Calculate and display running average throughput
+                if let Ok(measurements) = measurements_for_stats.lock() {
+                    if !measurements.is_empty() {
+                        let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                        let elapsed_secs = start_time.elapsed().as_secs_f64();
+                        let throughput_mbps =
+                            (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+                        let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
+
+                        pb.set_message(format!(
+                            "Avg: {:.2} Mbps | {} | Chunks: {}",
+                            throughput_mbps,
+                            format_bytes(throughput_bytes_per_sec as usize),
+                            measurements.len()
+                        ));
+                    }
+                }
+
+                // Update every 100ms
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            pb.set_position(duration.as_secs());
+        })
+    };
+
+    // Wait for all tasks to complete concurrently
+    let results = futures::future::join_all(tasks).await;
+
+    for result in results {
+        match result {
             Ok(task_measurements) => {
                 measurements.extend(task_measurements);
             }
@@ -344,6 +529,10 @@ async fn run_upload_test(
             }
         }
     }
+
+    // Wait for progress task to complete and finish the progress bar
+    let _ = progress_task.await;
+    progress_bar.finish_with_message("Upload complete");
 
     let end_time = Instant::now();
 
