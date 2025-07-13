@@ -9,10 +9,13 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use eyre::Result;
 use futures::StreamExt as _;
+use futures::stream;
 use http_body_util::BodyExt;
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 use std::{net::SocketAddr, path::PathBuf, sync::Once};
+use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::debug;
 
@@ -113,11 +116,24 @@ struct DownloadQuery {
 }
 
 async fn download_handler(Query(query): Query<DownloadQuery>) -> impl IntoResponse {
-    let data = vec![0u8; query.size];
+    // Create a stream that yields chunks of data
+    let chunk_size = 8192; // 8KB chunks
+    let total_size = query.size;
+    let chunks = total_size.div_ceil(chunk_size); // Round up division
+
+    let stream = stream::iter(0..chunks).map(move |i| {
+        let remaining = total_size - (i * chunk_size);
+        let current_chunk_size = chunk_size.min(remaining);
+        Ok::<_, std::io::Error>(vec![0u8; current_chunk_size])
+    });
+
+    let body = Body::from_stream(stream);
+
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(Body::from(data))
+        .header(header::CONTENT_LENGTH, query.size.to_string())
+        .body(body)
         .unwrap()
 }
 
