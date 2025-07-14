@@ -148,7 +148,9 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(10)
+        .pool_max_idle_per_host(100)
+        .tcp_keepalive(Duration::from_secs(60))
+        .tcp_nodelay(true)
         .use_rustls_tls()
         .danger_accept_invalid_certs(true);
 
@@ -206,23 +208,24 @@ async fn measure_http_latency(
 
                 // Calculate and display running average latency
                 if let Ok(measurements) = measurements_for_stats.lock()
-                    && !measurements.is_empty() {
-                        let valid_measurements: Vec<f64> =
-                            measurements.iter().filter_map(|m| m.rtt_ms).collect();
+                    && !measurements.is_empty()
+                {
+                    let valid_measurements: Vec<f64> =
+                        measurements.iter().filter_map(|m| m.rtt_ms).collect();
 
-                        if !valid_measurements.is_empty() {
-                            let avg_latency = valid_measurements.iter().sum::<f64>()
-                                / valid_measurements.len() as f64;
-                            let request_rate =
-                                measurements.len() as f64 / start.elapsed().as_secs_f64();
-                            pb.set_message(format!(
-                                "Avg latency: {:.2}ms | Req/s: {:.1} | Requests: {}",
-                                avg_latency,
-                                request_rate,
-                                measurements.len()
-                            ));
-                        }
+                    if !valid_measurements.is_empty() {
+                        let avg_latency = valid_measurements.iter().sum::<f64>()
+                            / valid_measurements.len() as f64;
+                        let request_rate =
+                            measurements.len() as f64 / start.elapsed().as_secs_f64();
+                        pb.set_message(format!(
+                            "Avg latency: {:.2}ms | Req/s: {:.1} | Requests: {}",
+                            avg_latency,
+                            request_rate,
+                            measurements.len()
+                        ));
                     }
+                }
 
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -358,20 +361,20 @@ async fn run_download_test(
 
                 // Calculate and display running average throughput
                 if let Ok(measurements) = measurements_for_stats.lock()
-                    && !measurements.is_empty() {
-                        let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
-                        let elapsed_secs = start_time.elapsed().as_secs_f64();
-                        let throughput_mbps =
-                            (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
-                        let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
+                    && !measurements.is_empty()
+                {
+                    let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                    let elapsed_secs = start_time.elapsed().as_secs_f64();
+                    let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+                    let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
 
-                        pb.set_message(format!(
-                            "Avg: {:.2} Mbps | {} | Chunks: {}",
-                            throughput_mbps,
-                            format_bytes(throughput_bytes_per_sec as usize),
-                            measurements.len()
-                        ));
-                    }
+                    pb.set_message(format!(
+                        "Avg: {:.2} Mbps | {} | Chunks: {}",
+                        throughput_mbps,
+                        format_bytes(throughput_bytes_per_sec as usize),
+                        measurements.len()
+                    ));
+                }
 
                 // Update every 100ms
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -493,20 +496,20 @@ async fn run_upload_test(
 
                 // Calculate and display running average throughput
                 if let Ok(measurements) = measurements_for_stats.lock()
-                    && !measurements.is_empty() {
-                        let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
-                        let elapsed_secs = start_time.elapsed().as_secs_f64();
-                        let throughput_mbps =
-                            (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
-                        let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
+                    && !measurements.is_empty()
+                {
+                    let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                    let elapsed_secs = start_time.elapsed().as_secs_f64();
+                    let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+                    let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
 
-                        pb.set_message(format!(
-                            "Avg: {:.2} Mbps | {} | Chunks: {}",
-                            throughput_mbps,
-                            format_bytes(throughput_bytes_per_sec as usize),
-                            measurements.len()
-                        ));
-                    }
+                    pb.set_message(format!(
+                        "Avg: {:.2} Mbps | {} | Chunks: {}",
+                        throughput_mbps,
+                        format_bytes(throughput_bytes_per_sec as usize),
+                        measurements.len()
+                    ));
+                }
 
                 // Update every 100ms
                 tokio::time::sleep(Duration::from_millis(100)).await;
