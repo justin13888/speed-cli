@@ -48,6 +48,8 @@ pub struct TcpTestConfig {
     pub duration: Duration,
     /// Number of parallel TCP connections
     pub parallel_connections: usize,
+
+    pub test_type: TestType,
     /// Payload sizes to use for the test, in bytes. Note this doesn't make sense for TCP but included anyways.
     pub payload_sizes: IndexSet<usize>,
 }
@@ -58,6 +60,7 @@ impl TcpTestConfig {
         port: Option<u16>,
         duration: u64,
         parallel_connections: usize,
+        test_type: TestType,
         payload_sizes: T,
     ) -> Self
     where
@@ -69,6 +72,7 @@ impl TcpTestConfig {
             port: port.unwrap_or(DEFAULT_TCP_PORT), // Default TCP port
             duration: Duration::from_secs(duration),
             parallel_connections: parallel_connections.max(1),
+            test_type,
             payload_sizes: if payload_sizes.is_empty() {
                 IndexSet::from_iter(DEFAULT_TCP_PACKET_SIZES.iter().copied())
             } else {

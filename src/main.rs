@@ -167,7 +167,8 @@ async fn main() -> Result<()> {
 
             match mode {
                 ClientMode::TCP => {
-                    let config = TcpTestConfig::new(server, port, duration, parallel, test_sizes);
+                    let config =
+                        TcpTestConfig::new(server, port, duration, parallel, test_type, test_sizes);
                     let tcp_report = run_tcp_client(config).await?;
                     reports.push(tcp_report);
                 }

@@ -49,6 +49,7 @@ pub struct TcpServerMetrics {
     pub total_connections: AtomicU64,
     pub active_connections: AtomicUsize,
     pub total_bytes_received: AtomicU64,
+    pub total_bytes_sent: AtomicU64,
     pub connection_errors: AtomicU64,
 }
 
@@ -61,14 +62,16 @@ impl TcpServerMetrics {
     pub fn log_summary(&self) {
         let total_conns = self.total_connections.load(Ordering::Relaxed);
         let active_conns = self.active_connections.load(Ordering::Relaxed);
-        let total_bytes = self.total_bytes_received.load(Ordering::Relaxed);
+        let total_bytes_received = self.total_bytes_received.load(Ordering::Relaxed);
+        let total_bytes_sent = self.total_bytes_sent.load(Ordering::Relaxed);
         let errors = self.connection_errors.load(Ordering::Relaxed);
 
         info!(
-            "Server metrics - Total connections: {}, Active: {}, Bytes received: {}, Errors: {}",
+            "Server metrics - Total connections: {}, Active: {}, Bytes received: {}, Bytes sent: {}, Errors: {}",
             total_conns,
             active_conns,
-            format_bytes(total_bytes),
+            format_bytes(total_bytes_received),
+            format_bytes(total_bytes_sent),
             errors
         );
     }
@@ -371,10 +374,103 @@ impl ProductionTcpHandler {
         let mut buffer = vec![0u8; self.config.buffer_size];
         let mut shutdown_rx = self.shutdown_rx.resubscribe();
 
-        let result = loop {
+        // First, read the command byte to determine if this is upload or download
+        let command = match timeout(
+            Duration::from_secs(5),
+            self.socket.read_exact(&mut buffer[..1]),
+        )
+        .await
+        {
+            Ok(Ok(_)) => buffer[0],
+            Ok(Err(e)) => {
+                error!("Failed to read command byte: {}", e);
+                self.metrics
+                    .connection_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(e.into());
+            }
+            Err(_) => {
+                warn!("Timeout waiting for command byte");
+                self.metrics
+                    .connection_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(eyre::eyre!("Command timeout"));
+            }
+        };
+
+        let result = match command {
+            b'U' => {
+                let res = self.handle_upload(&mut buffer, &mut shutdown_rx).await;
+                // Log final statistics for upload
+                let (total_bytes, duration, throughput_mbps) = self.stats.get_summary();
+                let status = if res.is_ok() { "completed" } else { "failed" };
+                info!(
+                    "Upload connection {} {}: {} received in {:.2}s ({})",
+                    self.connection_id,
+                    status,
+                    format_bytes(total_bytes).yellow(),
+                    duration.as_secs_f64(),
+                    format_throughput(throughput_mbps).green()
+                );
+                res
+            }
+            b'D' => {
+                let res = self.handle_download(&mut buffer, &mut shutdown_rx).await;
+                // Log final statistics for download
+                let (total_bytes, duration, throughput_mbps) = self.stats.get_summary();
+                let status = if res.is_ok() { "completed" } else { "failed" };
+                info!(
+                    "Download connection {} {}: {} sent in {:.2}s ({})",
+                    self.connection_id,
+                    status,
+                    format_bytes(total_bytes).yellow(),
+                    duration.as_secs_f64(),
+                    format_throughput(throughput_mbps).green()
+                );
+                res
+            }
+            _ => {
+                warn!("Unknown command byte: {}", command);
+                self.metrics
+                    .connection_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(eyre::eyre!("Unknown command"))
+            }
+        };
+
+        // Update active connection count and metrics
+        let remaining = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+        self.metrics
+            .active_connections
+            .store(remaining, Ordering::Relaxed);
+        debug!("Active connections: {}", remaining);
+
+        result
+    }
+
+    async fn configure_socket(&mut self) -> Result<()> {
+        // Configure socket for high-throughput scenarios
+
+        // Set TCP_NODELAY to reduce latency
+        if let Err(e) = self.socket.set_nodelay(true) {
+            warn!("Failed to set TCP_NODELAY: {}", e);
+        }
+
+        debug!("Socket configured for high-throughput operation");
+        Ok(())
+    }
+
+    async fn handle_upload(
+        &mut self,
+        buffer: &mut [u8],
+        shutdown_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
+        info!("Handling upload request");
+
+        loop {
             tokio::select! {
                 // Handle incoming data with timeout for read operations
-                read_result = timeout(self.config.read_timeout, self.socket.read(&mut buffer)) => {
+                read_result = timeout(self.config.read_timeout, self.socket.read(buffer)) => {
                     match read_result {
                         Ok(Ok(0)) => {
                             // Connection closed by client
@@ -403,7 +499,7 @@ impl ProductionTcpHandler {
                             if self.stats.should_report(self.config.report_interval) {
                                 let (total_bytes, _, throughput_mbps) = self.stats.get_summary();
                                 info!(
-                                    "Progress: {} received, {} throughput",
+                                    "Upload progress: {} received, {} throughput",
                                     format_bytes(total_bytes).yellow(),
                                     format_throughput(throughput_mbps).green()
                                 );
@@ -411,18 +507,12 @@ impl ProductionTcpHandler {
                         }
                         Ok(Err(e)) => {
                             error!("Read error: {}", e);
-
-                            // Update error metrics
                             self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
-
                             break Err(e.into());
                         }
                         Err(_) => {
                             warn!("Read timeout after {:?}", self.config.read_timeout);
-
-                            // Update error metrics for timeout
                             self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
-
                             break Err(eyre::eyre!("Read timeout"));
                         }
                     }
@@ -430,57 +520,96 @@ impl ProductionTcpHandler {
 
                 // Handle shutdown signal
                 _ = shutdown_rx.recv() => {
-                    info!("Received shutdown signal");
+                    info!("Received shutdown signal during upload");
                     break Ok(());
                 }
 
                 // Check for idle timeout periodically
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
                     if self.stats.is_idle(self.config.connection_timeout) {
-                        warn!("Connection idle timeout");
+                        warn!("Connection idle timeout during upload");
                         break Err(eyre::eyre!("Connection idle timeout"));
                     }
                 }
             }
-        };
-
-        // Log final statistics
-        let (total_bytes, duration, throughput_mbps) = self.stats.get_summary();
-        let status = if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
-        };
-
-        info!(
-            "Connection {} {}: {} received in {:.2}s ({})",
-            self.connection_id,
-            status,
-            format_bytes(total_bytes).yellow(),
-            duration.as_secs_f64(),
-            format_throughput(throughput_mbps).green()
-        );
-
-        // Update active connection count and metrics
-        let remaining = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
-        self.metrics
-            .active_connections
-            .store(remaining, Ordering::Relaxed);
-        debug!("Active connections: {}", remaining);
-
-        result
+        }
     }
 
-    async fn configure_socket(&mut self) -> Result<()> {
-        // Configure socket for high-throughput scenarios
+    async fn handle_download(
+        &mut self,
+        buffer: &mut [u8],
+        shutdown_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
 
-        // Set TCP_NODELAY to reduce latency
-        if let Err(e) = self.socket.set_nodelay(true) {
-            warn!("Failed to set TCP_NODELAY: {}", e);
+        info!("Handling download request");
+
+        // Fill buffer with random data for download
+        buffer.fill(0x42); // Fill with a pattern for testing
+
+        let mut total_sent = 0u64;
+        let start_time = Instant::now();
+        let mut last_report = start_time;
+
+        loop {
+            tokio::select! {
+                // Send data to client
+                write_result = self.socket.write_all(buffer) => {
+                    match write_result {
+                        Ok(_) => {
+                            let bytes_sent = buffer.len() as u64;
+                            total_sent += bytes_sent;
+                            self.stats.add_bytes(bytes_sent);
+
+                            // Update server metrics
+                            self.metrics.total_bytes_sent.fetch_add(bytes_sent, Ordering::Relaxed);
+
+                            // Check byte limit
+                            if let Some(max_bytes) = self.config.max_bytes_per_connection {
+                                if total_sent >= max_bytes {
+                                    info!("Connection reached byte limit ({}), closing", format_bytes(max_bytes));
+                                    break Ok(());
+                                }
+                            }
+
+                            // Report progress less frequently to reduce overhead
+                            if last_report.elapsed() >= self.config.report_interval {
+                                let elapsed = start_time.elapsed().as_secs_f64();
+                                let throughput_mbps = (total_sent as f64 * 8.0) / (elapsed * 1_000_000.0);
+                                info!(
+                                    "Download progress: {} sent, {} throughput",
+                                    format_bytes(total_sent).yellow(),
+                                    format_throughput(throughput_mbps).green()
+                                );
+                                last_report = Instant::now();
+                            }
+
+                            // Yield control periodically to avoid overwhelming the connection
+                            // This small delay helps with flow control and prevents buffer overflow
+                            tokio::task::yield_now().await;
+                        }
+                        Err(e) => {
+                            error!("Write error during download: {}", e);
+                            self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
+                            break Err(e.into());
+                        }
+                    }
+                }
+
+                // Handle shutdown signal
+                _ = shutdown_rx.recv() => {
+                    info!("Received shutdown signal during download");
+                    break Ok(());
+                }
+
+                // Check for idle timeout periodically (though this is less relevant for downloads)
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    // For downloads, we don't want to timeout as quickly since we're actively sending
+                    // This is just a safety check
+                    debug!("Download progress check - {} sent so far", format_bytes(total_sent));
+                }
+            }
         }
-
-        debug!("Socket configured for high-throughput operation");
-        Ok(())
     }
 }
 

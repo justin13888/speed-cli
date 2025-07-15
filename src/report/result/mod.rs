@@ -4,14 +4,17 @@ use std::fmt::{self, Display, Formatter};
 pub use http::*;
 pub use latency::*;
 pub use simple::*;
+pub use tcp::*;
 mod http;
 mod latency;
 mod simple;
+mod tcp;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TestResult {
     Simple(ThroughputResult),
     Http(HttpTestResult),
+    Tcp(TcpTestResult),
 }
 
 impl From<ThroughputResult> for TestResult {
@@ -26,11 +29,18 @@ impl From<HttpTestResult> for TestResult {
     }
 }
 
+impl From<TcpTestResult> for TestResult {
+    fn from(result: TcpTestResult) -> Self {
+        TestResult::Tcp(result)
+    }
+}
+
 impl Display for TestResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             TestResult::Simple(result) => write!(f, "{result}"),
             TestResult::Http(result) => write!(f, "{result}"),
+            TestResult::Tcp(result) => write!(f, "{result}"),
         }
     }
 }
