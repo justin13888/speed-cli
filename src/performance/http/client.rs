@@ -22,7 +22,7 @@ use crate::{
         HttpTestConfig, HttpTestResult, LatencyMeasurement, LatencyResult, TestReport,
         ThroughputMeasurement, ThroughputResult,
     },
-    utils::format::format_bytes,
+    utils::format::{format_bytes, format_throughput},
 };
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
@@ -36,7 +36,12 @@ fn ensure_crypto_provider() {
 // TODO: Need to optimize HTTPS (e.g. HTTP/2) tests for throughput
 
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
-    println!("{}", "Starting HTTP speed test...".green().bold());
+    println!(
+        "{}",
+        format!("Starting {} speed test...", config.http_version)
+            .green()
+            .bold()
+    );
 
     let start_time = Utc::now();
 
@@ -197,11 +202,12 @@ async fn measure_http_latency(
 
     // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
     let (tx, mut rx) = mpsc::unbounded_channel::<LatencyMeasurement>();
-    
+
     // Spawn a task to collect measurements for statistics
-    let stats_measurements = std::sync::Arc::new(std::sync::Mutex::new(Vec::<LatencyMeasurement>::new()));
+    let stats_measurements =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<LatencyMeasurement>::new()));
     let stats_measurements_clone = stats_measurements.clone();
-    
+
     let stats_collector = tokio::spawn(async move {
         while let Some(measurement) = rx.recv().await {
             if let Ok(mut measurements) = stats_measurements_clone.lock() {
@@ -390,8 +396,8 @@ async fn run_download_test(
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
 
                     pb.set_message(format!(
-                        "Avg: {:.2} Mbps | {} | Chunks: {}",
-                        throughput_mbps,
+                        "Avg: {} | {} | Chunks: {}",
+                        format_throughput(throughput_mbps),
                         format_bytes(throughput_bytes_per_sec as usize),
                         measurements.len()
                     ));
@@ -469,11 +475,12 @@ async fn run_upload_test(
 
     // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
     let (tx, mut rx) = mpsc::unbounded_channel::<ThroughputMeasurement>();
-    
+
     // Spawn a task to collect measurements for statistics
-    let stats_measurements = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
+    let stats_measurements =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
     let stats_measurements_clone = stats_measurements.clone();
-    
+
     let stats_collector = tokio::spawn(async move {
         while let Some(measurement) = rx.recv().await {
             if let Ok(mut measurements) = stats_measurements_clone.lock() {
@@ -537,8 +544,8 @@ async fn run_upload_test(
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
 
                     pb.set_message(format!(
-                        "Avg: {:.2} Mbps | {} | Chunks: {}",
-                        throughput_mbps,
+                        "Avg: {} | {} | Chunks: {}",
+                        format_throughput(throughput_mbps),
                         format_bytes(throughput_bytes_per_sec as usize),
                         measurements.len()
                     ));

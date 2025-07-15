@@ -127,8 +127,6 @@ async fn main() -> Result<()> {
                 unreachable!();
             };
 
-            println!("{}", "Starting client mode...".green().bold());
-
             // TODO: Do something about debug flag...
             // TODO: if debug on, debug log everything (config, test progress verbosely, etc.)
 
