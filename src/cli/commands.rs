@@ -64,7 +64,7 @@ pub enum Commands {
 
         /// Packet/payload sizes in bytes (e.g., 1024, 8192). If empty, uses default sizes.
         /// Note: TCP automatically segments anyways but this argument is kept for consistency.
-        #[arg(long, num_args = 0.., value_delimiter = ',')]
+        #[arg(long = "sizes", num_args = 0.., value_delimiter = ',')]
         test_sizes: Vec<usize>,
 
         /// Test type (download, upload, bidirectional, simultaneous, latency)

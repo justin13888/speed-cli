@@ -31,6 +31,8 @@ The binary name is `speed-cli`. Note, for the HTTPS server, you may need to prov
 
 ## Quick Start
 
+Note: If you're using HTTPS server, ensure you have `cert.pem` and `key.pem` files in the current directory or specify them with `--cert` and `--key` flags.
+
 ```sh
 # Start server on default port
 speed-cli server --all # All protocols (TCP, UDP, HTTP, HTTPS)
