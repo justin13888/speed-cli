@@ -83,6 +83,9 @@ async fn main() -> Result<()> {
         } => {
             // Assert that exactly one specific protocol is enabled (no more, no less)
             let mut protocol_count = 0;
+            if mode.is_some() {
+                protocol_count += 1;
+            }
             if tcp {
                 protocol_count += 1;
             }
@@ -106,7 +109,9 @@ async fn main() -> Result<()> {
                     "Exactly one protocol must be specified. Use --tcp, --udp, --http1, --http2, --h2c, or --http3."
                 ));
             }
-            let mode: ClientMode = if tcp {
+            let mode: ClientMode = if let Some(mode) = mode {
+                mode
+            } else if tcp {
                 ClientMode::TCP
             } else if udp {
                 ClientMode::UDP
