@@ -9,8 +9,8 @@ use crate::utils::format::format_bytes;
 use crate::{
     TestType,
     constants::{
-        DEFAULT_HTTP_PACKET_SIZES, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PACKET_SIZES,
-        DEFAULT_TCP_PORT, DEFAULT_UDP_PACKET_SIZES, DEFAULT_UDP_PORT,
+        DEFAULT_HTTP_PAYLOAD_SIZES, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT,
+        DEFAULT_TCP_PAYLOAD_SIZES, DEFAULT_TCP_PORT, DEFAULT_UDP_PAYLOAD_SIZES, DEFAULT_UDP_PORT,
     },
     performance::http::HttpVersion,
 };
@@ -74,7 +74,7 @@ impl TcpTestConfig {
             parallel_connections: parallel_connections.max(1),
             test_type,
             payload_sizes: if payload_sizes.is_empty() {
-                IndexSet::from_iter(DEFAULT_TCP_PACKET_SIZES.iter().copied())
+                IndexSet::from_iter(DEFAULT_TCP_PAYLOAD_SIZES.iter().copied())
             } else {
                 payload_sizes
             },
@@ -111,7 +111,7 @@ impl UdpTestConfig {
             duration,
             parallel_streams: parallel_streams.max(1),
             payload_sizes: if payload_sizes.is_empty() {
-                IndexSet::from_iter(DEFAULT_UDP_PACKET_SIZES.iter().copied())
+                IndexSet::from_iter(DEFAULT_UDP_PAYLOAD_SIZES.iter().copied())
             } else {
                 payload_sizes
             },
@@ -160,7 +160,7 @@ impl HttpTestConfig {
         let server_url = format!("{scheme}://{server}:{port}");
 
         let payload_sizes = if payload_sizes.is_empty() {
-            IndexSet::from_iter(DEFAULT_HTTP_PACKET_SIZES.iter().copied())
+            IndexSet::from_iter(DEFAULT_HTTP_PAYLOAD_SIZES.iter().copied())
         } else {
             payload_sizes
         };
