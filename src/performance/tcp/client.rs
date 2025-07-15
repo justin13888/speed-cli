@@ -9,6 +9,7 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::trace;
 
@@ -102,13 +103,24 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
 
     let start = Instant::now();
 
-    // Shared state for real-time statistics
-    let measurements_clone =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<LatencyMeasurement>::new()));
-    let measurements_for_stats = measurements_clone.clone();
+    // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
+    let (tx, mut rx) = mpsc::unbounded_channel::<LatencyMeasurement>();
+    
+    // Spawn a task to collect measurements for statistics
+    let stats_measurements = std::sync::Arc::new(std::sync::Mutex::new(Vec::<LatencyMeasurement>::new()));
+    let stats_measurements_clone = stats_measurements.clone();
+    
+    let stats_collector = tokio::spawn(async move {
+        while let Some(measurement) = rx.recv().await {
+            if let Ok(mut measurements) = stats_measurements_clone.lock() {
+                measurements.push(measurement);
+            }
+        }
+    });
 
     let progress_task = {
         let pb = progress_bar.clone();
+        let measurements_for_stats = stats_measurements.clone();
         tokio::spawn(async move {
             while start.elapsed() < duration {
                 let elapsed = start.elapsed().as_secs();
@@ -152,10 +164,8 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
                 };
                 measurements.push(measurement.clone());
 
-                // Update shared measurements for real-time stats
-                if let Ok(mut shared_measurements) = measurements_clone.lock() {
-                    shared_measurements.push(measurement);
-                }
+                // Send to stats collector (non-blocking)
+                let _ = tx.send(measurement);
 
                 // Close the connection cleanly
                 let _ = stream.shutdown().await;
@@ -167,10 +177,8 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
                 };
                 measurements.push(measurement.clone());
 
-                // Update shared measurements for real-time stats
-                if let Ok(mut shared_measurements) = measurements_clone.lock() {
-                    shared_measurements.push(measurement);
-                }
+                // Send to stats collector (non-blocking)
+                let _ = tx.send(measurement);
 
                 trace!("TCP connection error while measuring latency: {e}");
             }
@@ -180,8 +188,11 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
         sleep(Duration::from_millis(100)).await;
     }
 
-    // Wait for progress task to complete and finish the progress bar
-    let _ = progress_task.await;
+    // Drop the sender to signal stats collector to finish
+    drop(tx);
+
+    // Wait for stats collector and progress task to complete
+    let _ = tokio::join!(stats_collector, progress_task);
     progress_bar.finish_with_message("Latency measurement complete");
 
     if measurements.is_empty() {
@@ -222,16 +233,26 @@ async fn run_download_test(
     let mut measurements = Vec::new();
     let start_time = Instant::now();
 
-    // Shared state for real-time throughput statistics
-    let measurements_clone =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
-    let measurements_for_stats = measurements_clone.clone();
+    // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
+    let (tx, mut rx) = mpsc::unbounded_channel::<ThroughputMeasurement>();
+    
+    // Spawn a task to collect measurements for statistics
+    let stats_measurements = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
+    let stats_measurements_clone = stats_measurements.clone();
+    
+    let stats_collector = tokio::spawn(async move {
+        while let Some(measurement) = rx.recv().await {
+            if let Ok(mut measurements) = stats_measurements_clone.lock() {
+                measurements.push(measurement);
+            }
+        }
+    });
 
     let mut tasks = Vec::new();
 
     for i in 0..parallel_connections {
         let server = server.clone();
-        let measurements_task = measurements_clone.clone();
+        let tx = tx.clone();
 
         let task = tokio::spawn(async move {
             let addr = format!("{server}:{port}");
@@ -265,10 +286,8 @@ async fn run_download_test(
                                 };
                                 local_measurements.push(measurement.clone());
 
-                                // Update shared measurements for real-time stats
-                                if let Ok(mut shared_measurements) = measurements_task.lock() {
-                                    shared_measurements.push(measurement);
-                                }
+                                // Send to stats collector (non-blocking)
+                                let _ = tx.send(measurement);
                             }
                             Err(e) => {
                                 eprintln!("TCP read error on connection {i}: {e}");
@@ -291,6 +310,7 @@ async fn run_download_test(
     // Update progress bar in a separate task
     let progress_task = {
         let pb = progress_bar.clone();
+        let measurements_for_stats = stats_measurements.clone();
         tokio::spawn(async move {
             while start_time.elapsed() < duration {
                 let elapsed = start_time.elapsed().as_secs();
@@ -323,6 +343,9 @@ async fn run_download_test(
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
+    // Drop the sender to signal stats collector to finish
+    drop(tx);
+
     for result in results {
         match result {
             Ok(task_measurements) => {
@@ -334,8 +357,8 @@ async fn run_download_test(
         }
     }
 
-    // Wait for progress task to complete and finish the progress bar
-    let _ = progress_task.await;
+    // Wait for stats collector and progress task to complete
+    let _ = tokio::join!(stats_collector, progress_task);
     progress_bar.finish_with_message("Download complete");
 
     let end_time = Instant::now();
@@ -379,17 +402,27 @@ async fn run_upload_test(config: &TcpTestConfig, payload_size: usize) -> Result<
         data
     };
 
-    // Shared state for real-time throughput statistics
-    let measurements_clone =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
-    let measurements_for_stats = measurements_clone.clone();
+    // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
+    let (tx, mut rx) = mpsc::unbounded_channel::<ThroughputMeasurement>();
+    
+    // Spawn a task to collect measurements for statistics
+    let stats_measurements = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
+    let stats_measurements_clone = stats_measurements.clone();
+    
+    let stats_collector = tokio::spawn(async move {
+        while let Some(measurement) = rx.recv().await {
+            if let Ok(mut measurements) = stats_measurements_clone.lock() {
+                measurements.push(measurement);
+            }
+        }
+    });
 
     let mut tasks = Vec::new();
 
     for i in 0..parallel_connections {
         let server = server.clone();
         let data = upload_data.clone();
-        let measurements_task = measurements_clone.clone();
+        let tx = tx.clone();
 
         let task = tokio::spawn(async move {
             let addr = format!("{server}:{port}");
@@ -413,10 +446,8 @@ async fn run_upload_test(config: &TcpTestConfig, payload_size: usize) -> Result<
                                 };
                                 local_measurements.push(measurement.clone());
 
-                                // Update shared measurements for real-time stats
-                                if let Ok(mut shared_measurements) = measurements_task.lock() {
-                                    shared_measurements.push(measurement);
-                                }
+                                // Send to stats collector (non-blocking)
+                                let _ = tx.send(measurement);
                             }
                             Err(e) => {
                                 eprintln!("TCP write error on connection {i}: {e}");
@@ -439,6 +470,7 @@ async fn run_upload_test(config: &TcpTestConfig, payload_size: usize) -> Result<
     // Update progress bar in a separate task
     let progress_task = {
         let pb = progress_bar.clone();
+        let measurements_for_stats = stats_measurements.clone();
         tokio::spawn(async move {
             while start_time.elapsed() < duration {
                 let elapsed = start_time.elapsed().as_secs();
@@ -471,6 +503,9 @@ async fn run_upload_test(config: &TcpTestConfig, payload_size: usize) -> Result<
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
+    // Drop the sender to signal stats collector to finish
+    drop(tx);
+
     for result in results {
         match result {
             Ok(task_measurements) => {
@@ -482,8 +517,8 @@ async fn run_upload_test(config: &TcpTestConfig, payload_size: usize) -> Result<
         }
     }
 
-    // Wait for progress task to complete and finish the progress bar
-    let _ = progress_task.await;
+    // Wait for stats collector and progress task to complete
+    let _ = tokio::join!(stats_collector, progress_task);
     progress_bar.finish_with_message("Upload complete");
 
     let end_time = Instant::now();
