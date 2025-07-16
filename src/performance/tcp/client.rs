@@ -23,7 +23,14 @@ use crate::{
 };
 
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
-    println!("{}", "Starting TCP speed test...".green().bold());
+    let server_addr = format!("{}:{}", config.server, config.port);
+
+    println!(
+        "{}",
+        format!("Starting TCP test to server {}...", server_addr.cyan())
+            .green()
+            .bold()
+    );
 
     let start_time = Utc::now();
 
@@ -41,7 +48,14 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
             for payload_size in &config.payload_sizes {
                 result.download.insert(
                     *payload_size,
-                    run_download_test(&config, *payload_size).await?,
+                    run_download_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
                 );
             }
         }
@@ -49,7 +63,14 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
             for payload_size in &config.payload_sizes {
                 result.upload.insert(
                     *payload_size,
-                    run_upload_test(&config, *payload_size).await?,
+                    run_upload_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
                 );
             }
         }
@@ -58,11 +79,25 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
             for payload_size in &config.payload_sizes {
                 result.download.insert(
                     *payload_size,
-                    run_download_test(&config, *payload_size).await?,
+                    run_download_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
                 );
                 result.upload.insert(
                     *payload_size,
-                    run_upload_test(&config, *payload_size).await?,
+                    run_upload_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
+                    .await?,
                 );
             }
         }
@@ -70,8 +105,20 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
             // Run download and upload concurrently
             for payload_size in &config.payload_sizes {
                 let (download_result, upload_result) = tokio::join!(
-                    run_download_test(&config, *payload_size),
-                    run_upload_test(&config, *payload_size)
+                    run_download_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    ),
+                    run_upload_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_connections,
+                        *payload_size,
+                        config.duration,
+                    )
                 );
 
                 result.download.insert(*payload_size, download_result?);
@@ -207,19 +254,17 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
 }
 
 async fn run_download_test(
-    config: &TcpTestConfig,
+    server: &str,
+    port: u16,
+    parallel_connections: usize,
     payload_size: usize,
+    duration: Duration,
 ) -> Result<ThroughputResult> {
     println!(
         "Starting TCP download test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
-        config.parallel_connections.to_string().yellow()
+        parallel_connections.to_string().yellow()
     );
-
-    let duration = config.duration;
-    let parallel_connections = config.parallel_connections;
-    let server = config.server.clone();
-    let port = config.port;
 
     // Create progress bar
     let progress_bar = ProgressBar::new(duration.as_secs());
@@ -253,7 +298,7 @@ async fn run_download_test(
     let mut tasks = Vec::new();
 
     for i in 0..parallel_connections {
-        let server = server.clone();
+        let server: String = server.to_string();
         let tx = tx.clone();
 
         let task = tokio::spawn(async move {
@@ -372,17 +417,18 @@ async fn run_download_test(
     })
 }
 
-async fn run_upload_test(config: &TcpTestConfig, payload_size: usize) -> Result<ThroughputResult> {
+async fn run_upload_test(
+    server: &str,
+    port: u16,
+    parallel_connections: usize,
+    payload_size: usize,
+    duration: Duration,
+) -> Result<ThroughputResult> {
     println!(
         "Starting TCP upload test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
-        config.parallel_connections.to_string().yellow()
+        parallel_connections.to_string().yellow()
     );
-
-    let duration = config.duration;
-    let parallel_connections = config.parallel_connections;
-    let server = config.server.clone();
-    let port = config.port;
 
     // Create progress bar
     let progress_bar = ProgressBar::new(duration.as_secs());
@@ -423,7 +469,7 @@ async fn run_upload_test(config: &TcpTestConfig, payload_size: usize) -> Result<
     let mut tasks = Vec::new();
 
     for i in 0..parallel_connections {
-        let server = server.clone();
+        let server = server.to_string();
         let data = upload_data.clone();
         let tx = tx.clone();
 

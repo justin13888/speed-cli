@@ -38,9 +38,13 @@ fn ensure_crypto_provider() {
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     println!(
         "{}",
-        format!("Starting {} speed test...", config.http_version)
-            .green()
-            .bold()
+        format!(
+            "Starting {} speed test to server {}...",
+            config.http_version,
+            config.server_url.cyan()
+        )
+        .green()
+        .bold()
     );
 
     let start_time = Utc::now();

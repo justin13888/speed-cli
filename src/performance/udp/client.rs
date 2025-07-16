@@ -20,7 +20,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     println!(
         "{}",
         format!(
-            "Starting UDP throughput test to server {}...",
+            "Starting UDP test to server {}...",
             server_addr.cyan()
         )
         .green()
