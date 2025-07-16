@@ -12,8 +12,7 @@ pub enum ImportError {
 }
 
 /// Attempts to parse a file as JSON.
-pub async fn import_report(filename: &Path) -> Result<Vec<TestReport>, ImportError> {
+pub async fn import_report_json(filename: &Path) -> Result<TestReport, ImportError> {
     let content = tokio::fs::read_to_string(filename).await?;
-    let reports: Vec<TestReport> = serde_json::from_str(&content)?;
-    Ok(reports)
+    Ok(serde_json::from_str(&content)?)
 }

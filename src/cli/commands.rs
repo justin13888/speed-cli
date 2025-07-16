@@ -59,7 +59,7 @@ pub enum Commands {
         export: Option<PathBuf>,
 
         /// Number of concurrent connections or streams (means different things for different protocols)
-        #[arg(short,long, default_value = "1")]
+        #[arg(short, long, default_value = "1")]
         connections: usize,
 
         /// Packet/payload sizes in bytes (e.g., 1024, 8192). If empty, uses default sizes.
@@ -135,5 +135,9 @@ pub enum Commands {
         /// Path to the results file (only JSON)
         #[arg(short, long)]
         file: PathBuf,
+
+        /// Export results to HTML
+        #[arg(long)]
+        export_html: Option<PathBuf>,
     },
 }

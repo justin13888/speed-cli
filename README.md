@@ -110,7 +110,6 @@ When running server with HTTP, the following endpoints are available:
 - [ ] QUIC support (HTTP/3)
 - [ ] gRPC support?
 - [ ] Rich HTML report generation
-- [ ] Incorporate more detailed DNS analysis
 - [ ] Support for more niche protocols (e.g. SFTP, SMB)
 - [ ] Remove SSH server spin-up (remote SSH server downloads binary, or through client, and runs server based on what's specified by client)
 - [ ] Mobile app support (iOS/Android)

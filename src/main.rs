@@ -22,13 +22,14 @@ use crate::performance::http::{HttpVersion, client::run_http_test};
 use crate::performance::tcp::server::run_tcp_server;
 use crate::performance::udp::server::run_udp_server;
 use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
-use crate::utils::export::export_report;
+use crate::utils::export::{export_report, export_report_html};
 use crate::utils::file::can_write;
-use crate::utils::import::import_report;
+use crate::utils::import::import_report_json;
 
 mod cli;
 mod constants;
 mod performance;
+mod renderer;
 mod report;
 mod utils;
 
@@ -128,9 +129,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let mut reports: Vec<TestReport> = vec![];
-
-            match mode {
+            let report: TestReport = match mode {
                 ClientMode::TCP => {
                     let config = TcpTestConfig::new(
                         server,
@@ -141,7 +140,8 @@ async fn main() -> Result<()> {
                         test_sizes,
                     );
                     let tcp_report = run_tcp_client(config).await?;
-                    reports.push(tcp_report);
+
+                    tcp_report
                 }
                 ClientMode::UDP => {
                     let config = UdpTestConfig::new(
@@ -154,7 +154,8 @@ async fn main() -> Result<()> {
                     );
 
                     let udp_report = run_udp_client(config).await?;
-                    reports.push(udp_report);
+
+                    udp_report
                 }
                 ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
                     // For HTTP modes, we need to determine the HTTP version
@@ -177,20 +178,19 @@ async fn main() -> Result<()> {
                     );
 
                     let http_report = run_http_test(config).await?;
-                    reports.push(http_report);
+
+                    http_report
                 }
-            }
+            };
 
             println!("{}", "Client test completed.".green().bold());
 
-            // Print test reports
-            for report in &reports {
-                println!("{report:#}");
-            }
+            // Print test report
+            println!("{report:#}");
 
             // If export file is specified, write results
             if let Some(export) = &export {
-                match export_report(&reports, export).await {
+                match export_report(&report, export).await {
                     Ok(_) => println!(
                         "{}",
                         format!("Results exported to {}", export.to_string_lossy()).cyan()
@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Report { file } => {
+        Commands::Report { file, export_html } => {
             println!("{}", "Loading report...".yellow().bold());
 
             // Validate file exists and is readable
@@ -331,9 +331,25 @@ async fn main() -> Result<()> {
             if let Some(ext) = file.extension() {
                 match ext.to_string_lossy().as_ref() {
                     "json" => {
-                        let reports = import_report(&file).await?;
-                        for report in reports {
-                            println!("{report:#}");
+                        let report = import_report_json(&file).await?;
+
+                        match export_html {
+                            None => {
+                                // Print report in stdout
+                                println!("{report:#}");
+                            }
+                            Some(html_file) => {
+                                // Export to HTML
+                                if let Err(e) = export_report_html(&report, &html_file).await {
+                                    eprintln!("Error exporting to HTML: {e}");
+                                } else {
+                                    println!(
+                                        "{}",
+                                        format!("HTML report exported to {}", html_file.display())
+                                            .cyan()
+                                    );
+                                }
+                            }
                         }
                     }
                     "html" => {
@@ -342,11 +358,9 @@ async fn main() -> Result<()> {
                             file.display()
                         ));
                     }
-                    _ => match import_report(&file).await {
-                        Ok(reports) => {
-                            for report in reports {
-                                println!("{report:#}");
-                            }
+                    _ => match import_report_json(&file).await {
+                        Ok(report) => {
+                            println!("{report:#}");
                         }
                         Err(e) => {
                             eprintln!("Error parsing report (assumed to be JSON): {e}");

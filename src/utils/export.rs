@@ -1,7 +1,7 @@
 use std::path::Path;
 use thiserror::Error;
 
-use crate::report::TestReport;
+use crate::{renderer::ToHtml, report::TestReport};
 
 #[derive(Debug, Error)]
 pub enum ExportError {
@@ -18,27 +18,27 @@ impl std::fmt::Display for ExportError {
     }
 }
 
-pub async fn export_report(reports: &[TestReport], filename: &Path) -> Result<(), ExportError> {
+pub async fn export_report(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
     match filename.extension() {
-        Some(ext) if ext == "html" => {
-            todo!("Exporting to HTML is not yet implemented");
-        }
-        Some(ext) if ext == "json" => {
-            // JSON export
-            export_report_json(reports, filename).await
-        }
+        Some(ext) if ext == "html" => export_report_html(report, filename).await,
+        Some(ext) if ext == "json" => export_report_json(report, filename).await,
         _ => {
             println!(
                 "No known extension detected in file path. Exporting to JSON format by default."
             );
 
-            export_report_json(reports, filename).await
+            export_report_json(report, filename).await
         }
     }
 }
 
-async fn export_report_json(reports: &[TestReport], filename: &Path) -> Result<(), ExportError> {
-    let json = serde_json::to_string_pretty(reports)?;
+pub async fn export_report_json(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
+    let json = serde_json::to_string_pretty(report)?;
     tokio::fs::write(filename, json).await?;
+    Ok(())
+}
+
+pub async fn export_report_html(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
+    tokio::fs::write(filename, report.to_html()).await?;
     Ok(())
 }
