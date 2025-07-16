@@ -105,10 +105,8 @@ When running server with HTTP, the following endpoints are available:
 *There are several features/improvements that are planned.*
 
 - [ ] Updated `--json` output format
-- [ ] Support multiple incoming client connections (for server)
 - [ ] OCI Container images using all popular base images (necessary for representative performance testing)
 - [ ] Kubernetes support (for server)
-- [ ] HTTPS support for HTTP tests
 - [ ] QUIC support (HTTP/3)
 - [ ] gRPC support?
 - [ ] Rich HTML report generation
