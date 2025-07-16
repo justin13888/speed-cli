@@ -82,50 +82,32 @@ async fn main() -> Result<()> {
             debug,
         } => {
             // Assert that exactly one specific protocol is enabled (no more, no less)
-            let mut protocol_count = 0;
-            if mode.is_some() {
-                protocol_count += 1;
-            }
-            if tcp {
-                protocol_count += 1;
-            }
-            if udp {
-                protocol_count += 1;
-            }
-            if http1 {
-                protocol_count += 1;
-            }
-            if http2 {
-                protocol_count += 1;
-            }
-            if h2c {
-                protocol_count += 1;
-            }
-            if http3 {
-                protocol_count += 1;
-            }
+            // Count enabled protocols
+            let protocols = [mode.is_some(), tcp, udp, http1, http2, h2c, http3];
+            let protocol_count = protocols.iter().filter(|&&x| x).count();
             if protocol_count != 1 {
                 return Err(eyre::eyre!(
                     "Exactly one protocol must be specified. Use --tcp, --udp, --http1, --http2, --h2c, or --http3."
                 ));
             }
-            let mode: ClientMode = if let Some(mode) = mode {
-                mode
-            } else if tcp {
-                ClientMode::TCP
-            } else if udp {
-                ClientMode::UDP
-            } else if http1 {
-                ClientMode::HTTP1
-            } else if http2 {
-                ClientMode::HTTP2
-            } else if h2c {
-                ClientMode::H2C
-            } else if http3 {
-                ClientMode::HTTP3
-            } else {
-                unreachable!();
-            };
+
+            let mode: ClientMode = mode.unwrap_or_else(|| {
+                if tcp {
+                    ClientMode::TCP
+                } else if udp {
+                    ClientMode::UDP
+                } else if http1 {
+                    ClientMode::HTTP1
+                } else if http2 {
+                    ClientMode::HTTP2
+                } else if h2c {
+                    ClientMode::H2C
+                } else if http3 {
+                    ClientMode::HTTP3
+                } else {
+                    unreachable!()
+                }
+            });
 
             // TODO: Do something about debug flag...
             // TODO: if debug on, debug log everything (config, test progress verbosely, etc.)
