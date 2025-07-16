@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
             h2c,
             http3,
             export,
-            parallel,
+            connections,
             test_sizes,
             test_type,
             debug,
@@ -132,14 +132,26 @@ async fn main() -> Result<()> {
 
             match mode {
                 ClientMode::TCP => {
-                    let config =
-                        TcpTestConfig::new(server, port, duration, parallel, test_type, test_sizes);
+                    let config = TcpTestConfig::new(
+                        server,
+                        port,
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    );
                     let tcp_report = run_tcp_client(config).await?;
                     reports.push(tcp_report);
                 }
                 ClientMode::UDP => {
-                    let config =
-                        UdpTestConfig::new(server, port, duration, parallel, test_type, test_sizes);
+                    let config = UdpTestConfig::new(
+                        server,
+                        port,
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    );
 
                     let udp_report = run_udp_client(config).await?;
                     reports.push(udp_report);
@@ -158,7 +170,7 @@ async fn main() -> Result<()> {
                         server,
                         port,
                         duration,
-                        parallel,
+                        connections,
                         test_type,
                         test_sizes,
                         http_version,
