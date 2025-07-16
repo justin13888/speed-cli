@@ -89,6 +89,7 @@ pub struct UdpTestConfig {
     pub duration: u64,
     /// Number of parallel UDP streams. This is somewhat less relevant for UDP but included for consistency.
     pub parallel_streams: usize,
+    pub test_type: TestType,
     /// Payload sizes to use for the test, in bytes.
     pub payload_sizes: IndexSet<usize>,
 }
@@ -99,6 +100,7 @@ impl UdpTestConfig {
         port: Option<u16>,
         duration: u64,
         parallel_streams: usize,
+        test_type: TestType,
         payload_sizes: T,
     ) -> Self
     where
@@ -110,6 +112,7 @@ impl UdpTestConfig {
             port: port.unwrap_or(DEFAULT_UDP_PORT), // Default UDP port
             duration,
             parallel_streams: parallel_streams.max(1),
+            test_type,
             payload_sizes: if payload_sizes.is_empty() {
                 IndexSet::from_iter(DEFAULT_UDP_PAYLOAD_SIZES.iter().copied())
             } else {

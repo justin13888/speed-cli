@@ -14,7 +14,9 @@ use performance::udp::client::run_udp_client;
 
 pub use utils::types::*;
 
-use crate::constants::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT};
+use crate::constants::{
+    DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT, MAX_HTTP_UPLOAD_SIZE,
+};
 use crate::performance::http::server::{HttpsServerConfig, run_https_server};
 use crate::performance::http::{HttpVersion, client::run_http_test};
 use crate::performance::tcp::server::run_tcp_server;
@@ -115,36 +117,14 @@ async fn main() -> Result<()> {
             // Verify export file path is writable
             // TODO: Validate this logic via unit tests
             if let Some(export) = &export {
-                // Create parent directory if it doesn't exist
-                if let Some(parent) = export.parent()
-                    && !parent.exists()
-                {
-                    match fs::create_dir_all(parent) {
-                        Ok(_) => {
-                            // println!("Parent directory created or already exists.")
-                        }
-                        Err(e) => {
-                            eprintln!("Error creating parent directory: {e}");
-                            return Err(e.into());
-                        }
-                    }
+                if let Some(parent) = export.parent() {
+                    fs::create_dir_all(parent)?;
                 }
-
-                // Validate export file is writable
-                match can_write(export) {
-                    Ok(writeable) => {
-                        if writeable {
-                            // println!("Export file is writable: {}", export.display());
-                        } else {
-                            return Err(eyre::eyre!(
-                                "Export file is not writable: {}",
-                                export.display()
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        return Err(eyre::eyre!("Error checking export file writability: {e}"));
-                    }
+                if !can_write(export)? {
+                    return Err(eyre::eyre!(
+                        "Export file is not writable: {}",
+                        export.display()
+                    ));
                 }
             }
 
@@ -158,7 +138,8 @@ async fn main() -> Result<()> {
                     reports.push(tcp_report);
                 }
                 ClientMode::UDP => {
-                    let config = UdpTestConfig::new(server, port, duration, parallel, test_sizes);
+                    let config =
+                        UdpTestConfig::new(server, port, duration, parallel, test_type, test_sizes);
 
                     let udp_report = run_udp_client(config).await?;
                     reports.push(udp_report);
@@ -270,8 +251,8 @@ async fn main() -> Result<()> {
                     "HTTPS",
                     tokio::spawn(run_http_server(HttpServerConfig {
                         bind_addr: http_addr,
-                        enable_cors: true, // Always enable CORS as clients typically are at unexpected origins
-                        max_upload_size: 10 * 1024 * 1024, // 10MB
+                        enable_cors: true,
+                        max_upload_size: MAX_HTTP_UPLOAD_SIZE,
                     })),
                 ));
             }
@@ -284,8 +265,8 @@ async fn main() -> Result<()> {
                     "HTTP",
                     tokio::spawn(run_https_server(HttpsServerConfig {
                         bind_addr: https_addr,
-                        enable_cors: true, // Always enable CORS as clients typically are at unexpected origins
-                        max_upload_size: 10 * 1024 * 1024, // 10MB
+                        enable_cors: true,
+                        max_upload_size: MAX_HTTP_UPLOAD_SIZE,
                         cert_path: cert,
                         key_path: key,
                     })),

@@ -10,6 +10,8 @@ use crate::utils::format::{format_bytes, format_throughput};
 
 // TODO: Optimize UDP implementation
 
+// TODO: Update all this client logic to match the TCP/HTTP implementations
+// TODO: Need to support different modes based on test type
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let server_addr = format!("{}:{}", config.server, config.port);
