@@ -32,10 +32,14 @@ pub async fn export_report(report: &TestReport, filename: &Path) -> Result<(), E
         }
     }
 }
-
 pub async fn export_report_json(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
+    let file = tokio::fs::File::create(filename).await?;
+    let mut writer = BufWriter::new(file);
+
     let json = serde_json::to_string_pretty(report)?;
-    tokio::fs::write(filename, json).await?;
+    writer.write_all(json.as_bytes()).await?;
+
+    writer.flush().await?;
     Ok(())
 }
 
