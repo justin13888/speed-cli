@@ -69,6 +69,13 @@ impl fmt::Display for ThroughputResult {
                     .green(),
                 failed_after_retry.to_formatted_string(&Locale::en).red()
             )?;
+
+            writeln!(
+                f,
+                "  {}: {:.1}%",
+                "Retry Success Rate".bright_green().bold(),
+                self.retry_success_rate() * 100.0
+            )?;
         }
 
         let error_distribution = self.error_distribution();
@@ -213,14 +220,5 @@ impl ThroughputResult {
             .iter()
             .filter(|m| matches!(m, ThroughputMeasurement::Failure { .. }))
             .count() as u32
-    }
-
-    /// Returns the most common error type
-    pub fn most_common_error(&self) -> Option<String> {
-        let distribution = self.error_distribution();
-        distribution
-            .into_iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(error_type, _)| error_type)
     }
 }

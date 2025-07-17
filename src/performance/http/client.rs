@@ -53,7 +53,6 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
         latency: None,
         download: HashMap::new(),
         upload: HashMap::new(),
-        errors: Vec::new(),
     };
 
     // Create HTTP client based on version preference

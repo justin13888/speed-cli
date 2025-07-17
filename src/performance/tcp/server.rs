@@ -207,6 +207,7 @@ impl TcpServer {
     }
 }
 
+// TODO: Remove this vv
 /// Legacy function for backward compatibility - now uses the builder pattern
 pub async fn run_tcp_server(addr: impl ToSocketAddrs + std::fmt::Debug + Clone) -> Result<()> {
     // Use the builder pattern with optimized settings for high-throughput testing

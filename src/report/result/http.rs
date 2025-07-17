@@ -16,7 +16,6 @@ pub struct HttpTestResult {
     pub download: HashMap<usize, ThroughputResult>,
     /// Map of upload results by payload size
     pub upload: HashMap<usize, ThroughputResult>,
-    pub errors: Vec<String>, // TODO: See if this is still necessary
 }
 
 impl Display for HttpTestResult {
@@ -61,14 +60,6 @@ impl Display for HttpTestResult {
                 for line in result_str.lines() {
                     writeln!(f, "    {line}")?;
                 }
-            }
-        }
-
-        // Display errors if any
-        if !self.errors.is_empty() {
-            writeln!(f, "  {}:", "Errors".red().bold())?;
-            for error in &self.errors {
-                writeln!(f, "    • {}", error.red())?;
             }
         }
 

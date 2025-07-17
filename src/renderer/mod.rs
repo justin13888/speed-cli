@@ -676,20 +676,6 @@ impl ToHtml for HttpTestResult {
             write!(writer, r#"</div></div>"#)?;
         }
 
-        // Errors
-        if !self.errors.is_empty() {
-            write!(
-                writer,
-                r#"<div class="error-section" style="background-color: #f8d7da; padding: 20px; border-radius: 6px; border-left: 4px solid #dc3545;">
-                    <h3 style="color: #dc3545; margin-top: 0;">Errors</h3>
-                    <ul style="margin: 0;">"#
-            )?;
-            for error in &self.errors {
-                write!(writer, r#"<li style="color: #dc3545;">{}</li>"#, error)?;
-            }
-            write!(writer, r#"</ul></div>"#)?;
-        }
-
         Ok(())
     }
 
@@ -746,21 +732,6 @@ impl ToHtml for HttpTestResult {
                         format_bytes_usize(*size),
                         result.to_html()
                     ))
-                    .collect::<Vec<_>>()
-                    .join("")
-            ));
-        }
-
-        // Errors
-        if !self.errors.is_empty() {
-            html.push_str(&format!(
-                r#"<div class="error-section" style="background-color: #f8d7da; padding: 20px; border-radius: 6px; border-left: 4px solid #dc3545;">
-                    <h3 style="color: #dc3545; margin-top: 0;">Errors</h3>
-                    <ul style="margin: 0;">{}</ul>
-                </div>"#,
-                self.errors
-                    .iter()
-                    .map(|error| format!("<li style=\"color: #dc3545;\">{}</li>", error))
                     .collect::<Vec<_>>()
                     .join("")
             ));
@@ -1174,7 +1145,11 @@ impl ToHtml for ThroughputMeasurement {
                     format_throughput(self.throughput_bps())
                 )
             }
-            ThroughputMeasurement::Failure { error, duration, retry_count } => {
+            ThroughputMeasurement::Failure {
+                error,
+                duration,
+                retry_count,
+            } => {
                 format!(
                     r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8d7da; border-radius: 4px; margin: 5px 0;">
                         <span style="color: #721c24;">Error: {} (after {} ms, {} retries)</span>

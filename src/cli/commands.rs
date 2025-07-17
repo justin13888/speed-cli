@@ -70,10 +70,6 @@ pub enum Commands {
         /// Test type (download, upload, bidirectional, simultaneous, latency)
         #[arg(long = "type", default_value = "bidirectional")]
         test_type: TestType,
-
-        /// Enable debug output
-        #[arg(long)]
-        debug: bool,
     },
 
     /// Run as server

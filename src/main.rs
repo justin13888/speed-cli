@@ -83,7 +83,6 @@ async fn main() -> Result<()> {
             connections,
             test_sizes,
             test_type,
-            debug,
         } => {
             // Assert that exactly one specific protocol is enabled (no more, no less)
             // Count enabled protocols
@@ -113,11 +112,7 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // TODO: Do something about debug flag...
-            // TODO: if debug on, debug log everything (config, test progress verbosely, etc.)
-
             // Verify export file path is writable
-            // TODO: Validate this logic via unit tests
             if let Some(export) = &export {
                 if let Some(parent) = export.parent() {
                     fs::create_dir_all(parent)?;
