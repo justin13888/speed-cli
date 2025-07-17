@@ -17,10 +17,10 @@ pub enum ConnectionError {
 impl fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConnectionError::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
-            ConnectionError::TransferFailed(msg) => write!(f, "Transfer failed: {}", msg),
-            ConnectionError::Timeout(msg) => write!(f, "Timeout: {}", msg),
-            ConnectionError::Unknown(msg) => write!(f, "Unknown error: {}", msg),
+            ConnectionError::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
+            ConnectionError::TransferFailed(msg) => write!(f, "Transfer failed: {msg}"),
+            ConnectionError::Timeout(msg) => write!(f, "Timeout: {msg}"),
+            ConnectionError::Unknown(msg) => write!(f, "Unknown error: {msg}"),
         }
     }
 }

@@ -135,9 +135,9 @@ async fn main() -> Result<()> {
                         test_type,
                         test_sizes,
                     );
-                    let tcp_report = run_tcp_client(config).await?;
+                    
 
-                    tcp_report
+                    run_tcp_client(config).await?
                 }
                 ClientMode::UDP => {
                     let config = UdpTestConfig::new(
@@ -149,9 +149,9 @@ async fn main() -> Result<()> {
                         test_sizes,
                     );
 
-                    let udp_report = run_udp_client(config).await?;
+                    
 
-                    udp_report
+                    run_udp_client(config).await?
                 }
                 ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
                     // For HTTP modes, we need to determine the HTTP version
@@ -173,9 +173,9 @@ async fn main() -> Result<()> {
                         http_version,
                     );
 
-                    let http_report = run_http_test(config).await?;
+                    
 
-                    http_report
+                    run_http_test(config).await?
                 }
             };
 

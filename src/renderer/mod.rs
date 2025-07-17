@@ -883,21 +883,20 @@ impl ToHtml for LatencyResult {
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 20px;">
                     <div style="display: flex; justify-content: space-between;">
                         <strong>Total Measurements:</strong> 
-                        <span style="color: #6c757d;">{}</span>
+                        <span style="color: #6c757d;">{total_count}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between;">
                         <strong>Successful:</strong> 
-                        <span style="color: #28a745;">{}</span>
+                        <span style="color: #28a745;">{successful_count}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between;">
                         <strong>Dropped:</strong> 
-                        <span style="color: #dc3545;">{}</span>
+                        <span style="color: #dc3545;">{dropped_count}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between;">
                         <strong>Packet Loss:</strong> 
-                        <span style="color: #dc3545;">{:.2}%</span>
-                    </div>"#,
-            total_count, successful_count, dropped_count, loss_rate
+                        <span style="color: #dc3545;">{loss_rate:.2}%</span>
+                    </div>"#
         )?;
 
         // Add RTT statistics if we have successful measurements
@@ -907,9 +906,8 @@ impl ToHtml for LatencyResult {
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Average RTT:</strong> 
-                        <span style="color: #007acc;">{:.2} ms</span>
-                    </div>"#,
-                    avg
+                        <span style="color: #007acc;">{avg:.2} ms</span>
+                    </div>"#
                 )?;
             }
 
@@ -918,9 +916,8 @@ impl ToHtml for LatencyResult {
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Min RTT:</strong> 
-                        <span style="color: #28a745;">{:.2} ms</span>
-                    </div>"#,
-                    min
+                        <span style="color: #28a745;">{min:.2} ms</span>
+                    </div>"#
                 )?;
             }
 
@@ -929,9 +926,8 @@ impl ToHtml for LatencyResult {
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>25th Percentile RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    p25
+                        <span style="color: #fd7e14;">{p25:.2} ms</span>
+                    </div>"#
                 )?;
             }
 
@@ -940,9 +936,8 @@ impl ToHtml for LatencyResult {
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Median RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    p50
+                        <span style="color: #fd7e14;">{p50:.2} ms</span>
+                    </div>"#
                 )?;
             }
 
@@ -951,9 +946,8 @@ impl ToHtml for LatencyResult {
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>75th Percentile RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    p75
+                        <span style="color: #fd7e14;">{p75:.2} ms</span>
+                    </div>"#
                 )?;
             }
 
@@ -962,9 +956,8 @@ impl ToHtml for LatencyResult {
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Max RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    max
+                        <span style="color: #fd7e14;">{max:.2} ms</span>
+                    </div>"#
                 )?;
             }
 
@@ -973,9 +966,8 @@ impl ToHtml for LatencyResult {
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Jitter (Std Dev):</strong> 
-                        <span style="color: #6f42c1;">{:.2} ms</span>
-                    </div>"#,
-                    jitter
+                        <span style="color: #6f42c1;">{jitter:.2} ms</span>
+                    </div>"#
                 )?;
             }
         }
@@ -1006,21 +998,20 @@ impl ToHtml for LatencyResult {
             r#"<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 20px;">
                 <div style="display: flex; justify-content: space-between;">
                     <strong>Total Measurements:</strong> 
-                    <span style="color: #6c757d;">{}</span>
+                    <span style="color: #6c757d;">{total_count}</span>
                 </div>
                 <div style="display: flex; justify-content: space-between;">
                     <strong>Successful:</strong> 
-                    <span style="color: #28a745;">{}</span>
+                    <span style="color: #28a745;">{successful_count}</span>
                 </div>
                 <div style="display: flex; justify-content: space-between;">
                     <strong>Dropped:</strong> 
-                    <span style="color: #dc3545;">{}</span>
+                    <span style="color: #dc3545;">{dropped_count}</span>
                 </div>
                 <div style="display: flex; justify-content: space-between;">
                     <strong>Packet Loss:</strong> 
-                    <span style="color: #dc3545;">{:.2}%</span>
-                </div>"#,
-            total_count, successful_count, dropped_count, loss_rate
+                    <span style="color: #dc3545;">{loss_rate:.2}%</span>
+                </div>"#
         );
 
         // Add RTT statistics if we have successful measurements
@@ -1029,9 +1020,8 @@ impl ToHtml for LatencyResult {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Average RTT:</strong> 
-                        <span style="color: #007acc;">{:.2} ms</span>
-                    </div>"#,
-                    avg
+                        <span style="color: #007acc;">{avg:.2} ms</span>
+                    </div>"#
                 ));
             }
 
@@ -1039,9 +1029,8 @@ impl ToHtml for LatencyResult {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Min RTT:</strong> 
-                        <span style="color: #28a745;">{:.2} ms</span>
-                    </div>"#,
-                    min
+                        <span style="color: #28a745;">{min:.2} ms</span>
+                    </div>"#
                 ));
             }
 
@@ -1049,9 +1038,8 @@ impl ToHtml for LatencyResult {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>25th Percentile RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    p25
+                        <span style="color: #fd7e14;">{p25:.2} ms</span>
+                    </div>"#
                 ));
             }
 
@@ -1059,9 +1047,8 @@ impl ToHtml for LatencyResult {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Median RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    p50
+                        <span style="color: #fd7e14;">{p50:.2} ms</span>
+                    </div>"#
                 ));
             }
 
@@ -1069,9 +1056,8 @@ impl ToHtml for LatencyResult {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>75th Percentile RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    p75
+                        <span style="color: #fd7e14;">{p75:.2} ms</span>
+                    </div>"#
                 ));
             }
 
@@ -1079,9 +1065,8 @@ impl ToHtml for LatencyResult {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Max RTT:</strong> 
-                        <span style="color: #fd7e14;">{:.2} ms</span>
-                    </div>"#,
-                    max
+                        <span style="color: #fd7e14;">{max:.2} ms</span>
+                    </div>"#
                 ));
             }
 
@@ -1089,9 +1074,8 @@ impl ToHtml for LatencyResult {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Jitter (Std Dev):</strong> 
-                        <span style="color: #6f42c1;">{:.2} ms</span>
-                    </div>"#,
-                    jitter
+                        <span style="color: #6f42c1;">{jitter:.2} ms</span>
+                    </div>"#
                 ));
             }
         }
@@ -1120,8 +1104,8 @@ impl ToHtml for LatencyMeasurement {
 
     fn to_html(&self) -> String {
         match self.rtt_ms {
-            Some(rtt) => format!(r#"<span style="color: #28a745;">{:.2} ms</span>"#, rtt),
-            None => format!(r#"<span style="color: #dc3545;">dropped</span>"#),
+            Some(rtt) => format!(r#"<span style="color: #28a745;">{rtt:.2} ms</span>"#),
+            None => r#"<span style="color: #dc3545;">dropped</span>"#.to_string(),
         }
     }
 }

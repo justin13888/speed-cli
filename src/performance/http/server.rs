@@ -11,15 +11,11 @@ use bytes::Bytes;
 use eyre::Result;
 use futures::StreamExt as _;
 use futures::stream;
-use http_body_util::BodyExt;
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
 use std::sync::LazyLock as SyncLazy;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, sync::Once};
-use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::debug;
 
 /// Static buffer for download operations to avoid allocations
 static ZERO_BUFFER: SyncLazy<Arc<Bytes>> = SyncLazy::new(|| {

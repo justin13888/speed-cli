@@ -19,12 +19,9 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
 
     println!(
         "{}",
-        format!(
-            "Starting UDP test to server {}...",
-            server_addr.cyan()
-        )
-        .green()
-        .bold()
+        format!("Starting UDP test to server {}...", server_addr.cyan())
+            .green()
+            .bold()
     );
 
     let test_duration = Duration::from_secs(config.duration);
