@@ -19,8 +19,8 @@ use crate::{
     TestType,
     performance::http::HttpVersion,
     report::{
-        HttpTestConfig, HttpTestResult, LatencyMeasurement, LatencyResult, TestReport,
-        ThroughputMeasurement, ThroughputResult,
+        ConnectionError, HttpTestConfig, HttpTestResult, LatencyMeasurement, LatencyResult,
+        TestReport, ThroughputMeasurement, ThroughputResult,
     },
     utils::format::{format_bytes, format_throughput},
 };
@@ -359,17 +359,20 @@ async fn run_download_test(
                 let download_start = Instant::now();
                 match download_chunk(&client, &url).await {
                     Ok(bytes) => {
-                        let measurement = ThroughputMeasurement {
-                            bytes,
-                            duration: download_start.elapsed(),
-                        };
+                        let measurement =
+                            ThroughputMeasurement::new(bytes, download_start.elapsed());
                         local_measurements.push(measurement.clone());
-
-                        // Send to stats collector (non-blocking)
                         let _ = tx.send(measurement);
                     }
                     Err(e) => {
-                        eprintln!("Download error on connection {i}: {e}");
+                        let measurements = ThroughputMeasurement::Failure {
+                            error: ConnectionError::Unknown(e.to_string()),
+                            duration: download_start.elapsed(),
+                            retry_count: 0, // No retries in this case
+                        };
+                        local_measurements.push(measurements.clone());
+                        let _ = tx.send(measurements);
+
                         break;
                     }
                 }
@@ -394,7 +397,13 @@ async fn run_download_test(
                 if let Ok(measurements) = measurements_for_stats.lock()
                     && !measurements.is_empty()
                 {
-                    let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                    let total_bytes: u64 = measurements
+                        .iter()
+                        .map(|m| match m {
+                            ThroughputMeasurement::Success { bytes, .. } => *bytes,
+                            ThroughputMeasurement::Failure { .. } => 0,
+                        })
+                        .sum();
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
                     let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
@@ -426,7 +435,7 @@ async fn run_download_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                eprintln!("Task error: {e}");
+                panic!("Task error: {e}");
             }
         }
     }
@@ -507,18 +516,18 @@ async fn run_upload_test(
                 let upload_start = Instant::now();
                 match upload_chunk(&client, &url, &data).await {
                     Ok(bytes) => {
-                        let measurement = ThroughputMeasurement {
-                            bytes,
-                            duration: upload_start.elapsed(),
-                        };
+                        let measurement = ThroughputMeasurement::new(bytes, upload_start.elapsed());
                         local_measurements.push(measurement.clone());
-
-                        // Send to stats collector (non-blocking)
                         let _ = tx.send(measurement);
                     }
                     Err(e) => {
-                        eprintln!("Upload error on connection {i}: {e}");
-                        break;
+                        let measurement = ThroughputMeasurement::new_error(
+                            ConnectionError::Unknown(e.to_string()),
+                            upload_start.elapsed(),
+                            0,
+                        );
+                        local_measurements.push(measurement.clone());
+                        let _ = tx.send(measurement);
                     }
                 }
             }
@@ -542,7 +551,13 @@ async fn run_upload_test(
                 if let Ok(measurements) = measurements_for_stats.lock()
                     && !measurements.is_empty()
                 {
-                    let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                    let total_bytes: u64 = measurements
+                        .iter()
+                        .map(|m| match m {
+                            ThroughputMeasurement::Success { bytes, .. } => *bytes,
+                            ThroughputMeasurement::Failure { .. } => 0,
+                        })
+                        .sum();
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
                     let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
@@ -574,7 +589,7 @@ async fn run_upload_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                eprintln!("Task error: {e}");
+                panic!("Task error: {e}");
             }
         }
     }

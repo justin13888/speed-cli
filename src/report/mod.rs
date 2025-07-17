@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 
 mod config;
+mod errors;
 mod measurement;
 mod result;
 
 pub use config::*;
+pub use errors::*;
 pub use measurement::*;
 pub use result::*;
 

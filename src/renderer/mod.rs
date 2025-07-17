@@ -1158,28 +1158,34 @@ impl ToHtml for LatencyMeasurement {
 // Implementation for ThroughputMeasurement
 impl ToHtml for ThroughputMeasurement {
     fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        write!(
-            writer,
-            r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8f9fa; border-radius: 4px; margin: 5px 0;">
-                <span>{} in {} ms</span>
-                <span style="color: #6f42c1;">{}</span>
-            </div>"#,
-            format_bytes_u64(self.bytes),
-            self.duration.as_millis(),
-            format_throughput(self.throughput_bps())
-        )
+        write!(writer, "{}", self.to_html())
     }
 
     fn to_html(&self) -> String {
-        format!(
-            r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8f9fa; border-radius: 4px; margin: 5px 0;">
-                <span>{} in {} ms</span>
-                <span style="color: #6f42c1;">{}</span>
-            </div>"#,
-            format_bytes_u64(self.bytes),
-            self.duration.as_millis(),
-            format_throughput(self.throughput_bps())
-        )
+        match self {
+            ThroughputMeasurement::Success { bytes, duration } => {
+                format!(
+                    r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8f9fa; border-radius: 4px; margin: 5px 0;">
+                        <span>{} in {} ms</span>
+                        <span style="color: #6f42c1;">{}</span>
+                    </div>"#,
+                    format_bytes_u64(*bytes),
+                    duration.as_millis(),
+                    format_throughput(self.throughput_bps())
+                )
+            }
+            ThroughputMeasurement::Failure { error, duration, retry_count } => {
+                format!(
+                    r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8d7da; border-radius: 4px; margin: 5px 0;">
+                        <span style="color: #721c24;">Error: {} (after {} ms, {} retries)</span>
+                        <span style="color: #dc3545;">Failed</span>
+                    </div>"#,
+                    error,
+                    duration.as_millis(),
+                    retry_count
+                )
+            }
+        }
     }
 }
 

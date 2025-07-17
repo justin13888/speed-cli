@@ -16,8 +16,8 @@ use tracing::trace;
 use crate::{
     TestType,
     report::{
-        LatencyMeasurement, LatencyResult, TcpTestConfig, TcpTestResult, TestReport,
-        ThroughputMeasurement, ThroughputResult,
+        ConnectionError, LatencyMeasurement, LatencyResult, TcpTestConfig, TcpTestResult,
+        TestReport, ThroughputMeasurement, ThroughputResult,
     },
     utils::format::{format_bytes, format_throughput},
 };
@@ -327,18 +327,19 @@ async fn run_download_test(
                                 break;
                             }
                             Ok(n) => {
-                                let measurement = ThroughputMeasurement {
-                                    bytes: n as u64,
-                                    duration: read_start.elapsed(),
-                                };
+                                let measurement =
+                                    ThroughputMeasurement::new(n as u64, read_start.elapsed());
                                 local_measurements.push(measurement.clone());
-
-                                // Send to stats collector (non-blocking)
                                 let _ = tx.send(measurement);
                             }
                             Err(e) => {
-                                eprintln!("TCP read error on connection {i}: {e}");
-                                break;
+                                let measurement = ThroughputMeasurement::new_error(
+                                    ConnectionError::Unknown(e.to_string()),
+                                    read_start.elapsed(),
+                                    0,
+                                );
+                                local_measurements.push(measurement.clone());
+                                let _ = tx.send(measurement);
                             }
                         }
                     }
@@ -367,7 +368,13 @@ async fn run_download_test(
                 if let Ok(measurements) = measurements_for_stats.lock()
                     && !measurements.is_empty()
                 {
-                    let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                    let total_bytes: u64 = measurements
+                        .iter()
+                        .map(|m| match m {
+                            ThroughputMeasurement::Success { bytes, .. } => *bytes,
+                            ThroughputMeasurement::Failure { .. } => 0,
+                        })
+                        .sum();
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
                     let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
@@ -399,7 +406,7 @@ async fn run_download_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                eprintln!("Task error: {e}");
+                panic!("Task error: {e}");
             }
         }
     }
@@ -489,17 +496,25 @@ async fn run_upload_test(
                         let write_start = Instant::now();
                         match stream.write_all(&data).await {
                             Ok(_) => {
-                                let measurement = ThroughputMeasurement {
-                                    bytes: data.len() as u64,
-                                    duration: write_start.elapsed(),
-                                };
+                                let measurement = ThroughputMeasurement::new(
+                                    data.len() as u64,
+                                    write_start.elapsed(),
+                                );
                                 local_measurements.push(measurement.clone());
 
                                 // Send to stats collector (non-blocking)
                                 let _ = tx.send(measurement);
                             }
                             Err(e) => {
-                                eprintln!("TCP write error on connection {i}: {e}");
+                                let measurement = ThroughputMeasurement::new_error(
+                                    ConnectionError::Unknown(format!(
+                                        "TCP write error on connection {i}: {e}"
+                                    )),
+                                    write_start.elapsed(),
+                                    0,
+                                );
+                                local_measurements.push(measurement.clone());
+                                let _ = tx.send(measurement);
                                 break;
                             }
                         }
@@ -529,7 +544,13 @@ async fn run_upload_test(
                 if let Ok(measurements) = measurements_for_stats.lock()
                     && !measurements.is_empty()
                 {
-                    let total_bytes: u64 = measurements.iter().map(|m| m.bytes).sum();
+                    let total_bytes: u64 = measurements
+                        .iter()
+                        .map(|m| match m {
+                            ThroughputMeasurement::Success { bytes, .. } => *bytes,
+                            ThroughputMeasurement::Failure { .. } => 0,
+                        })
+                        .sum();
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
                     let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
@@ -561,7 +582,7 @@ async fn run_upload_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                eprintln!("Task error: {e}");
+                panic!("Task error: {e}");
             }
         }
     }
