@@ -185,9 +185,10 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
 /// Measure HTTP latency by simply sending HEAD requests to the server
 async fn measure_http_latency(
     client: &Client,
-    url: &str,
+    server_url: &str,
     duration: Duration,
 ) -> Result<Option<LatencyResult>> {
+    let url = format!("{server_url}/latency");
     let mut measurements = Vec::new();
 
     println!("Measuring HTTP latency for {duration:?}...");
@@ -257,7 +258,7 @@ async fn measure_http_latency(
 
     while start.elapsed() < duration {
         let request_start = Instant::now();
-        match client.head(url).send().await {
+        match client.head(&url).send().await {
             Ok(_response) => {
                 let rtt = request_start.elapsed().as_secs_f64() * 1000.0;
                 let measurement = LatencyMeasurement {
