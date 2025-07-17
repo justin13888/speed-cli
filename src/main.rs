@@ -25,6 +25,7 @@ use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
 use crate::utils::export::{export_report, export_report_html};
 use crate::utils::file::can_write;
 use crate::utils::import::import_report_json;
+use crate::utils::progress::with_progress_counter;
 
 mod cli;
 mod constants;
@@ -190,7 +191,12 @@ async fn main() -> Result<()> {
 
             // If export file is specified, write results
             if let Some(export) = &export {
-                match export_report(&report, export).await {
+                match with_progress_counter(
+                    "Exporting test results",
+                    export_report(&report, export),
+                )
+                .await
+                {
                     Ok(_) => println!(
                         "{}",
                         format!("Results exported to {}", export.to_string_lossy()).cyan()
@@ -316,8 +322,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::Report { file, export_html } => {
-            println!("{}", "Loading report...".yellow().bold());
-
             // Validate file exists and is readable
             if !file.exists() {
                 return Err(eyre::eyre!(
@@ -331,7 +335,11 @@ async fn main() -> Result<()> {
             if let Some(ext) = file.extension() {
                 match ext.to_string_lossy().as_ref() {
                     "json" => {
-                        let report = import_report_json(&file).await?;
+                        let report = with_progress_counter(
+                            "Loading report from JSON file",
+                            import_report_json(&file),
+                        )
+                        .await?;
 
                         match export_html {
                             None => {
@@ -340,14 +348,18 @@ async fn main() -> Result<()> {
                             }
                             Some(html_file) => {
                                 // Export to HTML
-                                if let Err(e) = export_report_html(&report, &html_file).await {
-                                    eprintln!("Error exporting to HTML: {e}");
-                                } else {
-                                    println!(
+                                match with_progress_counter(
+                                    "Exporting report to HTML",
+                                    export_report_html(&report, &html_file),
+                                )
+                                .await
+                                {
+                                    Ok(_) => println!(
                                         "{}",
                                         format!("HTML report exported to {}", html_file.display())
                                             .cyan()
-                                    );
+                                    ),
+                                    Err(e) => eprintln!("Error exporting to HTML: {e}"),
                                 }
                             }
                         }
@@ -358,7 +370,12 @@ async fn main() -> Result<()> {
                             file.display()
                         ));
                     }
-                    _ => match import_report_json(&file).await {
+                    _ => match with_progress_counter(
+                        "Loading report from file (assuming JSON format)",
+                        import_report_json(&file),
+                    )
+                    .await
+                    {
                         Ok(report) => {
                             println!("{report:#}");
                         }
