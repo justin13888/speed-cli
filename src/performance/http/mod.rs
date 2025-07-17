@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
 pub mod client;
 pub mod server;
 
@@ -14,9 +17,16 @@ pub enum HttpVersion {
     HTTP3,
 }
 
-use std::fmt;
+impl HttpVersion {
+    pub fn is_secure(&self) -> bool {
+        matches!(self, HttpVersion::HTTP2 | HttpVersion::HTTP3)
+    }
 
-use serde::{Deserialize, Serialize};
+    /// Returns "http" or "https" based on the version.
+    pub fn scheme(&self) -> &'static str {
+        if self.is_secure() { "https" } else { "http" }
+    }
+}
 
 impl fmt::Display for HttpVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
