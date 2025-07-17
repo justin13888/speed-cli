@@ -5,6 +5,7 @@ use colored::*;
 use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
 
+use crate::constants::DEFAULT_CHUNK_SIZE;
 use crate::utils::format::format_bytes;
 use crate::{
     TestType,
@@ -48,7 +49,6 @@ pub struct TcpTestConfig {
     pub duration: Duration,
     /// Number of parallel TCP connections
     pub parallel_connections: usize,
-
     pub test_type: TestType,
     /// Payload sizes to use for the test, in bytes. Note this doesn't make sense for TCP but included anyways.
     pub payload_sizes: IndexSet<usize>,
@@ -134,6 +134,7 @@ pub struct HttpTestConfig {
     /// Payload sizes for testing.
     pub payload_sizes: IndexSet<usize>,
     pub http_version: HttpVersion,
+    pub chunk_size: usize,
 }
 
 impl HttpTestConfig {
@@ -144,6 +145,7 @@ impl HttpTestConfig {
         parallel_connections: usize,
         test_type: TestType,
         payload_sizes: T,
+        chunk_size: Option<usize>,
         http_version: HttpVersion,
     ) -> Self
     where
@@ -173,6 +175,7 @@ impl HttpTestConfig {
             parallel_connections: parallel_connections.max(1),
             test_type,
             payload_sizes,
+            chunk_size: chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
             http_version,
         }
     }

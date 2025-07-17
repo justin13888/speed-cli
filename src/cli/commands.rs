@@ -62,14 +62,18 @@ pub enum Commands {
         #[arg(short, long, default_value = "1")]
         connections: usize,
 
+        /// Test type (download, upload, bidirectional, simultaneous, latency)
+        #[arg(long = "type", default_value = "bidirectional")]
+        test_type: TestType,
+
         /// Packet/payload sizes in bytes (e.g., 1024, 8192). If empty, uses default sizes.
         /// Note: TCP automatically segments anyways but this argument is kept for consistency.
         #[arg(long = "sizes", num_args = 0.., value_delimiter = ',')]
         test_sizes: Vec<usize>,
 
-        /// Test type (download, upload, bidirectional, simultaneous, latency)
-        #[arg(long = "type", default_value = "bidirectional")]
-        test_type: TestType,
+        /// Maximum chunk size. Effective only for HTTP tests.
+        #[arg(long)]
+        chunk_size: Option<usize>,
 
         /// Enable debug output
         #[arg(long)]

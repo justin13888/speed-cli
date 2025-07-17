@@ -2,6 +2,7 @@ use chrono::Utc;
 use colored::Colorize as _;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
+use humansize::ToF64;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
@@ -73,6 +74,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         &config.server_url,
                         config.parallel_connections,
                         *payload_size,
+                        config.chunk_size,
                         config.duration,
                     )
                     .await?,
@@ -88,6 +90,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         &config.server_url,
                         config.parallel_connections,
                         *payload_size,
+                        config.chunk_size,
                         config.duration,
                     )
                     .await?,
@@ -104,6 +107,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         &config.server_url,
                         config.parallel_connections,
                         *payload_size,
+                        config.chunk_size,
                         config.duration,
                     )
                     .await?,
@@ -115,6 +119,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         &config.server_url,
                         config.parallel_connections,
                         *payload_size,
+                        config.chunk_size,
                         config.duration,
                     )
                     .await?,
@@ -130,6 +135,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         &config.server_url,
                         config.parallel_connections,
                         *payload_size,
+                        config.chunk_size,
                         config.duration,
                     ),
                     run_upload_test(
@@ -137,6 +143,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         &config.server_url,
                         config.parallel_connections,
                         *payload_size,
+                        config.chunk_size,
                         config.duration,
                     )
                 );
@@ -309,6 +316,7 @@ async fn run_download_test(
     server_url: &str,
     parallel_connections: usize,
     payload_size: usize,
+    chunk_size: usize,
     duration: Duration,
 ) -> Result<ThroughputResult> {
     println!(
@@ -350,14 +358,14 @@ async fn run_download_test(
 
     for i in 0..parallel_connections {
         let client = client.clone();
-        let url = format!("{server_url}/download?size={payload_size}&id={i}");
         let tx = tx.clone();
+        let server_url = server_url.to_string();
 
         let task = tokio::spawn(async move {
             let mut local_measurements = Vec::new();
             while start_time.elapsed() < duration {
                 let download_start = Instant::now();
-                match download_chunk(&client, &url).await {
+                match download_chunk(&client, &server_url, i, payload_size, chunk_size).await {
                     Ok(bytes) => {
                         let measurement = ThroughputMeasurement {
                             bytes,
@@ -449,6 +457,7 @@ async fn run_upload_test(
     server_url: &str,
     parallel_connections: usize,
     payload_size: usize,
+    chunk_size: usize,
     duration: Duration,
 ) -> Result<ThroughputResult> {
     println!(
@@ -470,12 +479,13 @@ async fn run_upload_test(
     let mut measurements = Vec::new();
     let start_time = Instant::now();
 
-    // Generate upload data
-    let upload_data = {
-        let mut data = vec![0u8; payload_size];
+    // Generate random upload data at the size of chunk_size
+    let chunk_data = {
+        let mut data = vec![0u8; chunk_size];
         rng().fill_bytes(&mut data);
         data
     };
+    debug_assert!(chunk_data.len() == chunk_size, "Chunk data size mismatch");
 
     // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
     let (tx, mut rx) = mpsc::unbounded_channel::<ThroughputMeasurement>();
@@ -497,15 +507,15 @@ async fn run_upload_test(
 
     for i in 0..parallel_connections {
         let client = client.clone();
-        let url = format!("{server_url}/upload?id={i}");
-        let data = upload_data.clone();
         let tx = tx.clone();
+        let server_url = server_url.to_string();
+        let chunk_data = chunk_data.clone();
 
         let task = tokio::spawn(async move {
             let mut local_measurements = Vec::new();
             while start_time.elapsed() < duration {
                 let upload_start = Instant::now();
-                match upload_chunk(&client, &url, &data).await {
+                match upload_chunk(&client, &server_url, payload_size, chunk_data.clone()).await {
                     Ok(bytes) => {
                         let measurement = ThroughputMeasurement {
                             bytes,
@@ -593,32 +603,77 @@ async fn run_upload_test(
 }
 
 /// Download a chunk of data from the server
-async fn download_chunk(client: &Client, url: &str) -> Result<u64> {
-    let response = client.get(url).send().await?;
+async fn download_chunk(
+    client: &Client,
+    server_url: &str,
+    id: usize,
+    payload_size: usize,
+    chunk_size: usize,
+) -> Result<u64> {
+    let response = client
+        .get(format!(
+            "{server_url}/download?size={payload_size}&chunk_size={chunk_size}&id={id}"
+        ))
+        .send()
+        .await?;
     let mut total_bytes = 0u64;
 
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
         total_bytes += chunk.len() as u64;
     }
+
+    // Debug assert that total_bytes is within margin of error (10%)
+    debug_assert!(
+        payload_size.to_f64() * 0.9 <= total_bytes.to_f64()
+            && total_bytes.to_f64() <= payload_size.to_f64() * 1.1,
+        "Downloaded {total_bytes} bytes, expected within 10% of {payload_size} bytes"
+    );
 
     Ok(total_bytes)
 }
 
-/// Upload a chunk of data to the server
-async fn upload_chunk(client: &Client, url: &str, data: &[u8]) -> Result<u64> {
-    let response = client
-        .post(url)
-        .header("Content-Type", "application/octet-stream")
-        .body(data.to_vec())
-        .send()
-        .await?;
+async fn upload_chunk(
+    client: &Client,
+    server_url: &str,
+    payload_size: usize,
+    chunk_data: Vec<u8>,
+) -> Result<u64> {
+    let chunk_size = chunk_data.len();
+    let total_bytes_to_send = payload_size;
+    let mut total_bytes_sent = 0u64;
 
-    // Ensure the upload was successful
-    if response.status().is_success() {
-        Ok(data.len() as u64)
-    } else {
-        eyre::bail!("Upload failed with status: {}", response.status());
+    // Calculate how many chunks we need to send
+    let num_chunks = (total_bytes_to_send + chunk_size - 1) / chunk_size; // Ceiling division
+
+    for chunk_index in 0..num_chunks {
+        let remaining_bytes = total_bytes_to_send - (chunk_index * chunk_size);
+        let current_chunk_size = std::cmp::min(chunk_size, remaining_bytes);
+
+        // Use only the needed portion of chunk_data for the last chunk
+        let chunk_to_send = if current_chunk_size == chunk_size {
+            chunk_data.clone()
+        } else {
+            chunk_data[..current_chunk_size].to_vec()
+        };
+
+        let response = client
+            .post(format!("{server_url}/upload"))
+            .header("Content-Type", "application/octet-stream")
+            .header("X-Chunk-Index", chunk_index.to_string())
+            .header("X-Total-Chunks", num_chunks.to_string())
+            .body(chunk_to_send)
+            .send()
+            .await?;
+
+        // Ensure the upload was successful
+        if !response.status().is_success() {
+            eyre::bail!("Upload failed with status: {}", response.status());
+        }
+
+        total_bytes_sent += current_chunk_size as u64;
     }
+
+    Ok(total_bytes_sent)
 }

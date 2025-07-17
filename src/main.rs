@@ -80,8 +80,9 @@ async fn main() -> Result<()> {
             http3,
             export,
             connections,
-            test_sizes,
             test_type,
+            test_sizes,
+            chunk_size,
             debug,
         } => {
             // Assert that exactly one specific protocol is enabled (no more, no less)
@@ -174,6 +175,7 @@ async fn main() -> Result<()> {
                         connections,
                         test_type,
                         test_sizes,
+                        chunk_size,
                         http_version,
                     );
 

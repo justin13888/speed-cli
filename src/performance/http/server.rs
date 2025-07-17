@@ -21,10 +21,12 @@ use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::debug;
 
+use crate::constants::DEFAULT_CHUNK_SIZE;
+
 /// Static buffer for download operations to avoid allocations
 static ZERO_BUFFER: SyncLazy<Arc<Bytes>> = SyncLazy::new(|| {
     // 64KB zero buffer - large enough to avoid frequent copying but small enough for L1/L2 cache
-    Arc::new(Bytes::from(vec![0u8; 65536]))
+    Arc::new(Bytes::from(vec![0u8; 1024 * 1024 * 1024])) // 1GB buffer
 });
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
@@ -138,7 +140,7 @@ struct DownloadQuery {
 }
 
 fn default_chunk_size() -> usize {
-    65536 // 64KB default chunk size
+    DEFAULT_CHUNK_SIZE
 }
 
 async fn download_handler(Query(query): Query<DownloadQuery>) -> impl IntoResponse {
@@ -149,12 +151,27 @@ async fn download_handler(Query(query): Query<DownloadQuery>) -> impl IntoRespon
 
     let buffer_ref = Arc::clone(&ZERO_BUFFER);
 
-    let mut remaining_bytes = total_size;
-    let stream = stream::iter(0..chunks).map(move |_| {
+    // TODO: Check how slow this is vv
+    let stream = stream::iter(0..chunks).enumerate().map(move |(i, _)| {
+        let bytes_sent = i * chunk_size;
+        let remaining_bytes = total_size.saturating_sub(bytes_sent);
         let current_chunk_size = chunk_size.min(remaining_bytes);
-        remaining_bytes = remaining_bytes.saturating_sub(current_chunk_size);
-        let bytes = buffer_ref.clone().slice(0..current_chunk_size);
-        Ok::<_, std::io::Error>(bytes)
+
+        // If the chunk size is larger than our buffer, we need to repeat the buffer
+        if current_chunk_size <= buffer_ref.len() {
+            let bytes = buffer_ref.clone().slice(0..current_chunk_size);
+            Ok::<_, std::io::Error>(bytes)
+        } else {
+            // Create a larger chunk by repeating the buffer
+            let mut chunk_data = Vec::with_capacity(current_chunk_size);
+            let mut bytes_written = 0;
+            while bytes_written < current_chunk_size {
+                let bytes_to_copy = (current_chunk_size - bytes_written).min(buffer_ref.len());
+                chunk_data.extend_from_slice(&buffer_ref[0..bytes_to_copy]);
+                bytes_written += bytes_to_copy;
+            }
+            Ok::<_, std::io::Error>(Bytes::from(chunk_data))
+        }
     });
 
     let body = Body::from_stream(stream);
