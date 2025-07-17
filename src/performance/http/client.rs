@@ -168,14 +168,15 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         HttpVersion::HTTP1 => {
             builder = builder.http1_only();
         }
-        HttpVersion::HTTP2 => {
-            builder = builder.http2_prior_knowledge();
-        }
-        HttpVersion::H2C => {
-            builder = builder.http2_prior_knowledge();
+        HttpVersion::HTTP2 | HttpVersion::H2C => {
+            builder = builder
+                .http2_prior_knowledge()
+                .http2_max_frame_size(Some(65536)) // 64KB (max allowed)
+                .http2_adaptive_window(true); // Enable adaptive flow control
         }
         HttpVersion::HTTP3 => {
             builder = builder.http3_prior_knowledge();
+            // .http3_congestion_bbr();
         }
     }
 
