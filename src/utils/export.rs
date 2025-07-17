@@ -1,5 +1,6 @@
 use std::path::Path;
 use thiserror::Error;
+use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::{renderer::ToHtml, report::TestReport};
 
@@ -39,6 +40,16 @@ pub async fn export_report_json(report: &TestReport, filename: &Path) -> Result<
 }
 
 pub async fn export_report_html(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
-    tokio::fs::write(filename, report.to_html()).await?;
+    // Method 1: Using write_html with a buffered async writer (recommended for large reports)
+    let file = tokio::fs::File::create(filename).await?;
+    let mut writer = BufWriter::new(file);
+
+    // Create a blocking writer wrapper for the async writer
+    let mut buffer = Vec::new();
+    report.write_html(&mut buffer)?;
+
+    writer.write_all(&buffer).await?;
+    writer.flush().await?;
+
     Ok(())
 }
