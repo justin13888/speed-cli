@@ -24,7 +24,7 @@ use crate::performance::udp::server::run_udp_server;
 use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
 use crate::utils::export::{export_report, export_report_html};
 use crate::utils::file::can_write;
-use crate::utils::import::import_report_json;
+use crate::utils::import::{import_report_cbor, import_report_json};
 use crate::utils::progress::with_progress_counter;
 
 mod cli;
@@ -135,7 +135,6 @@ async fn main() -> Result<()> {
                         test_type,
                         test_sizes,
                     );
-                    
 
                     run_tcp_client(config).await?
                 }
@@ -148,8 +147,6 @@ async fn main() -> Result<()> {
                         test_type,
                         test_sizes,
                     );
-
-                    
 
                     run_udp_client(config).await?
                 }
@@ -172,8 +169,6 @@ async fn main() -> Result<()> {
                         test_sizes,
                         http_version,
                     );
-
-                    
 
                     run_http_test(config).await?
                 }
@@ -333,6 +328,36 @@ async fn main() -> Result<()> {
                         let report = with_progress_counter(
                             "Loading report from JSON file",
                             import_report_json(&file),
+                        )
+                        .await?;
+
+                        match export_html {
+                            None => {
+                                // Print report in stdout
+                                println!("{report:#}");
+                            }
+                            Some(html_file) => {
+                                // Export to HTML
+                                match with_progress_counter(
+                                    "Exporting report to HTML",
+                                    export_report_html(&report, &html_file),
+                                )
+                                .await
+                                {
+                                    Ok(_) => println!(
+                                        "{}",
+                                        format!("HTML report exported to {}", html_file.display())
+                                            .cyan()
+                                    ),
+                                    Err(e) => eprintln!("Error exporting to HTML: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    "cbor" => {
+                        let report = with_progress_counter(
+                            "Loading report from CBOR file",
+                            import_report_cbor(&file),
                         )
                         .await?;
 

@@ -54,7 +54,7 @@ pub enum Commands {
         #[clap(group = "protocol")]
         http3: bool,
 
-        /// Export results to file (JSON or HTML depending on extension)
+        /// Export results to file (JSON, CBOR, or HTML depending on extension)
         #[arg(short, long)]
         export: Option<PathBuf>,
 
@@ -128,7 +128,7 @@ pub enum Commands {
 
     /// Print previously saved results
     Report {
-        /// Path to the results file (only JSON)
+        /// Path to the results file (JSON or CBOR)
         #[arg(short, long)]
         file: PathBuf,
 
