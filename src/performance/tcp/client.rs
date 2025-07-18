@@ -378,11 +378,13 @@ async fn run_download_test(
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
                     let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
+                    let requests_per_sec = measurements.len() as f64 / elapsed_secs;
 
                     pb.set_message(format!(
-                        "Avg: {} | {} | Chunks: {}",
+                        "Avg: {} | {} | Req/s: {:.1} | Chunks: {}",
                         format_throughput(throughput_mbps),
                         format_bytes(throughput_bytes_per_sec as usize),
+                        requests_per_sec,
                         measurements.len()
                     ));
                 }
@@ -554,11 +556,13 @@ async fn run_upload_test(
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
                     let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
                     let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
+                    let requests_per_sec = measurements.len() as f64 / elapsed_secs;
 
                     pb.set_message(format!(
-                        "Avg: {} | {} | Chunks: {}",
+                        "Avg: {} | {} | Req/s: {:.1} | Chunks: {}",
                         format_throughput(throughput_mbps),
                         format_bytes(throughput_bytes_per_sec as usize),
+                        requests_per_sec,
                         measurements.len()
                     ));
                 }
