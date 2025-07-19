@@ -19,7 +19,9 @@ use crate::{
     },
     utils::{
         format::format_bytes,
-        instrumentation::{LatencyStatsCollector, ThroughputStatsCollector, ProgressBarType, create_progress_bar},
+        instrumentation::{
+            LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+        },
     },
 };
 
@@ -186,7 +188,9 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     drop(tx);
 
     // Wait for stats collector to complete and get measurements
-    measurements = stats_collector.finish(progress_bar, "Latency measurement complete".to_string()).await;
+    measurements = stats_collector
+        .finish(progress_bar, "Latency measurement complete".to_string())
+        .await;
 
     if measurements.is_empty() {
         return Ok(None);
@@ -218,7 +222,8 @@ async fn run_download_test(
     let start_time = Instant::now();
 
     // Set up instrumentation
-    let (stats_collector, tx) = ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
+    let (stats_collector, tx) =
+        ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
 
     let mut tasks = Vec::new();
 
@@ -298,7 +303,9 @@ async fn run_download_test(
     }
 
     // Wait for stats collector to complete and get measurements
-    measurements = stats_collector.finish(progress_bar, "Download complete".to_string()).await;
+    measurements = stats_collector
+        .finish(progress_bar, "Download complete".to_string())
+        .await;
 
     let end_time = Instant::now();
 
@@ -336,7 +343,8 @@ async fn run_upload_test(
     };
 
     // Set up instrumentation
-    let (stats_collector, tx) = ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
+    let (stats_collector, tx) =
+        ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
 
     let mut tasks = Vec::new();
 
@@ -414,7 +422,9 @@ async fn run_upload_test(
     }
 
     // Wait for stats collector to complete and get measurements
-    measurements = stats_collector.finish(progress_bar, "Upload complete".to_string()).await;
+    measurements = stats_collector
+        .finish(progress_bar, "Upload complete".to_string())
+        .await;
 
     let end_time = Instant::now();
 

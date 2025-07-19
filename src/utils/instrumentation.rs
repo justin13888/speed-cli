@@ -18,16 +18,18 @@ pub enum ProgressBarType {
 /// Creates a progress bar with appropriate styling for the test type
 pub fn create_progress_bar(test_type: ProgressBarType, duration: Duration) -> ProgressBar {
     let progress_bar = ProgressBar::new(duration.as_secs());
-    
+
     let (color, test_name) = match test_type {
         ProgressBarType::Latency => ("yellow/blue", "latency"),
         ProgressBarType::Download => ("cyan/blue", "download"),
         ProgressBarType::Upload => ("green/blue", "upload"),
     };
-    
+
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template(&format!("[{{elapsed_precise}}] {{bar:40.{color}}} {{pos}}s/{{len}}s {{msg}}"))
+            .template(&format!(
+                "[{{elapsed_precise}}] {{bar:40.{color}}} {{pos}}s/{{len}}s {{msg}}"
+            ))
             .unwrap()
             .progress_chars("##-"),
     );
@@ -63,7 +65,7 @@ impl LatencyStatsCollector {
         duration: Duration,
     ) -> (Self, mpsc::UnboundedSender<LatencyMeasurement>) {
         let (tx, mut rx) = mpsc::unbounded_channel::<LatencyMeasurement>();
-        
+
         let measurements = Arc::new(std::sync::Mutex::new(Vec::<LatencyMeasurement>::new()));
         let measurements_clone = measurements.clone();
 
@@ -86,8 +88,8 @@ impl LatencyStatsCollector {
                     pb.set_position(elapsed);
 
                     // Calculate and display running average latency (minimal overhead)
-                    if let Ok(measurements) = measurements_for_stats.try_lock() {
-                        if !measurements.is_empty() {
+                    if let Ok(measurements) = measurements_for_stats.try_lock()
+                        && !measurements.is_empty() {
                             let valid_measurements: Vec<f64> =
                                 measurements.iter().filter_map(|m| m.rtt_ms).collect();
 
@@ -104,7 +106,6 @@ impl LatencyStatsCollector {
                                 ));
                             }
                         }
-                    }
 
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -122,13 +123,17 @@ impl LatencyStatsCollector {
         )
     }
 
-    pub async fn finish(self, progress_bar: ProgressBar, message: String) -> Vec<LatencyMeasurement> {
+    pub async fn finish(
+        self,
+        progress_bar: ProgressBar,
+        message: String,
+    ) -> Vec<LatencyMeasurement> {
         let _ = tokio::join!(self.collector_handle, self.progress_handle);
         progress_bar.finish_with_message(message);
-        
+
         // Extract measurements with minimal lock time
-        let measurements = self.measurements.lock().unwrap().clone();
-        measurements
+        
+        self.measurements.lock().unwrap().clone()
     }
 }
 
@@ -146,7 +151,7 @@ impl ThroughputStatsCollector {
         duration: Duration,
     ) -> (Self, mpsc::UnboundedSender<ThroughputMeasurement>) {
         let (tx, mut rx) = mpsc::unbounded_channel::<ThroughputMeasurement>();
-        
+
         let measurements = Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
         let measurements_clone = measurements.clone();
 
@@ -169,8 +174,8 @@ impl ThroughputStatsCollector {
                     pb.set_position(elapsed);
 
                     // Calculate and display running average throughput (minimal overhead)
-                    if let Ok(measurements) = measurements_for_stats.try_lock() {
-                        if !measurements.is_empty() {
+                    if let Ok(measurements) = measurements_for_stats.try_lock()
+                        && !measurements.is_empty() {
                             let total_bytes: u64 = measurements
                                 .iter()
                                 .map(|m| match m {
@@ -179,7 +184,8 @@ impl ThroughputStatsCollector {
                                 })
                                 .sum();
                             let elapsed_secs = start_time.elapsed().as_secs_f64();
-                            let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+                            let throughput_mbps =
+                                (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
                             let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
                             let requests_per_sec = measurements.len() as f64 / elapsed_secs;
 
@@ -191,7 +197,6 @@ impl ThroughputStatsCollector {
                                 measurements.len()
                             ));
                         }
-                    }
 
                     // Update every 100ms
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -210,12 +215,16 @@ impl ThroughputStatsCollector {
         )
     }
 
-    pub async fn finish(self, progress_bar: ProgressBar, message: String) -> Vec<ThroughputMeasurement> {
+    pub async fn finish(
+        self,
+        progress_bar: ProgressBar,
+        message: String,
+    ) -> Vec<ThroughputMeasurement> {
         let _ = tokio::join!(self.collector_handle, self.progress_handle);
         progress_bar.finish_with_message(message);
-        
+
         // Extract measurements with minimal lock time
-        let measurements = self.measurements.lock().unwrap().clone();
-        measurements
+        
+        self.measurements.lock().unwrap().clone()
     }
 }
