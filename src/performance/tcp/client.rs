@@ -1,7 +1,6 @@
 use chrono::Utc;
 use colored::Colorize as _;
 use eyre::Result;
-use indicatif::{ProgressBar, ProgressStyle};
 use rand::{prelude::*, rng};
 use std::{
     collections::HashMap,
@@ -9,7 +8,6 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::trace;
 
@@ -19,7 +17,10 @@ use crate::{
         ConnectionError, LatencyMeasurement, LatencyResult, TcpTestConfig, TcpTestResult,
         TestReport, ThroughputMeasurement, ThroughputResult,
     },
-    utils::format::{format_bytes, format_throughput},
+    utils::{
+        format::format_bytes,
+        instrumentation::{LatencyStatsCollector, ThroughputStatsCollector, ProgressBarType, create_progress_bar},
+    },
 };
 
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
@@ -139,67 +140,12 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     println!("Measuring TCP latency for {duration:?}...");
 
     // Create progress bar for latency measurement
-    let progress_bar = ProgressBar::new(duration.as_secs());
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.yellow/blue} {pos}s/{len}s {msg}")
-            .unwrap()
-            .progress_chars("##-"),
-    );
-    progress_bar.set_message("Measuring latency...");
+    let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
 
     let start = Instant::now();
 
-    // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
-    let (tx, mut rx) = mpsc::unbounded_channel::<LatencyMeasurement>();
-
-    // Spawn a task to collect measurements for statistics
-    let stats_measurements =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<LatencyMeasurement>::new()));
-    let stats_measurements_clone = stats_measurements.clone();
-
-    let stats_collector = tokio::spawn(async move {
-        while let Some(measurement) = rx.recv().await {
-            if let Ok(mut measurements) = stats_measurements_clone.lock() {
-                measurements.push(measurement);
-            }
-        }
-    });
-
-    let progress_task = {
-        let pb = progress_bar.clone();
-        let measurements_for_stats = stats_measurements.clone();
-        tokio::spawn(async move {
-            while start.elapsed() < duration {
-                let elapsed = start.elapsed().as_secs();
-                pb.set_position(elapsed);
-
-                // Calculate and display running average latency
-                if let Ok(measurements) = measurements_for_stats.lock()
-                    && !measurements.is_empty()
-                {
-                    let valid_measurements: Vec<f64> =
-                        measurements.iter().filter_map(|m| m.rtt_ms).collect();
-
-                    if !valid_measurements.is_empty() {
-                        let avg_latency = valid_measurements.iter().sum::<f64>()
-                            / valid_measurements.len() as f64;
-                        let connection_rate =
-                            measurements.len() as f64 / start.elapsed().as_secs_f64();
-                        pb.set_message(format!(
-                            "Avg latency: {:.2}ms | Conn/s: {:.1} | Connections: {}",
-                            avg_latency,
-                            connection_rate,
-                            measurements.len()
-                        ));
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            pb.set_position(duration.as_secs());
-        })
-    };
+    // Set up instrumentation
+    let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
 
     while start.elapsed() < duration {
         let connect_start = Instant::now();
@@ -239,9 +185,8 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     // Drop the sender to signal stats collector to finish
     drop(tx);
 
-    // Wait for stats collector and progress task to complete
-    let _ = tokio::join!(stats_collector, progress_task);
-    progress_bar.finish_with_message("Latency measurement complete");
+    // Wait for stats collector to complete and get measurements
+    measurements = stats_collector.finish(progress_bar, "Latency measurement complete".to_string()).await;
 
     if measurements.is_empty() {
         return Ok(None);
@@ -267,33 +212,13 @@ async fn run_download_test(
     );
 
     // Create progress bar
-    let progress_bar = ProgressBar::new(duration.as_secs());
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}s/{len}s {msg}")
-            .unwrap()
-            .progress_chars("##-"),
-    );
-    progress_bar.set_message("Downloading...");
+    let progress_bar = create_progress_bar(ProgressBarType::Download, duration);
 
     let mut measurements = Vec::new();
     let start_time = Instant::now();
 
-    // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
-    let (tx, mut rx) = mpsc::unbounded_channel::<ThroughputMeasurement>();
-
-    // Spawn a task to collect measurements for statistics
-    let stats_measurements =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
-    let stats_measurements_clone = stats_measurements.clone();
-
-    let stats_collector = tokio::spawn(async move {
-        while let Some(measurement) = rx.recv().await {
-            if let Ok(mut measurements) = stats_measurements_clone.lock() {
-                measurements.push(measurement);
-            }
-        }
-    });
+    // Set up instrumentation
+    let (stats_collector, tx) = ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
 
     let mut tasks = Vec::new();
 
@@ -355,47 +280,6 @@ async fn run_download_test(
         tasks.push(task);
     }
 
-    // Update progress bar in a separate task
-    let progress_task = {
-        let pb = progress_bar.clone();
-        let measurements_for_stats = stats_measurements.clone();
-        tokio::spawn(async move {
-            while start_time.elapsed() < duration {
-                let elapsed = start_time.elapsed().as_secs();
-                pb.set_position(elapsed);
-
-                // Calculate and display running average throughput
-                if let Ok(measurements) = measurements_for_stats.lock()
-                    && !measurements.is_empty()
-                {
-                    let total_bytes: u64 = measurements
-                        .iter()
-                        .map(|m| match m {
-                            ThroughputMeasurement::Success { bytes, .. } => *bytes,
-                            ThroughputMeasurement::Failure { .. } => 0,
-                        })
-                        .sum();
-                    let elapsed_secs = start_time.elapsed().as_secs_f64();
-                    let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
-                    let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
-                    let requests_per_sec = measurements.len() as f64 / elapsed_secs;
-
-                    pb.set_message(format!(
-                        "Avg: {} | {} | Req/s: {:.1} | Chunks: {}",
-                        format_throughput(throughput_mbps),
-                        format_bytes(throughput_bytes_per_sec as usize),
-                        requests_per_sec,
-                        measurements.len()
-                    ));
-                }
-
-                // Update every 100ms
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            pb.set_position(duration.as_secs());
-        })
-    };
-
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
@@ -413,9 +297,8 @@ async fn run_download_test(
         }
     }
 
-    // Wait for stats collector and progress task to complete
-    let _ = tokio::join!(stats_collector, progress_task);
-    progress_bar.finish_with_message("Download complete");
+    // Wait for stats collector to complete and get measurements
+    measurements = stats_collector.finish(progress_bar, "Download complete".to_string()).await;
 
     let end_time = Instant::now();
 
@@ -440,14 +323,7 @@ async fn run_upload_test(
     );
 
     // Create progress bar
-    let progress_bar = ProgressBar::new(duration.as_secs());
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.green/blue} {pos}s/{len}s {msg}")
-            .unwrap()
-            .progress_chars("##-"),
-    );
-    progress_bar.set_message("Uploading...");
+    let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
 
     let mut measurements = Vec::new();
     let start_time = Instant::now();
@@ -459,21 +335,8 @@ async fn run_upload_test(
         data
     };
 
-    // Use mpsc channel instead of Arc<Mutex<Vec<T>>>
-    let (tx, mut rx) = mpsc::unbounded_channel::<ThroughputMeasurement>();
-
-    // Spawn a task to collect measurements for statistics
-    let stats_measurements =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ThroughputMeasurement>::new()));
-    let stats_measurements_clone = stats_measurements.clone();
-
-    let stats_collector = tokio::spawn(async move {
-        while let Some(measurement) = rx.recv().await {
-            if let Ok(mut measurements) = stats_measurements_clone.lock() {
-                measurements.push(measurement);
-            }
-        }
-    });
+    // Set up instrumentation
+    let (stats_collector, tx) = ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
 
     let mut tasks = Vec::new();
 
@@ -533,47 +396,6 @@ async fn run_upload_test(
         tasks.push(task);
     }
 
-    // Update progress bar in a separate task
-    let progress_task = {
-        let pb = progress_bar.clone();
-        let measurements_for_stats = stats_measurements.clone();
-        tokio::spawn(async move {
-            while start_time.elapsed() < duration {
-                let elapsed = start_time.elapsed().as_secs();
-                pb.set_position(elapsed);
-
-                // Calculate and display running average throughput
-                if let Ok(measurements) = measurements_for_stats.lock()
-                    && !measurements.is_empty()
-                {
-                    let total_bytes: u64 = measurements
-                        .iter()
-                        .map(|m| match m {
-                            ThroughputMeasurement::Success { bytes, .. } => *bytes,
-                            ThroughputMeasurement::Failure { .. } => 0,
-                        })
-                        .sum();
-                    let elapsed_secs = start_time.elapsed().as_secs_f64();
-                    let throughput_mbps = (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
-                    let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
-                    let requests_per_sec = measurements.len() as f64 / elapsed_secs;
-
-                    pb.set_message(format!(
-                        "Avg: {} | {} | Req/s: {:.1} | Chunks: {}",
-                        format_throughput(throughput_mbps),
-                        format_bytes(throughput_bytes_per_sec as usize),
-                        requests_per_sec,
-                        measurements.len()
-                    ));
-                }
-
-                // Update every 100ms
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            pb.set_position(duration.as_secs());
-        })
-    };
-
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
@@ -591,9 +413,8 @@ async fn run_upload_test(
         }
     }
 
-    // Wait for stats collector and progress task to complete
-    let _ = tokio::join!(stats_collector, progress_task);
-    progress_bar.finish_with_message("Upload complete");
+    // Wait for stats collector to complete and get measurements
+    measurements = stats_collector.finish(progress_bar, "Upload complete".to_string()).await;
 
     let end_time = Instant::now();
 
