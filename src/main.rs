@@ -17,14 +17,15 @@ pub use utils::types::*;
 use crate::constants::{
     DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT, MAX_HTTP_UPLOAD_SIZE,
 };
-use crate::performance::http::server::{HttpsServerConfig, run_https_server};
+use crate::performance::http::server::{HttpsServerConfig, TlsConfig, run_https_server};
 use crate::performance::http::{HttpVersion, client::run_http_test};
 use crate::performance::tcp::server::run_tcp_server;
 use crate::performance::udp::server::run_udp_server;
 use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
 use crate::utils::export::{export_report, export_report_html};
 use crate::utils::file::can_write;
-use crate::utils::import::import_report_json;
+use crate::utils::import::{import_report_cbor, import_report_json};
+use crate::utils::progress::with_progress_counter;
 
 mod cli;
 mod constants;
@@ -83,7 +84,6 @@ async fn main() -> Result<()> {
             test_type,
             test_sizes,
             chunk_size,
-            debug,
         } => {
             // Assert that exactly one specific protocol is enabled (no more, no less)
             // Count enabled protocols
@@ -113,11 +113,7 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // TODO: Do something about debug flag...
-            // TODO: if debug on, debug log everything (config, test progress verbosely, etc.)
-
             // Verify export file path is writable
-            // TODO: Validate this logic via unit tests
             if let Some(export) = &export {
                 if let Some(parent) = export.parent() {
                     fs::create_dir_all(parent)?;
@@ -140,9 +136,8 @@ async fn main() -> Result<()> {
                         test_type,
                         test_sizes,
                     );
-                    let tcp_report = run_tcp_client(config).await?;
 
-                    tcp_report
+                    run_tcp_client(config).await?
                 }
                 ClientMode::UDP => {
                     let config = UdpTestConfig::new(
@@ -154,9 +149,7 @@ async fn main() -> Result<()> {
                         test_sizes,
                     );
 
-                    let udp_report = run_udp_client(config).await?;
-
-                    udp_report
+                    run_udp_client(config).await?
                 }
                 ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
                     // For HTTP modes, we need to determine the HTTP version
@@ -179,9 +172,7 @@ async fn main() -> Result<()> {
                         http_version,
                     );
 
-                    let http_report = run_http_test(config).await?;
-
-                    http_report
+                    run_http_test(config).await?
                 }
             };
 
@@ -192,7 +183,12 @@ async fn main() -> Result<()> {
 
             // If export file is specified, write results
             if let Some(export) = &export {
-                match export_report(&report, export).await {
+                match with_progress_counter(
+                    "Exporting test results",
+                    export_report(&report, export),
+                )
+                .await
+                {
                     Ok(_) => println!(
                         "{}",
                         format!("Results exported to {}", export.to_string_lossy()).cyan()
@@ -216,53 +212,40 @@ async fn main() -> Result<()> {
             cert,
             key,
         } => {
+            let enable_tcp = tcp || all;
+            let enable_udp = udp || all;
+            let enable_http = http || all;
+            let enable_https = https || all;
+
             // Assert that at least one server mode is enabled
-            if !all && !tcp && !udp && !http && !https {
+            if !enable_tcp && !enable_udp && !enable_http && !enable_https {
                 return Err(eyre::eyre!(
                     "At least one server mode must be enabled. Use --all to enable all modes."
                 ));
             }
-
-            // If HTTPS is enabled, cert and key should be provided or files exist at the default paths
-            const FALLBACK_CERT_PATH: &str = "cert.pem";
-            const FALLBACK_KEY_PATH: &str = "key.pem";
-            if https || all {
-                if cert.is_none() && !PathBuf::from(FALLBACK_CERT_PATH).exists() {
-                    return Err(eyre::eyre!(
-                        "HTTPS mode requires a TLS certificate. Provide --cert or ensure {FALLBACK_CERT_PATH} exists."
-                    ));
-                }
-                if key.is_none() && !PathBuf::from(FALLBACK_KEY_PATH).exists() {
-                    return Err(eyre::eyre!(
-                        "HTTPS mode requires a TLS private key. Provide --key or ensure {FALLBACK_KEY_PATH} exists."
-                    ));
-                }
-            }
-            let cert = cert.unwrap_or(PathBuf::from(FALLBACK_CERT_PATH));
-            let key = key.unwrap_or(PathBuf::from(FALLBACK_KEY_PATH));
 
             println!("{}", "Starting server mode...".blue().bold());
 
             let mut handles: Vec<(&str, tokio::task::JoinHandle<_>)> = vec![];
 
             // Setup TCP
-            if all || tcp {
+            if enable_tcp {
                 let tcp_addr = SocketAddr::new(bind, tcp_port.unwrap_or(DEFAULT_TCP_PORT));
                 handles.push(("TCP", tokio::spawn(run_tcp_server(tcp_addr))));
             }
 
             // Setup UDP
-            if all || udp {
+            if enable_udp {
                 let udp_addr = SocketAddr::new(bind, udp_port.unwrap_or(DEFAULT_UDP_PORT));
                 handles.push(("UDP", tokio::spawn(run_udp_server(udp_addr))));
             }
 
             // Setup HTTP server modes (i.e. HTTP/1.1 without TLS, h2c)
-            if all || http {
+            if enable_http {
                 let http_addr = SocketAddr::new(bind, http_port.unwrap_or(DEFAULT_HTTP_PORT));
 
                 handles.push((
-                    "HTTPS",
+                    "HTTP",
                     tokio::spawn(run_http_server(HttpServerConfig {
                         bind_addr: http_addr,
                         enable_cors: true,
@@ -272,17 +255,40 @@ async fn main() -> Result<()> {
             }
 
             // Setup HTTPS server modes (i.e. HTTP/2, HTTP/3)
-            if all || https {
+            if enable_https {
                 let https_addr = SocketAddr::new(bind, https_port.unwrap_or(DEFAULT_HTTPS_PORT));
 
+                // Require either both are defined or neither
+                let tls_config: Option<TlsConfig> = match (cert, key) {
+                    (Some(cert), Some(key)) => {
+                        if !cert.exists() || !key.exists() {
+                            return Err(eyre::eyre!(
+                                "Certificate and key files must exist: {} and {}",
+                                cert.display(),
+                                key.display()
+                            ));
+                        }
+
+                        Some(TlsConfig {
+                            cert_path: cert,
+                            key_path: key,
+                        })
+                    }
+                    (None, None) => None,
+                    _ => {
+                        return Err(eyre::eyre!(
+                            "Both --cert and --key must be specified for HTTPS server"
+                        ));
+                    }
+                };
+
                 handles.push((
-                    "HTTP",
+                    "HTTPS",
                     tokio::spawn(run_https_server(HttpsServerConfig {
                         bind_addr: https_addr,
                         enable_cors: true,
                         max_upload_size: MAX_HTTP_UPLOAD_SIZE,
-                        cert_path: cert,
-                        key_path: key,
+                        tls_config,
                     })),
                 ));
             }
@@ -318,8 +324,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::Report { file, export_html } => {
-            println!("{}", "Loading report...".yellow().bold());
-
             // Validate file exists and is readable
             if !file.exists() {
                 return Err(eyre::eyre!(
@@ -333,7 +337,11 @@ async fn main() -> Result<()> {
             if let Some(ext) = file.extension() {
                 match ext.to_string_lossy().as_ref() {
                     "json" => {
-                        let report = import_report_json(&file).await?;
+                        let report = with_progress_counter(
+                            "Loading report from JSON file",
+                            import_report_json(&file),
+                        )
+                        .await?;
 
                         match export_html {
                             None => {
@@ -342,14 +350,48 @@ async fn main() -> Result<()> {
                             }
                             Some(html_file) => {
                                 // Export to HTML
-                                if let Err(e) = export_report_html(&report, &html_file).await {
-                                    eprintln!("Error exporting to HTML: {e}");
-                                } else {
-                                    println!(
+                                match with_progress_counter(
+                                    "Exporting report to HTML",
+                                    export_report_html(&report, &html_file),
+                                )
+                                .await
+                                {
+                                    Ok(_) => println!(
                                         "{}",
                                         format!("HTML report exported to {}", html_file.display())
                                             .cyan()
-                                    );
+                                    ),
+                                    Err(e) => eprintln!("Error exporting to HTML: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    "cbor" => {
+                        let report = with_progress_counter(
+                            "Loading report from CBOR file",
+                            import_report_cbor(&file),
+                        )
+                        .await?;
+
+                        match export_html {
+                            None => {
+                                // Print report in stdout
+                                println!("{report:#}");
+                            }
+                            Some(html_file) => {
+                                // Export to HTML
+                                match with_progress_counter(
+                                    "Exporting report to HTML",
+                                    export_report_html(&report, &html_file),
+                                )
+                                .await
+                                {
+                                    Ok(_) => println!(
+                                        "{}",
+                                        format!("HTML report exported to {}", html_file.display())
+                                            .cyan()
+                                    ),
+                                    Err(e) => eprintln!("Error exporting to HTML: {e}"),
                                 }
                             }
                         }
@@ -360,7 +402,12 @@ async fn main() -> Result<()> {
                             file.display()
                         ));
                     }
-                    _ => match import_report_json(&file).await {
+                    _ => match with_progress_counter(
+                        "Loading report from file (assuming JSON format)",
+                        import_report_json(&file),
+                    )
+                    .await
+                    {
                         Ok(report) => {
                             println!("{report:#}");
                         }

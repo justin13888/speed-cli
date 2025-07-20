@@ -134,6 +134,7 @@ pub struct HttpTestConfig {
     /// Payload sizes for testing.
     pub payload_sizes: IndexSet<usize>,
     pub http_version: HttpVersion,
+    /// Maximum chunk size for HTTP requests. This is effective only for HTTP/1.1 tests.
     pub chunk_size: usize,
 }
 
@@ -152,12 +153,8 @@ impl HttpTestConfig {
         T: IntoIterator<Item = usize>,
     {
         let payload_sizes: IndexSet<usize> = payload_sizes.into_iter().collect();
-        let is_secure = match http_version {
-            HttpVersion::HTTP1 | HttpVersion::H2C => false,
-            HttpVersion::HTTP2 | HttpVersion::HTTP3 => true,
-        };
-        let scheme = if is_secure { "https" } else { "http" };
-        let port = port.unwrap_or(if is_secure {
+        let scheme = http_version.scheme();
+        let port = port.unwrap_or(if http_version.is_secure() {
             DEFAULT_HTTPS_PORT
         } else {
             DEFAULT_HTTP_PORT
@@ -295,7 +292,11 @@ impl Display for HttpTestConfig {
             f,
             "  {}: {}",
             "Protocol".bright_blue().bold(),
-            "HTTP".green()
+            self.http_version
+                .scheme()
+                .to_string()
+                .to_uppercase()
+                .green()
         )?;
         writeln!(
             f,

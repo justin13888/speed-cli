@@ -3,12 +3,13 @@ use std::fmt::{self, Display, Formatter};
 
 pub use http::*;
 pub use latency::*;
-pub use simple::*;
 pub use tcp::*;
+pub use throughput::*;
+
 mod http;
 mod latency;
-mod simple;
 mod tcp;
+mod throughput;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TestResult {

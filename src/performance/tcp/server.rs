@@ -173,10 +173,12 @@ impl TcpServer {
                                     socket,
                                     peer_addr,
                                     self.config.clone(),
-                                    self.active_connections.clone(),
-                                    permit,
-                                    self.get_shutdown_receiver(),
-                                    self.metrics.clone(),
+                                    TcpHandlerContext {
+                                        active_connections: self.active_connections.clone(),
+                                        permit,
+                                        shutdown_rx: self.get_shutdown_receiver(),
+                                        metrics: self.metrics.clone(),
+                                    },
                                 );
 
                                 tokio::spawn(async move {
@@ -207,6 +209,7 @@ impl TcpServer {
     }
 }
 
+// TODO: Remove this vv
 /// Legacy function for backward compatibility - now uses the builder pattern
 pub async fn run_tcp_server(addr: impl ToSocketAddrs + std::fmt::Debug + Clone) -> Result<()> {
     // Use the builder pattern with optimized settings for high-throughput testing
@@ -273,6 +276,14 @@ impl Default for TcpServerBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Context for creating a new TCP connection handler
+struct TcpHandlerContext {
+    pub active_connections: Arc<AtomicUsize>,
+    pub permit: tokio::sync::OwnedSemaphorePermit,
+    pub shutdown_rx: broadcast::Receiver<()>,
+    pub metrics: Arc<TcpServerMetrics>,
 }
 
 /// Production-grade TCP connection handler with comprehensive monitoring and safety features
@@ -344,21 +355,18 @@ impl ProductionTcpHandler {
         socket: TcpStream,
         peer_addr: std::net::SocketAddr,
         config: TcpServerConfig,
-        active_connections: Arc<AtomicUsize>,
-        permit: tokio::sync::OwnedSemaphorePermit,
-        shutdown_rx: broadcast::Receiver<()>,
-        metrics: Arc<TcpServerMetrics>,
+        context: TcpHandlerContext,
     ) -> Self {
         Self {
             connection_id,
             socket,
             peer_addr,
             config,
-            active_connections,
-            _permit: permit,
-            shutdown_rx,
+            active_connections: context.active_connections,
+            _permit: context.permit,
+            shutdown_rx: context.shutdown_rx,
             stats: ConnectionStats::new(),
-            metrics,
+            metrics: context.metrics,
         }
     }
 
@@ -565,12 +573,11 @@ impl ProductionTcpHandler {
                             self.metrics.total_bytes_sent.fetch_add(bytes_sent, Ordering::Relaxed);
 
                             // Check byte limit
-                            if let Some(max_bytes) = self.config.max_bytes_per_connection {
-                                if total_sent >= max_bytes {
+                            if let Some(max_bytes) = self.config.max_bytes_per_connection
+                                && total_sent >= max_bytes {
                                     info!("Connection reached byte limit ({}), closing", format_bytes(max_bytes));
                                     break Ok(());
                                 }
-                            }
 
                             // Report progress less frequently to reduce overhead
                             if last_report.elapsed() >= self.config.report_interval {

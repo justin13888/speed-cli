@@ -13,7 +13,7 @@ It's difficult to have one tool that tests your network conditions between two d
 - **Multi-protocol support**: TCP, UDP, HTTP/1.1, HTTP/2, HTTP/3
 - **High-performance**: Built with Rust, optimized for high throughput and efficient resource usage
 - **Comprehensive metrics**: Throughput, latency, jitter, packet loss, DNS performance
-- **Exporting**: Results in JSON and HTML formats
+- **Exporting**: Results in JSON, CBOR and HTML formats
 - **Cross-platform**: Optimized for popular platforms (Linux, macOS, Windows) and architectures (x86_64, ARM)
 
 ## Installation
@@ -27,7 +27,7 @@ cd speed-cli
 cargo install --path .
 ```
 
-The binary name is `speed-cli`. Note, for the HTTPS server, you may need to provide your own TLS certificate and key files, or they are assumed to be `cert.pem` and `key.pem` in the current directory. A convenience script `./gen-cert.sh` is provided to generate self-signed certificates for testing purposes. This is not suitable for production use.
+The binary name is `speed-cli`. Note, for the HTTPS server, you may provide your own TLS certificate and key files via `--cert` and `--key`, or else a dummy cert will be used. A convenience script `./gen-cert.sh` is provided to generate self-signed certificates for testing purposes. This is not suitable for production use.
 
 ## Quick Start
 
@@ -75,11 +75,14 @@ speed-cli server -h
 
 ### Exporting Results
 
-Add a `-e` or `--export` flag to `client` commands to save results in JSON or HTML format:
+Add a `-e` or `--export` flag to `client` commands to save results:
 
 ```bash
 # Export to JSON
 speed-cli client --<mode> -s <server-ip> -e results.json
+
+# Export to CBOR
+speed-cli client --<mode> -s <server-ip> -e results.cbor
 
 # Export to HTML
 speed-cli client --<mode> -s <server-ip> -e results.html
