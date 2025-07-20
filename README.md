@@ -27,7 +27,7 @@ cd speed-cli
 cargo install --path .
 ```
 
-The binary name is `speed-cli`. Note, for the HTTPS server, you may need to provide your own TLS certificate and key files, or they are assumed to be `cert.pem` and `key.pem` in the current directory. A convenience script `./gen-cert.sh` is provided to generate self-signed certificates for testing purposes. This is not suitable for production use.
+The binary name is `speed-cli`. Note, for the HTTPS server, you may provide your own TLS certificate and key files via `--cert` and `--key`, or else a dummy cert will be used. A convenience script `./gen-cert.sh` is provided to generate self-signed certificates for testing purposes. This is not suitable for production use.
 
 ## Quick Start
 

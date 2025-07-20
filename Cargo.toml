@@ -46,6 +46,7 @@ indexmap = { version = "2.10.0", features = ["serde"] }
 indicatif = { version = "0.18.0", features = ["tokio"] }
 tracing-indicatif = "0.3.11"
 num_cpus = "1.16.0"
+rcgen = "0.14.2"
 
 [profile.release]
 lto = true

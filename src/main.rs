@@ -17,7 +17,7 @@ pub use utils::types::*;
 use crate::constants::{
     DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT, MAX_HTTP_UPLOAD_SIZE,
 };
-use crate::performance::http::server::{HttpsServerConfig, run_https_server};
+use crate::performance::http::server::{HttpsServerConfig, TlsConfig, run_https_server};
 use crate::performance::http::{HttpVersion, client::run_http_test};
 use crate::performance::tcp::server::run_tcp_server;
 use crate::performance::udp::server::run_udp_server;
@@ -210,53 +210,40 @@ async fn main() -> Result<()> {
             cert,
             key,
         } => {
+            let enable_tcp = tcp || all;
+            let enable_udp = udp || all;
+            let enable_http = http || all;
+            let enable_https = https || all;
+
             // Assert that at least one server mode is enabled
-            if !all && !tcp && !udp && !http && !https {
+            if !enable_tcp && !enable_udp && !enable_http && !enable_https {
                 return Err(eyre::eyre!(
                     "At least one server mode must be enabled. Use --all to enable all modes."
                 ));
             }
-
-            // If HTTPS is enabled, cert and key should be provided or files exist at the default paths
-            const FALLBACK_CERT_PATH: &str = "cert.pem";
-            const FALLBACK_KEY_PATH: &str = "key.pem";
-            if https || all {
-                if cert.is_none() && !PathBuf::from(FALLBACK_CERT_PATH).exists() {
-                    return Err(eyre::eyre!(
-                        "HTTPS mode requires a TLS certificate. Provide --cert or ensure {FALLBACK_CERT_PATH} exists."
-                    ));
-                }
-                if key.is_none() && !PathBuf::from(FALLBACK_KEY_PATH).exists() {
-                    return Err(eyre::eyre!(
-                        "HTTPS mode requires a TLS private key. Provide --key or ensure {FALLBACK_KEY_PATH} exists."
-                    ));
-                }
-            }
-            let cert = cert.unwrap_or(PathBuf::from(FALLBACK_CERT_PATH));
-            let key = key.unwrap_or(PathBuf::from(FALLBACK_KEY_PATH));
 
             println!("{}", "Starting server mode...".blue().bold());
 
             let mut handles: Vec<(&str, tokio::task::JoinHandle<_>)> = vec![];
 
             // Setup TCP
-            if all || tcp {
+            if enable_tcp {
                 let tcp_addr = SocketAddr::new(bind, tcp_port.unwrap_or(DEFAULT_TCP_PORT));
                 handles.push(("TCP", tokio::spawn(run_tcp_server(tcp_addr))));
             }
 
             // Setup UDP
-            if all || udp {
+            if enable_udp {
                 let udp_addr = SocketAddr::new(bind, udp_port.unwrap_or(DEFAULT_UDP_PORT));
                 handles.push(("UDP", tokio::spawn(run_udp_server(udp_addr))));
             }
 
             // Setup HTTP server modes (i.e. HTTP/1.1 without TLS, h2c)
-            if all || http {
+            if enable_http {
                 let http_addr = SocketAddr::new(bind, http_port.unwrap_or(DEFAULT_HTTP_PORT));
 
                 handles.push((
-                    "HTTPS",
+                    "HTTP",
                     tokio::spawn(run_http_server(HttpServerConfig {
                         bind_addr: http_addr,
                         enable_cors: true,
@@ -266,17 +253,40 @@ async fn main() -> Result<()> {
             }
 
             // Setup HTTPS server modes (i.e. HTTP/2, HTTP/3)
-            if all || https {
+            if enable_https {
                 let https_addr = SocketAddr::new(bind, https_port.unwrap_or(DEFAULT_HTTPS_PORT));
 
+                // Require either both are defined or neither
+                let tls_config: Option<TlsConfig> = match (cert, key) {
+                    (Some(cert), Some(key)) => {
+                        if !cert.exists() || !key.exists() {
+                            return Err(eyre::eyre!(
+                                "Certificate and key files must exist: {} and {}",
+                                cert.display(),
+                                key.display()
+                            ));
+                        }
+
+                        Some(TlsConfig {
+                            cert_path: cert,
+                            key_path: key,
+                        })
+                    }
+                    (None, None) => None,
+                    _ => {
+                        return Err(eyre::eyre!(
+                            "Both --cert and --key must be specified for HTTPS server"
+                        ));
+                    }
+                };
+
                 handles.push((
-                    "HTTP",
+                    "HTTPS",
                     tokio::spawn(run_https_server(HttpsServerConfig {
                         bind_addr: https_addr,
                         enable_cors: true,
                         max_upload_size: MAX_HTTP_UPLOAD_SIZE,
-                        cert_path: cert,
-                        key_path: key,
+                        tls_config,
                     })),
                 ));
             }

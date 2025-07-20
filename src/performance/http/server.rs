@@ -17,6 +17,8 @@ use std::sync::LazyLock as SyncLazy;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, sync::Once};
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::utils::tls::get_self_signed_cert;
+
 /// Static buffer for download operations to avoid allocations
 static ZERO_BUFFER: SyncLazy<Arc<Bytes>> = SyncLazy::new(|| {
     // 64KB zero buffer - large enough to avoid frequent copying but small enough for L1/L2 cache
@@ -50,9 +52,16 @@ pub struct HttpsServerConfig {
     /// Max upload size in bytes
     pub max_upload_size: usize,
 
-    /// Path to the TLS certificate
+    /// TLS config
+    /// If not provided, a self-signed certificate will be generated
+    pub tls_config: Option<TlsConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// Path to the TLS certificate (PEM format)
     pub cert_path: PathBuf,
-    /// Path to the TLS private key
+    /// Path to the TLS private key (PEM format)
     pub key_path: PathBuf,
 }
 
@@ -74,7 +83,12 @@ pub async fn run_https_server(config: HttpsServerConfig) -> Result<()> {
     ensure_crypto_provider();
 
     let app = create_router(config.enable_cors, config.max_upload_size);
-    let tls_config = RustlsConfig::from_pem_file(config.cert_path, config.key_path).await?;
+    let tls_config = match config.tls_config {
+        Some(tls_config) => {
+            RustlsConfig::from_pem_file(tls_config.cert_path, tls_config.key_path).await?
+        }
+        None => get_self_signed_cert().await?,
+    };
 
     tracing::info!("HTTPS server listening on {}", config.bind_addr);
 
