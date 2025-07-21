@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
 use colored::Colorize as _;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -13,9 +13,9 @@ use crate::{
 pub struct TcpTestResult {
     pub latency: Option<LatencyResult>,
     /// Map of download results by payload size
-    pub download: HashMap<usize, ThroughputResult>,
+    pub download: IndexMap<usize, ThroughputResult>,
     /// Map of upload results by payload size
-    pub upload: HashMap<usize, ThroughputResult>,
+    pub upload: IndexMap<usize, ThroughputResult>,
 }
 
 impl Display for TcpTestResult {

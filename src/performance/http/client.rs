@@ -3,11 +3,11 @@ use colored::Colorize as _;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
 use humansize::ToF64;
+use indexmap::IndexMap;
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use std::{
-    collections::HashMap,
     sync::Once,
     time::{Duration, Instant},
 };
@@ -55,8 +55,8 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     let mut result = HttpTestResult {
         latency: None,
-        download: HashMap::new(),
-        upload: HashMap::new(),
+        download: IndexMap::new(),
+        upload: IndexMap::new(),
     };
 
     // Create HTTP client based on version preference

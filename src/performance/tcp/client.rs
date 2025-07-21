@@ -1,11 +1,9 @@
 use chrono::Utc;
 use colored::Colorize as _;
 use eyre::Result;
+use indexmap::IndexMap;
 use rand::{prelude::*, rng};
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
@@ -39,8 +37,8 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
 
     let mut result = TcpTestResult {
         latency: None,
-        download: HashMap::new(),
-        upload: HashMap::new(),
+        download: IndexMap::new(),
+        upload: IndexMap::new(),
     };
 
     match config.test_type {
