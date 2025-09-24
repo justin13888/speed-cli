@@ -15,7 +15,7 @@ use std::io::{self, Write};
 /// This trait is implemented for all major types in the speed-cli reporting system:
 /// - `TestReport` - The main test report structure
 /// - `TestConfig` and its variants (`TcpTestConfig`, `UdpTestConfig`, `HttpTestConfig`)
-/// - `TestResult` and its variants (`ThroughputResult`, `HttpTestResult`, `TcpTestResult`)
+/// - `TestResult` and its variants (`ThroughputResult`, `NetworkTestResult`)
 /// - `LatencyResult` and `LatencyMeasurement`
 /// - `ThroughputMeasurement`
 /// - Enum types like `TestType` and `HttpVersion`
@@ -529,16 +529,14 @@ impl ToHtml for TestResult {
     fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         match self {
             TestResult::Simple(result) => result.write_html(writer),
-            TestResult::Http(result) => result.write_html(writer),
-            TestResult::Tcp(result) => result.write_html(writer),
+            TestResult::Network(result) => result.write_html(writer),
         }
     }
 
     fn to_html(&self) -> String {
         match self {
             TestResult::Simple(result) => result.to_html(),
-            TestResult::Http(result) => result.to_html(),
-            TestResult::Tcp(result) => result.to_html(),
+            TestResult::Network(result) => result.to_html(),
         }
     }
 }
@@ -617,16 +615,22 @@ impl ToHtml for ThroughputResult {
     }
 }
 
-// Implementation for HttpTestResult
-impl ToHtml for HttpTestResult {
+// Implementation for NetworkTestResult
+impl ToHtml for NetworkTestResult {
     fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        let protocol_prefix = match self.protocol {
+            crate::report::NetworkProtocol::Http => "",
+            crate::report::NetworkProtocol::Tcp => "TCP ",
+        };
+
         // Latency results
         if let Some(latency) = &self.latency {
             write!(
                 writer,
                 r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">Latency Results</h3>
-                    "#
+                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{}Latency Results</h3>
+                    "#,
+                protocol_prefix
             )?;
             latency.write_html(writer)?;
             write!(writer, r#"</div>"#)?;
@@ -637,8 +641,9 @@ impl ToHtml for HttpTestResult {
             write!(
                 writer,
                 r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">Download Results</h3>
-                    <div style="display: grid; gap: 20px;">"#
+                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{}Download Results</h3>
+                    <div style="display: grid; gap: 20px;">"#,
+                protocol_prefix
             )?;
             for (size, result) in &self.download {
                 write!(
@@ -659,8 +664,9 @@ impl ToHtml for HttpTestResult {
             write!(
                 writer,
                 r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">Upload Results</h3>
-                    <div style="display: grid; gap: 20px;">"#
+                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{}Upload Results</h3>
+                    <div style="display: grid; gap: 20px;">"#,
+                protocol_prefix
             )?;
             for (size, result) in &self.upload {
                 write!(
@@ -681,14 +687,19 @@ impl ToHtml for HttpTestResult {
 
     fn to_html(&self) -> String {
         let mut html = String::new();
+        let protocol_prefix = match self.protocol {
+            crate::report::NetworkProtocol::Http => "",
+            crate::report::NetworkProtocol::Tcp => "TCP ",
+        };
 
         // Latency results
         if let Some(latency) = &self.latency {
             html.push_str(&format!(
                 r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">Latency Results</h3>
+                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{}Latency Results</h3>
                     {}
                 </div>"#,
+                protocol_prefix,
                 latency.to_html()
             ));
         }
@@ -697,9 +708,10 @@ impl ToHtml for HttpTestResult {
         if !self.download.is_empty() {
             html.push_str(&format!(
                 r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">Download Results</h3>
+                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{}Download Results</h3>
                     <div style="display: grid; gap: 20px;">{}</div>
                 </div>"#,
+                protocol_prefix,
                 self.download
                     .iter()
                     .map(|(size, result)| format!(
@@ -719,133 +731,10 @@ impl ToHtml for HttpTestResult {
         if !self.upload.is_empty() {
             html.push_str(&format!(
                 r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">Upload Results</h3>
+                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{}Upload Results</h3>
                     <div style="display: grid; gap: 20px;">{}</div>
                 </div>"#,
-                self.upload
-                    .iter()
-                    .map(|(size, result)| format!(
-                        r#"<div>
-                            <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                            <div style="margin-left: 20px;">{}</div>
-                        </div>"#,
-                        format_bytes_usize(*size),
-                        result.to_html()
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("")
-            ));
-        }
-
-        html
-    }
-}
-
-// Implementation for TcpTestResult
-impl ToHtml for TcpTestResult {
-    fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        // Latency results
-        if let Some(latency) = &self.latency {
-            write!(
-                writer,
-                r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">TCP Latency Results</h3>
-                    "#
-            )?;
-            latency.write_html(writer)?;
-            write!(writer, r#"</div>"#)?;
-        }
-
-        // Download results
-        if !self.download.is_empty() {
-            write!(
-                writer,
-                r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">TCP Download Results</h3>
-                    <div style="display: grid; gap: 20px;">"#
-            )?;
-            for (size, result) in &self.download {
-                write!(
-                    writer,
-                    r#"<div>
-                        <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                        <div style="margin-left: 20px;">"#,
-                    format_bytes_usize(*size)
-                )?;
-                result.write_html(writer)?;
-                write!(writer, r#"</div></div>"#)?;
-            }
-            write!(writer, r#"</div></div>"#)?;
-        }
-
-        // Upload results
-        if !self.upload.is_empty() {
-            write!(
-                writer,
-                r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">TCP Upload Results</h3>
-                    <div style="display: grid; gap: 20px;">"#
-            )?;
-            for (size, result) in &self.upload {
-                write!(
-                    writer,
-                    r#"<div>
-                        <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                        <div style="margin-left: 20px;">"#,
-                    format_bytes_usize(*size)
-                )?;
-                result.write_html(writer)?;
-                write!(writer, r#"</div></div>"#)?;
-            }
-            write!(writer, r#"</div></div>"#)?;
-        }
-
-        Ok(())
-    }
-
-    fn to_html(&self) -> String {
-        let mut html = String::new();
-
-        // Latency results
-        if let Some(latency) = &self.latency {
-            html.push_str(&format!(
-                r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">TCP Latency Results</h3>
-                    {}
-                </div>"#,
-                latency.to_html()
-            ));
-        }
-
-        // Download results
-        if !self.download.is_empty() {
-            html.push_str(&format!(
-                r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">TCP Download Results</h3>
-                    <div style="display: grid; gap: 20px;">{}</div>
-                </div>"#,
-                self.download
-                    .iter()
-                    .map(|(size, result)| format!(
-                        r#"<div>
-                            <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                            <div style="margin-left: 20px;">{}</div>
-                        </div>"#,
-                        format_bytes_usize(*size),
-                        result.to_html()
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("")
-            ));
-        }
-
-        // Upload results
-        if !self.upload.is_empty() {
-            html.push_str(&format!(
-                r#"<div class="result-section" style="margin-bottom: 30px;">
-                    <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">TCP Upload Results</h3>
-                    <div style="display: grid; gap: 20px;">{}</div>
-                </div>"#,
+                protocol_prefix,
                 self.upload
                     .iter()
                     .map(|(size, result)| format!(

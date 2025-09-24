@@ -1,7 +1,7 @@
 use chrono::Utc;
 use colored::Colorize as _;
 use eyre::Result;
-use indexmap::IndexMap;
+
 use rand::{prelude::*, rng};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,7 +12,7 @@ use tracing::trace;
 use crate::{
     TestType,
     report::{
-        ConnectionError, LatencyMeasurement, LatencyResult, TcpTestConfig, TcpTestResult,
+        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, TcpTestConfig,
         TestReport, ThroughputMeasurement, ThroughputResult,
     },
     utils::{
@@ -35,11 +35,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
 
     let start_time = Utc::now();
 
-    let mut result = TcpTestResult {
-        latency: None,
-        download: IndexMap::new(),
-        upload: IndexMap::new(),
-    };
+    let mut result = NetworkTestResult::new_tcp();
 
     match config.test_type {
         TestType::LatencyOnly => {

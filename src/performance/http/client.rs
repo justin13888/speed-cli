@@ -3,7 +3,7 @@ use colored::Colorize as _;
 use eyre::{Context, Result};
 use futures::stream::StreamExt;
 use humansize::ToF64;
-use indexmap::IndexMap;
+
 use rand::{prelude::*, rng};
 use reqwest::{Client, ClientBuilder};
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
@@ -18,7 +18,7 @@ use crate::{
     TestType,
     performance::http::HttpVersion,
     report::{
-        ConnectionError, HttpTestConfig, HttpTestResult, LatencyMeasurement, LatencyResult,
+        ConnectionError, HttpTestConfig, LatencyMeasurement, LatencyResult, NetworkTestResult,
         TestReport, ThroughputMeasurement, ThroughputResult,
     },
     utils::{
@@ -53,11 +53,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     let start_time = Utc::now();
 
-    let mut result = HttpTestResult {
-        latency: None,
-        download: IndexMap::new(),
-        upload: IndexMap::new(),
-    };
+    let mut result = NetworkTestResult::new_http();
 
     // Create HTTP client based on version preference
     let client = create_http_client(&config.http_version).await?;

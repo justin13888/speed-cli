@@ -10,26 +10,71 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpTestResult {
+pub struct NetworkTestResult {
     pub latency: Option<LatencyResult>,
     /// Map of download results by payload size
     pub download: IndexMap<usize, ThroughputResult>,
     /// Map of upload results by payload size
     pub upload: IndexMap<usize, ThroughputResult>,
+    /// Protocol type for display purposes
+    pub protocol: NetworkProtocol,
 }
 
-impl Display for HttpTestResult {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum NetworkProtocol {
+    Http,
+    Tcp,
+}
+
+impl NetworkTestResult {
+    pub fn new_http() -> Self {
+        Self {
+            latency: None,
+            download: IndexMap::new(),
+            upload: IndexMap::new(),
+            protocol: NetworkProtocol::Http,
+        }
+    }
+
+    pub fn new_tcp() -> Self {
+        Self {
+            latency: None,
+            download: IndexMap::new(),
+            upload: IndexMap::new(),
+            protocol: NetworkProtocol::Tcp,
+        }
+    }
+}
+
+impl Display for NetworkTestResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let protocol_prefix = match self.protocol {
+            NetworkProtocol::Http => "HTTP ",
+            NetworkProtocol::Tcp => "TCP ",
+        };
+
         // Display latency if available
         if let Some(latency) = &self.latency {
-            writeln!(f, "  {}", "Latency Results:".bright_green().bold())?;
+            writeln!(
+                f,
+                "  {}",
+                format!("{}Latency Results:", protocol_prefix)
+                    .bright_green()
+                    .bold()
+            )?;
             write!(f, "{latency}")?;
             writeln!(f)?;
         }
 
         // Display download results
         if !self.download.is_empty() {
-            writeln!(f, "  {}", "Download Results:".bright_green().bold())?;
+            writeln!(
+                f,
+                "  {}",
+                format!("{}Download Results:", protocol_prefix)
+                    .bright_green()
+                    .bold()
+            )?;
             for (size, result) in &self.download {
                 writeln!(
                     f,
@@ -47,7 +92,13 @@ impl Display for HttpTestResult {
 
         // Display upload results
         if !self.upload.is_empty() {
-            writeln!(f, "  {}", "Upload Results:".bright_green().bold())?;
+            writeln!(
+                f,
+                "  {}",
+                format!("{}Upload Results:", protocol_prefix)
+                    .bright_green()
+                    .bold()
+            )?;
             for (size, result) in &self.upload {
                 writeln!(
                     f,
