@@ -1,3 +1,5 @@
+use super::protocol::{ConnectionState, StpPacket};
+use crate::utils::format::{format_bytes, format_throughput};
 use bytes::Bytes;
 use colored::*;
 use eyre::Result;
@@ -7,9 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::time::Duration;
-
-use super::protocol::{ConnectionState, StpPacket};
-use crate::utils::format::{format_bytes, format_throughput};
+use tracing::{debug, error, info};
 
 // TODO: Is parking_lot for Mutex
 
@@ -62,15 +62,15 @@ impl StpServer {
     }
 
     pub async fn run(&self) -> Result<()> {
-        println!("{}", "STP server ready to receive packets...".green());
-        println!("UDP server listening on: {}", self.socket.local_addr()?);
+        info!("{}", "STP server ready to receive packets...".green());
+        info!("UDP server listening on: {}", self.socket.local_addr()?);
 
         let mut buffer = vec![0u8; 2048];
 
         loop {
             match self.socket.recv_from(&mut buffer).await {
                 Ok((size, client_addr)) => {
-                    println!("Received {} bytes from {}", size, client_addr);
+                    debug!("Received {} bytes from {}", size, client_addr);
                     let clients = self.clients.clone();
                     let socket = &self.socket;
                     let data = Bytes::copy_from_slice(&buffer[..size]);
@@ -80,11 +80,11 @@ impl StpServer {
                         .handle_stp_packet(socket, clients, client_addr, data)
                         .await
                     {
-                        eprintln!("Error handling STP packet from {}: {}", client_addr, e);
+                        error!("Error handling STP packet from {}: {}", client_addr, e);
                     }
                 }
                 Err(e) => {
-                    eprintln!("STP receive error: {}", e);
+                    error!("STP receive error: {}", e);
                 }
             }
         }
@@ -107,7 +107,7 @@ impl StpServer {
                 // Check if this is a download command
                 if packet.payload.starts_with(b"DOWNLOAD") {
                     client_state.download_mode = true;
-                    println!(
+                    debug!(
                         "Client {} requested download mode",
                         client_addr.to_string().cyan()
                     );
@@ -116,7 +116,7 @@ impl StpServer {
                 // Check if this is a ping packet for latency measurement
                 let is_ping = packet.payload.starts_with(b"PING");
                 if is_ping {
-                    println!("Client {} sent ping packet", client_addr.to_string().cyan());
+                    info!("Client {} sent ping packet", client_addr.to_string().cyan());
                 }
 
                 // Update connection state
@@ -134,7 +134,7 @@ impl StpServer {
                         0.0
                     };
 
-                    println!(
+                    info!(
                         "STP {}: {} packets, {} received, {} throughput",
                         client_addr.to_string().cyan(),
                         client_state.packets_received,
@@ -156,7 +156,7 @@ impl StpServer {
                         0.0
                     };
 
-                    println!(
+                    info!(
                         "STP session from {} completed: {} packets received, {} total in {:.2}s ({})",
                         client_addr.to_string().cyan(),
                         client_state.packets_received,
