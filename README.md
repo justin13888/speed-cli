@@ -103,6 +103,10 @@ When running server with HTTP, the following endpoints are available:
 - `GET /info` - Server information
 - `GET /health` - Server health check
 
+### UDP Test Implementation
+
+The UDP test use a toy protocol called **Speed Test Protocol (STP)** that uses UDP with BBR for congestion control. It is designed to measure the available bandwidth between two endpoints, similar to how QUIC operates but without its entire suite of features.
+
 ## Future Improvements
 
 *There are several features/improvements that are planned.*

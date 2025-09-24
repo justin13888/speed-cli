@@ -2440,6 +2440,7 @@ dependencies = [
  "indicatif",
  "num-format",
  "num_cpus",
+ "parking_lot",
  "rand 0.9.1",
  "rcgen",
  "reqwest",

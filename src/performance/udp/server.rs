@@ -3,124 +3,163 @@ use eyre::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::net::ToSocketAddrs;
-use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::net::{ToSocketAddrs, UdpSocket};
+use parking_lot::Mutex;
 use tokio::time::Duration;
+use bytes::Bytes;
 
 use crate::utils::format::{format_bytes, format_throughput};
+use super::protocol::{StpPacket, ConnectionState};
 
-// TODO: Optimize UDP implementation
+// TODO: Is parking_lot for Mutex
 
-pub async fn run_udp_server(addr: impl ToSocketAddrs) -> Result<()> {
-    let socket = UdpSocket::bind(&addr).await?;
-    println!("{}", "UDP server ready to receive packets...".green());
-
-    let clients: Arc<Mutex<HashMap<std::net::SocketAddr, UdpClientState>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let mut buffer = vec![0u8; 2048];
-
-    loop {
-        match socket.recv_from(&mut buffer).await {
-            Ok((size, client_addr)) => {
-                let clients = clients.clone();
-                let data = buffer[..size].to_vec();
-
-                tokio::spawn(async move {
-                    handle_udp_packet(clients, client_addr, data).await;
-                });
-            }
-            Err(e) => {
-                eprintln!("UDP receive error: {e}");
-            }
-        }
-    }
+/// STP Server for bandwidth measurement  
+pub struct StpServer {
+    socket: UdpSocket,
+    clients: Arc<Mutex<HashMap<std::net::SocketAddr, StpClientState>>>,
 }
 
 #[derive(Debug)]
-struct UdpClientState {
+struct StpClientState {
+    connection: ConnectionState,
     start_time: Instant,
-    last_sequence: u32,
     total_bytes: u64,
-    packets_received: u32,
+    packets_received: u64,
     last_report: Instant,
+    local_packet_number: u64,
 }
 
-impl UdpClientState {
-    fn new() -> Self {
+impl StpClientState {
+    fn new(client_addr: std::net::SocketAddr) -> Self {
         let now = Instant::now();
         Self {
+            connection: ConnectionState::new(client_addr),
             start_time: now,
-            last_sequence: 0,
             total_bytes: 0,
             packets_received: 0,
             last_report: now,
+            local_packet_number: 0,
         }
+    }
+
+    fn next_packet_number(&mut self) -> u64 {
+        self.local_packet_number += 1;
+        self.local_packet_number
     }
 }
 
-async fn handle_udp_packet(
-    clients: Arc<Mutex<HashMap<std::net::SocketAddr, UdpClientState>>>,
-    client_addr: std::net::SocketAddr,
-    data: Vec<u8>,
-) {
-    let mut clients_map = clients.lock().await;
-    let client_state = clients_map
-        .entry(client_addr)
-        .or_insert_with(UdpClientState::new);
-
-    // Check if this is a termination packet
-    if data.len() >= 8 && data[0] == 0xFF && data[1] == 0xFF && data[2] == 0xFF && data[3] == 0xFF {
-        let total_packets_sent = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        let duration = client_state.start_time.elapsed();
-        let throughput_mbps =
-            (client_state.total_bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
-        let packet_loss = if total_packets_sent > 0 {
-            ((total_packets_sent - client_state.packets_received) as f64
-                / total_packets_sent as f64)
-                * 100.0
-        } else {
-            0.0
-        };
-
-        println!(
-            "UDP session from {} completed: {} packets received/{} sent, {} received in {:.2}s ({}), {:.2}% packet loss",
-            client_addr.to_string().cyan(),
-            client_state.packets_received,
-            total_packets_sent,
-            format_bytes(client_state.total_bytes).yellow(),
-            duration.as_secs_f64(),
-            format_throughput(throughput_mbps).green(),
-            packet_loss
-        );
-
-        clients_map.remove(&client_addr);
-        return;
+impl StpServer {
+    pub async fn new(addr: impl ToSocketAddrs) -> Result<Self> {
+        let socket = UdpSocket::bind(&addr).await?;
+        Ok(Self {
+            socket,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
-    // Regular data packet
-    if data.len() >= 4 {
-        let sequence = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        client_state.last_sequence = sequence;
-        client_state.packets_received += 1;
+    pub async fn run(&self) -> Result<()> {
+        println!("{}", "STP server ready to receive packets...".green());
+        
+        let mut buffer = vec![0u8; 2048];
+
+        loop {
+            match self.socket.recv_from(&mut buffer).await {
+                Ok((size, client_addr)) => {
+                    let clients = self.clients.clone();
+                    let socket = &self.socket;
+                    let data = Bytes::copy_from_slice(&buffer[..size]);
+
+                    // Handle packet immediately (no need to spawn task for simple ACK)
+                    if let Err(e) = self.handle_stp_packet(socket, clients, client_addr, data).await {
+                        eprintln!("Error handling STP packet from {}: {}", client_addr, e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("STP receive error: {}", e);
+                }
+            }
+        }
     }
 
-    client_state.total_bytes += data.len() as u64;
+    async fn handle_stp_packet(
+        &self,
+        socket: &UdpSocket,
+        clients: Arc<Mutex<HashMap<std::net::SocketAddr, StpClientState>>>,
+        client_addr: std::net::SocketAddr,
+        data: Bytes,
+    ) -> Result<()> {
+        if let Some(packet) = StpPacket::decode(data) {
+            let ack_data = {
+                let mut clients_map = clients.lock();
+                let client_state = clients_map
+                    .entry(client_addr)
+                    .or_insert_with(|| StpClientState::new(client_addr));
 
-    // Report progress every 5 seconds
-    if client_state.last_report.elapsed() >= Duration::from_secs(5) {
-        let elapsed = client_state.start_time.elapsed();
-        let current_mbps =
-            (client_state.total_bytes as f64 * 8.0) / (elapsed.as_secs_f64() * 1_000_000.0);
+                // Update connection state
+                client_state.connection.update_from_received(&packet.header);
+                client_state.total_bytes += packet.payload.len() as u64;
+                client_state.packets_received += 1;
 
-        println!(
-            "UDP {}: {} packets, {} received, {} throughput",
-            client_addr,
-            client_state.packets_received,
-            format_bytes(client_state.total_bytes).yellow(),
-            format_throughput(current_mbps).green()
-        );
+                // Prepare ACK
+                let ack_packet_number = client_state.next_packet_number();
+                let ack_packet = StpPacket::ack_only(
+                    ack_packet_number,
+                    packet.header.packet_number, // ACK this packet
+                    packet.header.timestamp,     // Echo the timestamp
+                );
 
-        client_state.last_report = Instant::now();
+                // Report progress periodically
+                if client_state.last_report.elapsed() >= Duration::from_secs(2) {
+                    let elapsed = client_state.start_time.elapsed();
+                    let current_mbps = if elapsed.as_secs_f64() > 0.0 {
+                        (client_state.total_bytes as f64 * 8.0) / (elapsed.as_secs_f64() * 1_000_000.0)
+                    } else {
+                        0.0
+                    };
+
+                    println!(
+                        "STP {}: {} packets, {} received, {} throughput",
+                        client_addr.to_string().cyan(),
+                        client_state.packets_received,
+                        format_bytes(client_state.total_bytes).yellow(),
+                        format_throughput(current_mbps).green()
+                    );
+
+                    client_state.last_report = Instant::now();
+                }
+
+                // Handle connection teardown (empty payload could indicate end)
+                if packet.payload.is_empty() && client_state.packets_received > 100 {
+                    // This might be a termination signal
+                    let duration = client_state.start_time.elapsed();
+                    let final_mbps = if duration.as_secs_f64() > 0.0 {
+                        (client_state.total_bytes as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0)
+                    } else {
+                        0.0
+                    };
+
+                    println!(
+                        "STP session from {} completed: {} packets received, {} total in {:.2}s ({})",
+                        client_addr.to_string().cyan(),
+                        client_state.packets_received,
+                        format_bytes(client_state.total_bytes).yellow(),
+                        duration.as_secs_f64(),
+                        format_throughput(final_mbps).green()
+                    );
+                }
+
+                ack_packet.encode()
+            }; // Lock is dropped here
+
+            // Send ACK without holding the lock
+            socket.send_to(&ack_data, client_addr).await?;
+        }
+
+        Ok(())
     }
+}
+
+pub async fn run_udp_server(addr: impl ToSocketAddrs) -> Result<()> {
+    let server = StpServer::new(addr).await?;
+    server.run().await
 }
