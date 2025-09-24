@@ -2,7 +2,7 @@
 
 > Disclaimer: Tool is under active development. Some features are to be improved in correctness/performance and documentation. Open to contributions!
 
-This tool provides **comprehensive network performance measurements** across **TCP, UDP, and HTTP** protocols. Built with Rust, it prioritizes **maximum performance** to help you isolate and identify network or infrastructure-related bottlenecks.
+This tool provides **comprehensive network performance measurements** across **TCP, UDP, and HTTP** protocols. Built with Rust, the test suite optimizes for **maximum throughput** to measure the network's available bandwidth.
 
 ## Why Another Network Testing Tool?
 
