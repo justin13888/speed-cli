@@ -491,7 +491,7 @@ async fn upload_chunk(
     let mut total_bytes_sent = 0u64;
 
     // Calculate how many chunks we need to send
-    let num_chunks = (total_bytes_to_send + chunk_size - 1) / chunk_size; // Ceiling division
+    let num_chunks = total_bytes_to_send.div_ceil(chunk_size); // Ceiling division
 
     for chunk_index in 0..num_chunks {
         let remaining_bytes = total_bytes_to_send - (chunk_index * chunk_size);

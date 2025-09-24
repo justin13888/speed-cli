@@ -89,23 +89,24 @@ impl LatencyStatsCollector {
 
                     // Calculate and display running average latency (minimal overhead)
                     if let Ok(measurements) = measurements_for_stats.try_lock()
-                        && !measurements.is_empty() {
-                            let valid_measurements: Vec<f64> =
-                                measurements.iter().filter_map(|m| m.rtt_ms).collect();
+                        && !measurements.is_empty()
+                    {
+                        let valid_measurements: Vec<f64> =
+                            measurements.iter().filter_map(|m| m.rtt_ms).collect();
 
-                            if !valid_measurements.is_empty() {
-                                let avg_latency = valid_measurements.iter().sum::<f64>()
-                                    / valid_measurements.len() as f64;
-                                let connection_rate =
-                                    measurements.len() as f64 / start_time.elapsed().as_secs_f64();
-                                pb.set_message(format!(
-                                    "Avg latency: {:.2}ms | Conn/s: {:.1} | Connections: {}",
-                                    avg_latency,
-                                    connection_rate,
-                                    measurements.len()
-                                ));
-                            }
+                        if !valid_measurements.is_empty() {
+                            let avg_latency = valid_measurements.iter().sum::<f64>()
+                                / valid_measurements.len() as f64;
+                            let connection_rate =
+                                measurements.len() as f64 / start_time.elapsed().as_secs_f64();
+                            pb.set_message(format!(
+                                "Avg latency: {:.2}ms | Conn/s: {:.1} | Connections: {}",
+                                avg_latency,
+                                connection_rate,
+                                measurements.len()
+                            ));
                         }
+                    }
 
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -132,7 +133,7 @@ impl LatencyStatsCollector {
         progress_bar.finish_with_message(message);
 
         // Extract measurements with minimal lock time
-        
+
         self.measurements.lock().unwrap().clone()
     }
 }
@@ -175,28 +176,29 @@ impl ThroughputStatsCollector {
 
                     // Calculate and display running average throughput (minimal overhead)
                     if let Ok(measurements) = measurements_for_stats.try_lock()
-                        && !measurements.is_empty() {
-                            let total_bytes: u64 = measurements
-                                .iter()
-                                .map(|m| match m {
-                                    ThroughputMeasurement::Success { bytes, .. } => *bytes,
-                                    ThroughputMeasurement::Failure { .. } => 0,
-                                })
-                                .sum();
-                            let elapsed_secs = start_time.elapsed().as_secs_f64();
-                            let throughput_mbps =
-                                (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
-                            let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
-                            let requests_per_sec = measurements.len() as f64 / elapsed_secs;
+                        && !measurements.is_empty()
+                    {
+                        let total_bytes: u64 = measurements
+                            .iter()
+                            .map(|m| match m {
+                                ThroughputMeasurement::Success { bytes, .. } => *bytes,
+                                ThroughputMeasurement::Failure { .. } => 0,
+                            })
+                            .sum();
+                        let elapsed_secs = start_time.elapsed().as_secs_f64();
+                        let throughput_mbps =
+                            (total_bytes as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+                        let throughput_bytes_per_sec = total_bytes as f64 / elapsed_secs;
+                        let requests_per_sec = measurements.len() as f64 / elapsed_secs;
 
-                            pb.set_message(format!(
-                                "Avg: {} | {} | Req/s: {:.1} | Chunks: {}",
-                                format_throughput(throughput_mbps),
-                                format_bytes(throughput_bytes_per_sec as usize),
-                                requests_per_sec,
-                                measurements.len()
-                            ));
-                        }
+                        pb.set_message(format!(
+                            "Avg: {} | {} | Req/s: {:.1} | Chunks: {}",
+                            format_throughput(throughput_mbps),
+                            format_bytes(throughput_bytes_per_sec as usize),
+                            requests_per_sec,
+                            measurements.len()
+                        ));
+                    }
 
                     // Update every 100ms
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -224,7 +226,7 @@ impl ThroughputStatsCollector {
         progress_bar.finish_with_message(message);
 
         // Extract measurements with minimal lock time
-        
+
         self.measurements.lock().unwrap().clone()
     }
 }

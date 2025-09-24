@@ -1,7 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// STP (Simple Transport Protocol) packet header
 /// Fixed 32-byte header for all packets
@@ -58,7 +58,12 @@ pub struct StpPacket {
 }
 
 impl StpPacket {
-    pub fn new(packet_number: u64, latest_ack: u64, ack_timestamp_echo: u64, payload: Bytes) -> Self {
+    pub fn new(
+        packet_number: u64,
+        latest_ack: u64,
+        ack_timestamp_echo: u64,
+        payload: Bytes,
+    ) -> Self {
         Self {
             header: StpHeader::new(packet_number, latest_ack, ack_timestamp_echo),
             payload,
@@ -127,7 +132,7 @@ impl ConnectionState {
         self.peer_latest_ack = header.latest_ack;
         self.last_received_packet = header.packet_number;
         self.last_received_timestamp = header.timestamp;
-        
+
         if !self.established {
             self.established = true;
         }
@@ -179,7 +184,10 @@ impl LossRecovery {
         self.in_flight.push_back(packet);
     }
 
-    pub fn on_ack_received(&mut self, acked_packet: u64) -> (Vec<InFlightPacket>, Vec<InFlightPacket>) {
+    pub fn on_ack_received(
+        &mut self,
+        acked_packet: u64,
+    ) -> (Vec<InFlightPacket>, Vec<InFlightPacket>) {
         let mut acked_packets = Vec::new();
         let mut lost_packets = Vec::new();
         let current_time = current_timestamp_micros();
@@ -194,8 +202,9 @@ impl LossRecovery {
             } else {
                 // Check for loss: either too many higher packets acked or timeout
                 let higher_acked_count = self.largest_acked.saturating_sub(packet.packet_number);
-                let timed_out = current_time - packet.sent_time > self.loss_timeout.as_micros() as u64;
-                
+                let timed_out =
+                    current_time - packet.sent_time > self.loss_timeout.as_micros() as u64;
+
                 if higher_acked_count >= self.loss_threshold || timed_out {
                     lost_packets.push(packet.clone());
                     false // Remove from in_flight
@@ -236,7 +245,7 @@ mod tests {
         let header = StpHeader::new(123, 456, 789);
         let mut buf = BytesMut::new();
         header.encode(&mut buf);
-        
+
         let decoded = StpHeader::decode(buf.freeze()).unwrap();
         assert_eq!(header.packet_number, decoded.packet_number);
         assert_eq!(header.latest_ack, decoded.latest_ack);
@@ -247,10 +256,10 @@ mod tests {
     fn test_packet_encode_decode() {
         let payload = Bytes::from_static(b"hello world");
         let packet = StpPacket::new(1, 0, 0, payload.clone());
-        
+
         let encoded = packet.encode();
         let decoded = StpPacket::decode(encoded).unwrap();
-        
+
         assert_eq!(packet.header.packet_number, decoded.header.packet_number);
         assert_eq!(packet.payload, decoded.payload);
     }

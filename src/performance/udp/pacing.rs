@@ -1,8 +1,8 @@
-use std::time::{Duration, Instant};
-use tokio::time::{sleep, Sleep};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use tokio::time::{Sleep, sleep};
 
 /// Pacing mechanism to control packet transmission rate
 #[derive(Debug)]
@@ -35,10 +35,10 @@ impl Pacer {
     /// Calculate when the next packet can be sent
     pub fn schedule_next_send(&mut self, packet_size: usize) -> Option<Duration> {
         let now = Instant::now();
-        
+
         // Calculate the time this packet should take to send
         let send_duration = Duration::from_secs_f64(packet_size as f64 / self.sending_rate);
-        
+
         match self.last_send_time {
             None => {
                 // First packet, send immediately
@@ -49,7 +49,7 @@ impl Pacer {
             Some(last_send) => {
                 // Calculate when we should send based on pacing
                 let ideal_send_time = last_send + send_duration;
-                
+
                 if now >= ideal_send_time {
                     // We can send now or we're already late
                     self.last_send_time = Some(now);
@@ -125,7 +125,7 @@ mod tests {
         let start = Instant::now();
         paced_send.await;
         let elapsed = start.elapsed();
-        
+
         // Should have waited at least 1ms (with some tolerance for timing)
         assert!(elapsed >= Duration::from_millis(1));
     }

@@ -2,7 +2,6 @@ use colored::*;
 use eyre::Result;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use tracing::trace;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
