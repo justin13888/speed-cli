@@ -450,33 +450,38 @@ async fn run_download_test(
     let addr = format!("{server}:{port}");
     let mut client = StpClient::new(&addr).await?;
 
-    // Send a download command to the server first
+    // Send a download command to the server first, including the payload size
+    let download_cmd_data = format!("DOWNLOAD:{}", payload_size);
     let download_cmd = StpPacket::new(
         client.connection.next_packet_number(),
         0,
         0,
-        Bytes::from("DOWNLOAD"),
+        Bytes::from(download_cmd_data),
     );
     let encoded = download_cmd.encode();
-    println!(
-        "Sending DOWNLOAD command to server... (size: {} bytes)",
-        encoded.len()
-    );
+    // println!(
+    //     "Sending DOWNLOAD command to server... (size: {} bytes)",
+    //     encoded.len()
+    // );
     client.socket.send(&encoded).await?;
-    println!("DOWNLOAD command sent, waiting for response...");
+    // println!("DOWNLOAD command sent, waiting for response...");
 
     let mut recv_buffer = vec![0u8; 2048];
+    let mut last_successful_receive = Instant::now();
+    let mut timeout_count = 0;
 
     while start_time.elapsed() < duration {
         // Try to receive data (non-blocking with short timeout)
         match timeout(
-            Duration::from_millis(10),
+            Duration::from_millis(50),
             client.socket.recv(&mut recv_buffer),
         )
         .await
         {
             Ok(Ok(size)) => {
                 let read_start = Instant::now();
+                last_successful_receive = read_start;
+                timeout_count = 0; // Reset timeout counter on successful receive
 
                 // Process received packet
                 if let Some(packet) =
@@ -496,16 +501,56 @@ async fn run_download_test(
                     );
                     measurements.push(measurement.clone());
                     let _ = tx.send(measurement);
+                } else {
+                    // Invalid packet received - log as error
+                    let error_measurement = ThroughputMeasurement::new_error(
+                        ConnectionError::TransferFailed("Invalid STP packet received".to_string()),
+                        read_start.elapsed(),
+                        0,
+                    );
+                    measurements.push(error_measurement.clone());
+                    let _ = tx.send(error_measurement);
                 }
             }
-            _ => {
-                // No data received, continue waiting
+            Ok(Err(e)) => {
+                // Socket error - log as error
+                let error_measurement = ThroughputMeasurement::new_error(
+                    ConnectionError::Unknown(format!("Socket receive error: {}", e)),
+                    last_successful_receive.elapsed(),
+                    0,
+                );
+                measurements.push(error_measurement.clone());
+                let _ = tx.send(error_measurement);
+                break; // Exit on socket error
+            }
+            Err(_) => {
+                // Timeout - check if we've been waiting too long
+                timeout_count += 1;
+                let time_since_last_data = last_successful_receive.elapsed();
+
+                if time_since_last_data > Duration::from_secs(2) {
+                    // Log timeout as an error measurement
+                    let error_measurement = ThroughputMeasurement::new_error(
+                        ConnectionError::Timeout(format!(
+                            "No data received for {:.1}s",
+                            time_since_last_data.as_secs_f32()
+                        )),
+                        time_since_last_data,
+                        timeout_count,
+                    );
+                    measurements.push(error_measurement.clone());
+                    let _ = tx.send(error_measurement);
+
+                    // Reset timeout tracking
+                    last_successful_receive = Instant::now();
+                    timeout_count = 0;
+                }
                 continue;
             }
         }
 
         // Small delay to prevent busy waiting
-        tokio::time::sleep(Duration::from_micros(100)).await;
+        tokio::time::sleep(Duration::from_micros(500)).await;
     }
 
     // Drop the sender to signal stats collector to finish
@@ -575,7 +620,7 @@ async fn run_upload_test(
                 }
                 Err(e) => {
                     let measurement = ThroughputMeasurement::new_error(
-                        ConnectionError::Unknown(format!("UDP send error: {e}")),
+                        ConnectionError::TransferFailed(format!("UDP send error: {e}")),
                         write_start.elapsed(),
                         0,
                     );

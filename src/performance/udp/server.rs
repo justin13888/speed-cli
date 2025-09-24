@@ -29,6 +29,7 @@ struct StpClientState {
     local_packet_number: u64,
     download_mode: bool,
     download_payload_size: usize,
+    download_start_time: Option<Instant>,
 }
 
 impl StpClientState {
@@ -43,6 +44,7 @@ impl StpClientState {
             local_packet_number: 0,
             download_mode: false,
             download_payload_size: 1024,
+            download_start_time: None,
         }
     }
 
@@ -62,8 +64,10 @@ impl StpServer {
     }
 
     pub async fn run(&self) -> Result<()> {
-        info!("{}", "STP server ready to receive packets...".green());
-        info!("UDP server listening on: {}", self.socket.local_addr()?);
+        info!(
+            "UDP server listening on {}",
+            self.socket.local_addr()?.to_string().green()
+        );
 
         let mut buffer = vec![0u8; 2048];
 
@@ -107,10 +111,33 @@ impl StpServer {
                 // Check if this is a download command
                 if packet.payload.starts_with(b"DOWNLOAD") {
                     client_state.download_mode = true;
-                    debug!(
-                        "Client {} requested download mode",
-                        client_addr.to_string().cyan()
-                    );
+                    client_state.download_start_time = Some(Instant::now());
+
+                    // Parse payload size from DOWNLOAD:size format
+                    if let Ok(payload_str) = String::from_utf8(packet.payload.to_vec()) {
+                        info!("Received download command: '{}'", payload_str);
+                        if let Some(size_part) = payload_str.strip_prefix("DOWNLOAD:")
+                            && let Ok(size) = size_part.parse::<usize>()
+                        {
+                            client_state.download_payload_size = size;
+                            info!(
+                                "Client {} requested download mode with {} payload size",
+                                client_addr.to_string().cyan(),
+                                crate::utils::format::format_bytes(size).yellow()
+                            );
+                        } else {
+                            info!(
+                                "Client {} requested download mode (payload_str: '{}'), using default 1024 bytes",
+                                client_addr.to_string().cyan(),
+                                payload_str
+                            );
+                        }
+                    } else {
+                        info!(
+                            "Client {} requested download mode (invalid UTF-8), using default 1024 bytes",
+                            client_addr.to_string().cyan()
+                        );
+                    }
                 }
 
                 // Check if this is a ping packet for latency measurement
@@ -186,27 +213,102 @@ impl StpServer {
 
             // If in download mode, send download data packets
             if should_send_download_data {
-                // Create download data packet
-                let download_data = vec![0u8; download_payload_size];
-                let payload = Bytes::from(download_data);
+                info!("Sending download data to client {}", client_addr);
 
-                // Get next packet number for download data
-                let packet_number = {
-                    let mut clients_map = clients.lock();
-                    let client_state = clients_map.get_mut(&client_addr).unwrap();
-                    client_state.next_packet_number()
-                };
+                // Send a burst of packets to maintain throughput
+                // Maximum safe UDP packet size (considering ethernet MTU minus IP/UDP headers)
+                const MAX_UDP_PAYLOAD: usize = 1400;
 
-                let download_packet = StpPacket::new(
-                    packet_number,
-                    0, // No ACK needed for download data
-                    0, // No timestamp echo
-                    payload,
-                );
+                for _ in 0..10 {
+                    // If payload is larger than max UDP size, fragment it
+                    if download_payload_size <= MAX_UDP_PAYLOAD {
+                        // Single packet
+                        let download_data = vec![0u8; download_payload_size];
+                        let payload = Bytes::from(download_data);
 
-                socket
-                    .send_to(&download_packet.encode(), client_addr)
-                    .await?;
+                        // Get next packet number for download data
+                        let packet_number = {
+                            let mut clients_map = clients.lock();
+                            if let Some(client_state) = clients_map.get_mut(&client_addr) {
+                                client_state.next_packet_number()
+                            } else {
+                                break; // Client disconnected
+                            }
+                        };
+
+                        let download_packet = StpPacket::new(
+                            packet_number,
+                            0, // No ACK needed for download data
+                            0, // No timestamp echo
+                            payload,
+                        );
+
+                        match socket.send_to(&download_packet.encode(), client_addr).await {
+                            Ok(_) => {
+                                debug!(
+                                    "Sent download packet {} ({} bytes) to {}",
+                                    packet_number, download_payload_size, client_addr
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to send download packet to {}: {}", client_addr, e);
+                                break; // Stop if send fails
+                            }
+                        }
+                    } else {
+                        // Fragment large payload into multiple packets
+                        let mut remaining_bytes = download_payload_size;
+                        let mut _fragment_number = 0;
+
+                        while remaining_bytes > 0 {
+                            let fragment_size = std::cmp::min(remaining_bytes, MAX_UDP_PAYLOAD);
+                            let fragment_data = vec![0u8; fragment_size];
+                            let payload = Bytes::from(fragment_data);
+
+                            // Get next packet number for each fragment
+                            let packet_number = {
+                                let mut clients_map = clients.lock();
+                                if let Some(client_state) = clients_map.get_mut(&client_addr) {
+                                    client_state.next_packet_number()
+                                } else {
+                                    break; // Client disconnected
+                                }
+                            };
+
+                            let download_packet = StpPacket::new(
+                                packet_number,
+                                0, // No ACK needed for download data
+                                0, // No timestamp echo
+                                payload,
+                            );
+
+                            match socket.send_to(&download_packet.encode(), client_addr).await {
+                                Ok(_) => {
+                                    debug!(
+                                        "Sent download fragment {} ({} bytes) to {}",
+                                        packet_number, fragment_size, client_addr
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to send download fragment to {}: {}",
+                                        client_addr, e
+                                    );
+                                    break; // Stop if send fails
+                                }
+                            }
+
+                            remaining_bytes -= fragment_size;
+                            _fragment_number += 1;
+
+                            // Small delay between fragments
+                            tokio::time::sleep(Duration::from_micros(50)).await;
+                        }
+                    }
+
+                    // Small delay between packet bursts
+                    tokio::time::sleep(Duration::from_micros(500)).await;
+                }
             }
         }
 
