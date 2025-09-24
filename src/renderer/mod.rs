@@ -621,6 +621,7 @@ impl ToHtml for NetworkTestResult {
         let protocol_prefix = match self.protocol {
             crate::report::NetworkProtocol::Http => "",
             crate::report::NetworkProtocol::Tcp => "TCP ",
+            crate::report::NetworkProtocol::Udp => "UDP ",
         };
 
         // Latency results
@@ -690,6 +691,7 @@ impl ToHtml for NetworkTestResult {
         let protocol_prefix = match self.protocol {
             crate::report::NetworkProtocol::Http => "",
             crate::report::NetworkProtocol::Tcp => "TCP ",
+            crate::report::NetworkProtocol::Udp => "UDP ",
         };
 
         // Latency results

@@ -317,8 +317,17 @@ async fn main() -> Result<()> {
             .await;
 
             for (name, result) in results {
-                if let Err(e) = result {
-                    eprintln!("{name} server task failed: {e}");
+                match result {
+                    Ok(server_result) => {
+                        if let Err(e) = server_result {
+                            eprintln!("{name} server failed: {e}");
+                        } else {
+                            println!("{name} server completed successfully");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{name} server task panicked: {e}");
+                    }
                 }
             }
         }

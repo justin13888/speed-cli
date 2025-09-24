@@ -27,6 +27,8 @@ struct StpClientState {
     packets_received: u64,
     last_report: Instant,
     local_packet_number: u64,
+    download_mode: bool,
+    download_payload_size: usize,
 }
 
 impl StpClientState {
@@ -39,6 +41,8 @@ impl StpClientState {
             packets_received: 0,
             last_report: now,
             local_packet_number: 0,
+            download_mode: false,
+            download_payload_size: 1024,
         }
     }
 
@@ -59,12 +63,14 @@ impl StpServer {
 
     pub async fn run(&self) -> Result<()> {
         println!("{}", "STP server ready to receive packets...".green());
+        println!("UDP server listening on: {}", self.socket.local_addr()?);
         
         let mut buffer = vec![0u8; 2048];
 
         loop {
             match self.socket.recv_from(&mut buffer).await {
                 Ok((size, client_addr)) => {
+                    println!("Received {} bytes from {}", size, client_addr);
                     let clients = self.clients.clone();
                     let socket = &self.socket;
                     let data = Bytes::copy_from_slice(&buffer[..size]);
@@ -89,24 +95,28 @@ impl StpServer {
         data: Bytes,
     ) -> Result<()> {
         if let Some(packet) = StpPacket::decode(data) {
-            let ack_data = {
+            let (ack_data, should_send_download_data, download_payload_size) = {
                 let mut clients_map = clients.lock();
                 let client_state = clients_map
                     .entry(client_addr)
                     .or_insert_with(|| StpClientState::new(client_addr));
 
+                // Check if this is a download command
+                if packet.payload.starts_with(b"DOWNLOAD") {
+                    client_state.download_mode = true;
+                    println!("Client {} requested download mode", client_addr.to_string().cyan());
+                }
+                
+                // Check if this is a ping packet for latency measurement
+                let is_ping = packet.payload.starts_with(b"PING");
+                if is_ping {
+                    println!("Client {} sent ping packet", client_addr.to_string().cyan());
+                }
+
                 // Update connection state
                 client_state.connection.update_from_received(&packet.header);
                 client_state.total_bytes += packet.payload.len() as u64;
                 client_state.packets_received += 1;
-
-                // Prepare ACK
-                let ack_packet_number = client_state.next_packet_number();
-                let ack_packet = StpPacket::ack_only(
-                    ack_packet_number,
-                    packet.header.packet_number, // ACK this packet
-                    packet.header.timestamp,     // Echo the timestamp
-                );
 
                 // Report progress periodically
                 if client_state.last_report.elapsed() >= Duration::from_secs(2) {
@@ -148,11 +158,42 @@ impl StpServer {
                     );
                 }
 
-                ack_packet.encode()
+                // Prepare ACK
+                let ack_packet_number = client_state.next_packet_number();
+                let ack_packet = StpPacket::ack_only(
+                    ack_packet_number,
+                    packet.header.packet_number, // ACK this packet
+                    packet.header.timestamp,     // Echo the timestamp
+                );
+
+                (ack_packet.encode(), client_state.download_mode, client_state.download_payload_size)
             }; // Lock is dropped here
 
             // Send ACK without holding the lock
             socket.send_to(&ack_data, client_addr).await?;
+
+            // If in download mode, send download data packets
+            if should_send_download_data {
+                // Create download data packet
+                let download_data = vec![0u8; download_payload_size];
+                let payload = Bytes::from(download_data);
+                
+                // Get next packet number for download data
+                let packet_number = {
+                    let mut clients_map = clients.lock();
+                    let client_state = clients_map.get_mut(&client_addr).unwrap();
+                    client_state.next_packet_number()
+                };
+                
+                let download_packet = StpPacket::new(
+                    packet_number,
+                    0, // No ACK needed for download data
+                    0, // No timestamp echo
+                    payload,
+                );
+
+                socket.send_to(&download_packet.encode(), client_addr).await?;
+            }
         }
 
         Ok(())

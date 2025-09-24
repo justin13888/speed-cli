@@ -24,6 +24,7 @@ pub struct NetworkTestResult {
 pub enum NetworkProtocol {
     Http,
     Tcp,
+    Udp,
 }
 
 impl NetworkTestResult {
@@ -44,6 +45,15 @@ impl NetworkTestResult {
             protocol: NetworkProtocol::Tcp,
         }
     }
+
+    pub fn new_udp() -> Self {
+        Self {
+            latency: None,
+            download: IndexMap::new(),
+            upload: IndexMap::new(),
+            protocol: NetworkProtocol::Udp,
+        }
+    }
 }
 
 impl Display for NetworkTestResult {
@@ -51,6 +61,7 @@ impl Display for NetworkTestResult {
         let protocol_prefix = match self.protocol {
             NetworkProtocol::Http => "HTTP ",
             NetworkProtocol::Tcp => "TCP ",
+            NetworkProtocol::Udp => "UDP ",
         };
 
         // Display latency if available

@@ -1,13 +1,15 @@
 use bytes::Bytes;
 use chrono::Utc;
-use colored::*;
+use colored::Colorize as _;
 use eyre::Result;
 use parking_lot::Mutex;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
+use tracing::trace;
 
 use super::congestion::{BbrCongestionControl, CongestionControl};
 use super::pacing::{PacedSend, Pacer};
@@ -15,12 +17,22 @@ use super::protocol::{
     ConnectionState, InFlightPacket, LossRecovery, StpPacket, calculate_rtt,
     current_timestamp_micros,
 };
-use crate::report::{TestReport, ThroughputMeasurement, ThroughputResult, UdpTestConfig};
-use crate::utils::format::{format_bytes, format_throughput};
+use crate::{
+    TestType,
+    report::{
+        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, TestReport,
+        ThroughputMeasurement, ThroughputResult, UdpTestConfig,
+    },
+    utils::{
+        format::format_bytes,
+        instrumentation::{
+            LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+        },
+    },
+};
 
-// TODO: Update all this client logic to match the TCP/HTTP implementations
-// - Make test output download, upload, latency, separately, rather than a single upload measurement
-// TODO: Need to support different modes based on test type
+// TODO: Verify upload, download, latency modes all work correctly
+// TODO: Improve the STP implementation performance
 
 /// STP Client for bandwidth measurement
 pub struct StpClient {
@@ -193,42 +205,385 @@ impl StpClient {
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
-    let mut client = StpClient::new(&server_addr).await?;
 
     println!(
         "{}",
-        format!(
-            "Starting STP bandwidth test to server {}...",
-            server_addr.cyan()
-        )
-        .green()
-        .bold()
+        format!("Starting UDP test to server {}...", server_addr.cyan())
+            .green()
+            .bold()
     );
 
-    let test_duration = Duration::from_secs(config.duration);
-    let payload_size = config.payload_sizes.first().copied().unwrap_or(1400);
-    let payload = Bytes::from(vec![0u8; payload_size]);
-
     let start_time = Utc::now();
-    let start = Instant::now();
-    let mut last_report = start;
 
-    // Create a buffer for receiving ACKs
-    let mut recv_buffer = vec![0u8; 2048];
+    let mut result = NetworkTestResult::new_udp();
 
-    // Main test loop
+    match config.test_type {
+        TestType::LatencyOnly => {
+            result.latency = measure_udp_latency(&config).await?;
+        }
+        TestType::Download => {
+            for payload_size in &config.payload_sizes {
+                result.download.insert(
+                    *payload_size,
+                    run_download_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_streams,
+                        *payload_size,
+                        Duration::from_secs(config.duration),
+                    )
+                    .await?,
+                );
+            }
+        }
+        TestType::Upload => {
+            for payload_size in &config.payload_sizes {
+                result.upload.insert(
+                    *payload_size,
+                    run_upload_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_streams,
+                        *payload_size,
+                        Duration::from_secs(config.duration),
+                    )
+                    .await?,
+                );
+            }
+        }
+        TestType::Bidirectional => {
+            // Run download and upload sequentially
+            for payload_size in &config.payload_sizes {
+                result.download.insert(
+                    *payload_size,
+                    run_download_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_streams,
+                        *payload_size,
+                        Duration::from_secs(config.duration),
+                    )
+                    .await?,
+                );
+                result.upload.insert(
+                    *payload_size,
+                    run_upload_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_streams,
+                        *payload_size,
+                        Duration::from_secs(config.duration),
+                    )
+                    .await?,
+                );
+            }
+        }
+        TestType::Simultaneous => {
+            // Run download and upload concurrently
+            for payload_size in &config.payload_sizes {
+                let (download_result, upload_result) = tokio::join!(
+                    run_download_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_streams,
+                        *payload_size,
+                        Duration::from_secs(config.duration),
+                    ),
+                    run_upload_test(
+                        &config.server,
+                        config.port,
+                        config.parallel_streams,
+                        *payload_size,
+                        Duration::from_secs(config.duration),
+                    )
+                );
+
+                result.download.insert(*payload_size, download_result?);
+                result.upload.insert(*payload_size, upload_result?);
+            }
+        }
+    }
+
+    Ok((start_time, config, result).into())
+}
+
+/// Measure UDP latency using simple UDP packets
+async fn measure_udp_latency(config: &UdpTestConfig) -> Result<Option<LatencyResult>> {
+    let addr = format!("{}:{}", config.server, config.port);
+    let duration = Duration::from_secs(config.duration);
     let mut measurements = Vec::new();
 
-    while start.elapsed() < test_duration {
+    println!("Measuring UDP latency for {duration:?}...");
+
+    // Create progress bar for latency measurement
+    let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
+
+    let start = Instant::now();
+
+    // Set up instrumentation
+    let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
+
+    while start.elapsed() < duration {
+        let connect_start = Instant::now();
+
+        // Create STP client for latency measurement
+        let mut client = match StpClient::new(&addr).await {
+            Ok(c) => c,
+            Err(_) => {
+                let measurement = LatencyMeasurement {
+                    rtt_ms: None,
+                    elapsed_time: start.elapsed(),
+                };
+                measurements.push(measurement.clone());
+                let _ = tx.send(measurement);
+                continue;
+            }
+        };
+
+        // Send an STP ping packet
+        let ping_packet = StpPacket::new(
+            client.connection.next_packet_number(),
+            0,
+            0,
+            Bytes::from("PING"),
+        );
+
+        match client.socket.send(&ping_packet.encode()).await {
+            Ok(_) => {
+                // Try to receive a response (with timeout)
+                let mut buffer = [0u8; 2048];
+                match timeout(Duration::from_millis(1000), client.socket.recv(&mut buffer)).await {
+                    Ok(Ok(size)) => {
+                        if let Some(_response_packet) =
+                            StpPacket::decode(Bytes::copy_from_slice(&buffer[..size]))
+                        {
+                            let rtt = connect_start.elapsed().as_secs_f64() * 1000.0;
+                            let measurement = LatencyMeasurement {
+                                rtt_ms: Some(rtt),
+                                elapsed_time: start.elapsed(),
+                            };
+                            measurements.push(measurement.clone());
+
+                            // Send to stats collector (non-blocking)
+                            let _ = tx.send(measurement);
+                        } else {
+                            let measurement = LatencyMeasurement {
+                                rtt_ms: None,
+                                elapsed_time: start.elapsed(),
+                            };
+                            measurements.push(measurement.clone());
+
+                            // Send to stats collector (non-blocking)
+                            let _ = tx.send(measurement);
+                        }
+                    }
+                    _ => {
+                        let measurement = LatencyMeasurement {
+                            rtt_ms: None,
+                            elapsed_time: start.elapsed(),
+                        };
+                        measurements.push(measurement.clone());
+
+                        // Send to stats collector (non-blocking)
+                        let _ = tx.send(measurement);
+                    }
+                }
+            }
+            Err(e) => {
+                let measurement = LatencyMeasurement {
+                    rtt_ms: None,
+                    elapsed_time: start.elapsed(),
+                };
+                measurements.push(measurement.clone());
+
+                // Send to stats collector (non-blocking)
+                let _ = tx.send(measurement);
+
+                trace!("UDP send error while measuring latency: {e}");
+            }
+        }
+
+        // Wait between packets to avoid overwhelming the server
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    // Drop the sender to signal stats collector to finish
+    drop(tx);
+
+    // Wait for stats collector to complete and get measurements
+    measurements = stats_collector
+        .finish(progress_bar, "Latency measurement complete".to_string())
+        .await;
+
+    if measurements.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(LatencyResult {
+        measurements,
+        timestamp: chrono::Utc::now(),
+    }))
+}
+
+async fn run_download_test(
+    server: &str,
+    port: u16,
+    _parallel_connections: usize,
+    payload_size: usize,
+    duration: Duration,
+) -> Result<ThroughputResult> {
+    println!(
+        "Starting UDP download test with {} payload size...",
+        format_bytes(payload_size).yellow()
+    );
+
+    // Create progress bar
+    let progress_bar = create_progress_bar(ProgressBarType::Download, duration);
+
+    let mut measurements = Vec::new();
+    let start_time = Instant::now();
+
+    // Set up instrumentation
+    let (stats_collector, tx) =
+        ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
+
+    let addr = format!("{server}:{port}");
+    let mut client = StpClient::new(&addr).await?;
+
+    // Send a download command to the server first
+    let download_cmd = StpPacket::new(
+        client.connection.next_packet_number(),
+        0,
+        0,
+        Bytes::from("DOWNLOAD"),
+    );
+    let encoded = download_cmd.encode();
+    println!(
+        "Sending DOWNLOAD command to server... (size: {} bytes)",
+        encoded.len()
+    );
+    client.socket.send(&encoded).await?;
+    println!("DOWNLOAD command sent, waiting for response...");
+
+    let mut recv_buffer = vec![0u8; 2048];
+
+    while start_time.elapsed() < duration {
+        // Try to receive data (non-blocking with short timeout)
+        match timeout(
+            Duration::from_millis(10),
+            client.socket.recv(&mut recv_buffer),
+        )
+        .await
+        {
+            Ok(Ok(size)) => {
+                let read_start = Instant::now();
+
+                // Process received packet
+                if let Some(packet) =
+                    StpPacket::decode(Bytes::copy_from_slice(&recv_buffer[..size]))
+                {
+                    // Send ACK
+                    let ack_packet = StpPacket::ack_only(
+                        client.connection.next_packet_number(),
+                        packet.header.packet_number,
+                        packet.header.timestamp,
+                    );
+                    let _ = client.socket.send(&ack_packet.encode()).await;
+
+                    let measurement = ThroughputMeasurement::new(
+                        packet.payload.len() as u64,
+                        read_start.elapsed(),
+                    );
+                    measurements.push(measurement.clone());
+                    let _ = tx.send(measurement);
+                }
+            }
+            _ => {
+                // No data received, continue waiting
+                continue;
+            }
+        }
+
+        // Small delay to prevent busy waiting
+        tokio::time::sleep(Duration::from_micros(100)).await;
+    }
+
+    // Drop the sender to signal stats collector to finish
+    drop(tx);
+
+    // Wait for stats collector to complete and get measurements
+    measurements = stats_collector
+        .finish(progress_bar, "Download complete".to_string())
+        .await;
+
+    let end_time = Instant::now();
+
+    Ok(ThroughputResult {
+        measurements,
+        total_duration: end_time.duration_since(start_time),
+        timestamp: chrono::Utc::now(),
+    })
+}
+
+async fn run_upload_test(
+    server: &str,
+    port: u16,
+    _parallel_connections: usize,
+    payload_size: usize,
+    duration: Duration,
+) -> Result<ThroughputResult> {
+    println!(
+        "Starting UDP upload test with {} payload size...",
+        format_bytes(payload_size).yellow()
+    );
+
+    // Create progress bar
+    let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
+
+    let mut measurements = Vec::new();
+    let start_time = Instant::now();
+
+    // Generate upload data
+    let mut upload_data = vec![0u8; payload_size];
+    rand::rng().fill_bytes(&mut upload_data);
+    let payload = Bytes::from(upload_data);
+
+    // Set up instrumentation
+    let (stats_collector, tx) =
+        ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
+
+    let addr = format!("{server}:{port}");
+    let mut client = StpClient::new(&addr).await?;
+
+    let mut recv_buffer = vec![0u8; 2048];
+
+    while start_time.elapsed() < duration {
         // Send data if congestion control allows
         let (bytes_sent, _, _, _, _sending_rate, _avg_rtt) = client.get_stats();
         let bytes_in_flight = bytes_sent - client.bytes_acked;
 
-        if client.congestion_control.can_send(bytes_in_flight as usize)
-            && let Err(e) = client.send_data(payload.clone()).await
-        {
-            eprintln!("Send error: {}", e);
-            break;
+        if client.congestion_control.can_send(bytes_in_flight as usize) {
+            let write_start = Instant::now();
+            match client.send_data(payload.clone()).await {
+                Ok(_) => {
+                    let measurement =
+                        ThroughputMeasurement::new(payload.len() as u64, write_start.elapsed());
+                    measurements.push(measurement.clone());
+
+                    // Send to stats collector (non-blocking)
+                    let _ = tx.send(measurement);
+                }
+                Err(e) => {
+                    let measurement = ThroughputMeasurement::new_error(
+                        ConnectionError::Unknown(format!("UDP send error: {e}")),
+                        write_start.elapsed(),
+                        0,
+                    );
+                    measurements.push(measurement.clone());
+                    let _ = tx.send(measurement);
+                    break;
+                }
+            }
         }
 
         // Try to receive ACKs (non-blocking)
@@ -237,79 +592,27 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
             client.socket.recv_from(&mut recv_buffer),
         )
         .await
-            && let Err(e) = client.process_ack(&recv_buffer[..size]).await
         {
-            eprintln!("ACK processing error: {}", e);
-        }
-
-        // Report progress and collect measurements
-        if last_report.elapsed() >= Duration::from_secs(1) {
-            let elapsed = start.elapsed();
-            let (_bytes_sent, bytes_acked, packets_sent, packets_acked, sending_rate, avg_rtt) =
-                client.get_stats();
-
-            let packet_loss = if packets_sent > 0 {
-                ((packets_sent - packets_acked) as f64 / packets_sent as f64) * 100.0
-            } else {
-                0.0
-            };
-
-            println!(
-                "[{:3.0}s] {} sent/{} acked, {} transferred, {} rate, {:.1}ms RTT, {:.1}% loss",
-                elapsed.as_secs_f64(),
-                packets_sent,
-                packets_acked,
-                format_bytes(bytes_acked).yellow(),
-                format_throughput(sending_rate / 125000.0).cyan(), // Convert to Mbps
-                avg_rtt.as_secs_f64() * 1000.0,
-                packet_loss
-            );
-
-            // Collect measurement
-            let measurement_duration = last_report.elapsed();
-            if measurement_duration > Duration::from_millis(500) {
-                // Only collect if measurement is substantial
-                measurements.push(ThroughputMeasurement::new(bytes_acked, elapsed));
-            }
-
-            last_report = Instant::now();
+            let _ = client.process_ack(&recv_buffer[..size]).await;
         }
 
         // Small delay to prevent busy waiting
         tokio::time::sleep(Duration::from_micros(100)).await;
     }
 
-    // Final statistics
-    let total_duration = start.elapsed();
-    let (_bytes_sent, bytes_acked, packets_sent, packets_acked, _final_rate, avg_rtt) =
-        client.get_stats();
+    // Drop the sender to signal stats collector to finish
+    drop(tx);
 
-    let final_mbps = (bytes_acked as f64 * 8.0) / (total_duration.as_secs_f64() * 1_000_000.0);
-    let packet_loss = if packets_sent > 0 {
-        ((packets_sent - packets_acked) as f64 / packets_sent as f64) * 100.0
-    } else {
-        0.0
-    };
+    // Wait for stats collector to complete and get measurements
+    measurements = stats_collector
+        .finish(progress_bar, "Upload complete".to_string())
+        .await;
 
-    println!(
-        "\n{} Final Results: {} transferred, {:.2} Mbps, {:.1}ms avg RTT, {:.1}% packet loss",
-        "STP Test Complete!".green().bold(),
-        format_bytes(bytes_acked).yellow(),
-        final_mbps,
-        avg_rtt.as_secs_f64() * 1000.0,
-        packet_loss
-    );
+    let end_time = Instant::now();
 
-    // Add final measurement if we don't have any
-    if measurements.is_empty() {
-        measurements.push(ThroughputMeasurement::new(bytes_acked, total_duration));
-    }
-
-    let result = ThroughputResult {
+    Ok(ThroughputResult {
         measurements,
-        total_duration,
+        total_duration: end_time.duration_since(start_time),
         timestamp: chrono::Utc::now(),
-    };
-
-    Ok((start_time, config, result).into())
+    })
 }
