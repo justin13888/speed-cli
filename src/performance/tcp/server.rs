@@ -545,6 +545,17 @@ impl ProductionTcpHandler {
                 );
                 res
             }
+            b'H' => {
+                let res = crate::performance::tcp::handshake::server_hello(
+                    &mut self.socket,
+                    self.peer_addr,
+                )
+                .await;
+                if let Err(e) = &res {
+                    debug!("Hello connection {} failed: {}", self.connection_id, e);
+                }
+                res
+            }
             _ => {
                 warn!("Unknown command byte: {}", command);
                 self.metrics

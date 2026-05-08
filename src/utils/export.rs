@@ -7,43 +7,34 @@ use crate::{renderer::ToHtml, report::TestReport};
 #[derive(Debug, Error)]
 pub enum ExportError {
     IO(#[from] std::io::Error),
-    Serde(#[from] serde_json::Error),
     Cbor(#[from] ciborium::ser::Error<std::io::Error>),
+    UnsupportedFormat(String),
 }
 
 impl std::fmt::Display for ExportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExportError::IO(e) => write!(f, "I/O error: {e}"),
-            ExportError::Serde(e) => write!(f, "Serialization error: {e}"),
             ExportError::Cbor(e) => write!(f, "CBOR serialization error: {e}"),
+            ExportError::UnsupportedFormat(ext) => write!(
+                f,
+                "unsupported export format `.{ext}` — only `.cbor` (data) and `.html` (rendered) are supported"
+            ),
         }
     }
 }
 
+/// Dispatches to the right exporter by extension.
+///
+/// `.cbor` (or no extension) → binary CBOR data export. `.html` →
+/// rendered single-file report. Any other extension is an error: the
+/// data format is CBOR-only.
 pub async fn export_report(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
-    match filename.extension() {
-        Some(ext) if ext == "html" => export_report_html(report, filename).await,
-        Some(ext) if ext == "json" => export_report_json(report, filename).await,
-        Some(ext) if ext == "cbor" => export_report_cbor(report, filename).await,
-        _ => {
-            println!(
-                "No known extension detected in file path. Exporting to JSON format by default."
-            );
-
-            export_report_json(report, filename).await
-        }
+    match filename.extension().and_then(|s| s.to_str()) {
+        Some("html") => export_report_html(report, filename).await,
+        Some("cbor") | None => export_report_cbor(report, filename).await,
+        Some(other) => Err(ExportError::UnsupportedFormat(other.to_string())),
     }
-}
-pub async fn export_report_json(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
-    let file = tokio::fs::File::create(filename).await?;
-    let mut writer = BufWriter::new(file);
-
-    let json = serde_json::to_string_pretty(report)?;
-    writer.write_all(json.as_bytes()).await?;
-
-    writer.flush().await?;
-    Ok(())
 }
 
 pub async fn export_report_cbor(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
@@ -59,11 +50,9 @@ pub async fn export_report_cbor(report: &TestReport, filename: &Path) -> Result<
 }
 
 pub async fn export_report_html(report: &TestReport, filename: &Path) -> Result<(), ExportError> {
-    // Method 1: Using write_html with a buffered async writer (recommended for large reports)
     let file = tokio::fs::File::create(filename).await?;
     let mut writer = BufWriter::new(file);
 
-    // Create a blocking writer wrapper for the async writer
     let mut buffer = Vec::new();
     report.write_html(&mut buffer)?;
 

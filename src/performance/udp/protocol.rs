@@ -50,6 +50,10 @@ const KIND_FIN: u8 = 3;
 const KIND_REPORT: u8 = 4;
 const KIND_PING: u8 = 5;
 const KIND_PONG: u8 = 6;
+const KIND_HELLO: u8 = 7;
+const KIND_HELLO_ACK: u8 = 8;
+
+const HELLO_BLOB_MAX: u16 = 4096;
 
 /// One blaster control or data packet.
 #[derive(Debug, Clone)]
@@ -95,6 +99,22 @@ pub enum BlasterPacket {
     /// Latency response. `send_ts_us` echoes the corresponding Ping.
     Pong {
         send_ts_us: u64,
+    },
+    /// Client → Server: identity handshake. `identity_cbor` is a
+    /// CBOR-encoded `PeerIdentity` (kept opaque at the protocol layer
+    /// so this module doesn't depend on the report types).
+    Hello {
+        identity_cbor: Vec<u8>,
+        t_send_us: u64,
+    },
+    /// Server → Client: response to `Hello`, plus server's view of the
+    /// observed client address (CBOR-encoded `SocketAddr`) and the
+    /// server's epoch in microseconds (so periodic-stats series — when
+    /// they ship — line up with client-side time offsets).
+    HelloAck {
+        identity_cbor: Vec<u8>,
+        observed_client_addr_cbor: Vec<u8>,
+        server_epoch_us: u64,
     },
 }
 
@@ -159,6 +179,34 @@ impl BlasterPacket {
                 out.put_u8(0);
                 out.put_u16(0);
                 out.put_u64(*send_ts_us);
+            }
+            BlasterPacket::Hello {
+                identity_cbor,
+                t_send_us,
+            } => {
+                out.put_u8(KIND_HELLO);
+                out.put_u8(0);
+                out.put_u16(0);
+                out.put_u64(*t_send_us);
+                let len = identity_cbor.len().min(HELLO_BLOB_MAX as usize);
+                out.put_u16(len as u16);
+                out.put_slice(&identity_cbor[..len]);
+            }
+            BlasterPacket::HelloAck {
+                identity_cbor,
+                observed_client_addr_cbor,
+                server_epoch_us,
+            } => {
+                out.put_u8(KIND_HELLO_ACK);
+                out.put_u8(0);
+                out.put_u16(0);
+                out.put_u64(*server_epoch_us);
+                let id_len = identity_cbor.len().min(HELLO_BLOB_MAX as usize);
+                out.put_u16(id_len as u16);
+                out.put_slice(&identity_cbor[..id_len]);
+                let addr_len = observed_client_addr_cbor.len().min(HELLO_BLOB_MAX as usize);
+                out.put_u16(addr_len as u16);
+                out.put_slice(&observed_client_addr_cbor[..addr_len]);
             }
         }
         out.freeze()
@@ -254,6 +302,55 @@ impl BlasterPacket {
                 let _ = buf.get_u16();
                 let send_ts_us = buf.get_u64();
                 Some((BlasterPacket::Pong { send_ts_us }, 0))
+            }
+            KIND_HELLO => {
+                if buf.remaining() < 1 + 2 + 8 + 2 {
+                    return None;
+                }
+                let _ = buf.get_u8();
+                let _ = buf.get_u16();
+                let t_send_us = buf.get_u64();
+                let id_len = buf.get_u16() as usize;
+                if buf.remaining() < id_len {
+                    return None;
+                }
+                let mut identity_cbor = vec![0u8; id_len];
+                buf.copy_to_slice(&mut identity_cbor);
+                Some((
+                    BlasterPacket::Hello {
+                        identity_cbor,
+                        t_send_us,
+                    },
+                    0,
+                ))
+            }
+            KIND_HELLO_ACK => {
+                if buf.remaining() < 1 + 2 + 8 + 2 {
+                    return None;
+                }
+                let _ = buf.get_u8();
+                let _ = buf.get_u16();
+                let server_epoch_us = buf.get_u64();
+                let id_len = buf.get_u16() as usize;
+                if buf.remaining() < id_len + 2 {
+                    return None;
+                }
+                let mut identity_cbor = vec![0u8; id_len];
+                buf.copy_to_slice(&mut identity_cbor);
+                let addr_len = buf.get_u16() as usize;
+                if buf.remaining() < addr_len {
+                    return None;
+                }
+                let mut observed_client_addr_cbor = vec![0u8; addr_len];
+                buf.copy_to_slice(&mut observed_client_addr_cbor);
+                Some((
+                    BlasterPacket::HelloAck {
+                        identity_cbor,
+                        observed_client_addr_cbor,
+                        server_epoch_us,
+                    },
+                    0,
+                ))
             }
             _ => None,
         }

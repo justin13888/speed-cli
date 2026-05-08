@@ -7,35 +7,31 @@ use crate::utils::env::Environment;
 
 mod config;
 mod errors;
+mod identity;
 mod measurement;
 mod result;
 mod suite;
 
 pub use config::*;
 pub use errors::*;
+pub use identity::*;
 pub use measurement::*;
 pub use result::*;
 pub use suite::*;
 
-/// Current report schema version. Bump when an incompatible structural
-/// change lands (renaming a field, removing a variant, changing
-/// semantics). Additive changes - new optional fields tagged with
-/// `#[serde(default)]` - do *not* require a bump.
-pub const REPORT_SCHEMA_VERSION: u32 = 2;
-
-fn default_schema_version() -> u32 {
-    // Reports written before schema versioning was introduced are treated
-    // as schema 0; newer code should still be able to load them through
-    // the `#[serde(default)]` fallbacks on optional fields.
-    0
-}
+/// Current report schema version. Bump when any structural change
+/// lands. With CBOR-only export and no backwards-compatibility, an
+/// import whose `schema_version` does not match this constant is
+/// rejected at import time.
+///
+/// All `*_us` fields in the schema are `u64` microseconds offset from
+/// `TestReport.start_time` unless documented otherwise.
+pub const REPORT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestReport {
     /// Schema version. Distinct from `version` (the binary that wrote the
-    /// report). Old reports without this field deserialize as 0 and the
-    /// optional fields fall back to their defaults.
-    #[serde(default = "default_schema_version")]
+    /// report). Imports verify this equals `REPORT_SCHEMA_VERSION`.
     pub schema_version: u32,
     /// Start time
     pub start_time: DateTime<Utc>,
@@ -47,10 +43,13 @@ pub struct TestReport {
     pub timestamp: DateTime<Utc>,
     /// Version of speed-cli that generated this report
     pub version: String,
-    /// Snapshot of the local environment when the test ran. `None` on
-    /// reports written before schema 2.
-    #[serde(default)]
-    pub environment: Option<Environment>,
+    /// Snapshot of the local environment when the test ran.
+    pub environment: Environment,
+    /// Identity and addresses of the two endpoints. The client side is
+    /// always populated from local socket info; the server side is
+    /// populated only when the protocol-level handshake succeeds (TCP
+    /// `'H'` command, HTTP identity headers, UDP `Hello` packet).
+    pub peers: Peers,
 }
 
 impl TestReport {
@@ -67,7 +66,8 @@ impl TestReport {
             result,
             timestamp,
             version: env!("CARGO_PKG_VERSION").to_string(),
-            environment: Some(Environment::capture()),
+            environment: Environment::capture(),
+            peers: Peers::local_only(),
         }
     }
 }
@@ -86,7 +86,8 @@ where
             result: result.into(),
             timestamp: timestamp.into(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            environment: Some(Environment::capture()),
+            environment: Environment::capture(),
+            peers: Peers::local_only(),
         }
     }
 }
@@ -135,11 +136,13 @@ impl Display for TestReport {
         )?;
         writeln!(f)?;
 
-        if let Some(env) = &self.environment {
-            writeln!(f, "{}", "Environment:".bright_white().bold().underline())?;
-            write!(f, "{env}")?;
-            writeln!(f)?;
-        }
+        writeln!(f, "{}", "Environment:".bright_white().bold().underline())?;
+        write!(f, "{}", self.environment)?;
+        writeln!(f)?;
+
+        writeln!(f, "{}", "Peers:".bright_white().bold().underline())?;
+        write!(f, "{}", self.peers)?;
+        writeln!(f)?;
 
         writeln!(f, "{}", "Configuration:".bright_white().bold().underline())?;
         write!(f, "{}", self.config)?;

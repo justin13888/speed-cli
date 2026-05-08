@@ -13,7 +13,7 @@ It's difficult to have one tool that tests your network conditions between two d
 - **Multi-protocol support**: TCP, UDP, HTTP/1.1, HTTP/2, HTTP/3
 - **High-performance**: Built with Rust, optimized for high throughput and efficient resource usage
 - **Comprehensive metrics**: Throughput, latency, jitter, packet loss, DNS performance
-- **Exporting**: Results in JSON, CBOR and HTML formats
+- **Exporting**: CBOR for re-importable data; HTML for self-contained rendered reports
 - **Cross-platform**: Optimized for popular platforms (Linux, macOS, Windows) and architectures (x86_64, ARM)
 
 ## Installation
@@ -57,14 +57,14 @@ speed-cli client --http3 -s <server-ip> # HTTP/3 test
 # Run HTTP client test against specific server for 60 seconds
 speed-cli client --http -p 8080 -h 192.168.1.100 -d 60
 
-# Run HTTP client test with 8 concurrent connections, and export results to JSON
-speed-cli client --http -p 8080 -h 192.168.1.100 -c 4 -e results.json
+# Run HTTP client test with 8 concurrent connections, and export results to CBOR
+speed-cli client --http -p 8080 -h 192.168.1.100 -c 4 -e results.cbor
 
 # Run TCP client test against specific server
 speed-cli client --tcp -p 5201 -h 192.168.1.100
 
 # Print previously saved result
-speed-cli report -f results.json
+speed-cli report -f results.cbor
 ```
 
 For more advanced usage, refer to help:
@@ -77,21 +77,22 @@ speed-cli server -h
 
 ### Exporting Results
 
-Add a `-e` or `--export` flag to `client` commands to save results:
+Add a `-e` or `--export` flag to `client` commands to save results.
+The data format is CBOR — there is no JSON export. HTML is available
+as a rendered single-file report for visual inspection.
 
 ```bash
-# Export to JSON
-speed-cli client --<mode> -s <server-ip> -e results.json
-
-# Export to CBOR
+# Export raw data (re-importable)
 speed-cli client --<mode> -s <server-ip> -e results.cbor
 
-# Export to HTML
+# Export rendered HTML report
 speed-cli client --<mode> -s <server-ip> -e results.html
 
-# If unknown extension, it assumes JSON
-speed-cli client --<mode> -s <server-ip> -e results.test
+# No extension implies CBOR
+speed-cli client --<mode> -s <server-ip> -e results
 ```
+
+Other extensions (`.json`, `.txt`, …) are rejected with a clear error.
 
 ## Developer Notes
 
@@ -113,7 +114,6 @@ The UDP test uses a small, iperf3-u-style "blaster" protocol: a fixed-rate sende
 
 *There are several features/improvements that are planned.*
 
-- [ ] Updated `--json` output format
 - [ ] OCI Container images using all popular base images (necessary for representative performance testing)
 - [ ] Kubernetes support (for server)
 - [ ] QUIC support (HTTP/3)

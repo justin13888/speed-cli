@@ -28,8 +28,8 @@ use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
 use crate::{
     TestType,
     report::{
-        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, StreamMeasurements,
-        TestReport, ThroughputMeasurement, ThroughputResult, UdpRunStats, UdpStatsSide,
+        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
+        Sample, StreamSamples, TestReport, ThroughputResult, UdpRunStats, UdpStatsSide,
         UdpTestConfig,
     },
     utils::{
@@ -40,10 +40,16 @@ use crate::{
     },
 };
 
-fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Duration {
+fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
     end.duration_since(start)
         .saturating_sub(warmup)
         .max(Duration::from_millis(1))
+        .as_micros() as u64
+}
+
+#[inline]
+fn offset_us(start: Instant, now: Instant) -> u64 {
+    now.duration_since(start).as_micros() as u64
 }
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
@@ -63,10 +69,15 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
         );
     }
 
-    // Pre-flight: PING/PONG with a 1s timeout.
-    {
+    // Pre-flight: PING/PONG with a 1s timeout. Capture the socket's
+    // local and remote addresses for the report's peers section, then
+    // run the identity handshake on the same socket so the report can
+    // record the peer's view of us.
+    let (preflight_local, preflight_peer, server_hello) = {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         socket.connect(&server_addr).await?;
+        let local_addr = socket.local_addr().ok();
+        let peer_addr = socket.peer_addr().ok();
         let p = BlasterPacket::Ping {
             send_ts_us: now_us(),
         };
@@ -88,7 +99,13 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                 ));
             }
         }
-    }
+
+        // Identity handshake. Best-effort: any failure leaves the
+        // server side of `peers` empty, but the test still runs.
+        let server_hello = run_udp_hello(&socket).await;
+
+        (local_addr, peer_addr, server_hello)
+    };
 
     let start_time = Utc::now();
     let mut result = NetworkTestResult::new_udp().with_accounting(config.accounting);
@@ -141,7 +158,49 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
         }
     }
 
-    Ok((start_time, config, result).into())
+    let mut report: TestReport = (start_time, config, result).into();
+    report.peers.client.local_addr = preflight_local;
+    report.peers.client.remote_addr = preflight_peer;
+    if let Some(h) = server_hello {
+        report.peers.server.identity = Some(h.0);
+        report.peers.server.observed_client_addr = Some(h.1);
+    }
+    Ok(report)
+}
+
+/// Send a `Hello` and await `HelloAck` on the given (already-connected)
+/// UDP socket. Returns `(server_identity, observed_client_addr)` on
+/// success, or `None` if the server didn't reply with a parseable
+/// `HelloAck` within a short window.
+async fn run_udp_hello(
+    socket: &UdpSocket,
+) -> Option<(PeerIdentity, std::net::SocketAddr)> {
+    let mut id_buf = Vec::new();
+    ciborium::into_writer(&PeerIdentity::local(), &mut id_buf).ok()?;
+    let hello = BlasterPacket::Hello {
+        identity_cbor: id_buf,
+        t_send_us: now_us(),
+    };
+    socket.send(&hello.encode_to_vec(None)).await.ok()?;
+
+    let mut buf = vec![0u8; 8192];
+    let n = match timeout(Duration::from_millis(500), socket.recv(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        _ => return None,
+    };
+    let (decoded, _) = BlasterPacket::decode(&buf[..n])?;
+    let BlasterPacket::HelloAck {
+        identity_cbor,
+        observed_client_addr_cbor,
+        ..
+    } = decoded
+    else {
+        return None;
+    };
+    let identity: PeerIdentity = ciborium::from_reader(identity_cbor.as_slice()).ok()?;
+    let addr: std::net::SocketAddr =
+        ciborium::from_reader(observed_client_addr_cbor.as_slice()).ok()?;
+    Some((identity, addr))
 }
 
 async fn run_latency(
@@ -163,6 +222,7 @@ async fn run_latency(
     while start.elapsed() < duration {
         let in_warmup = start.elapsed() < warmup;
         let probe_start = Instant::now();
+        let t_start_us = offset_us(start, probe_start);
 
         let p = BlasterPacket::Ping {
             send_ts_us: now_us(),
@@ -170,26 +230,17 @@ async fn run_latency(
         let m = match socket.send(&p.encode_to_vec(None)).await {
             Ok(_) => match timeout(Duration::from_secs(1), socket.recv(&mut buf)).await {
                 Ok(Ok(n)) => match BlasterPacket::decode(&buf[..n]) {
-                    Some((BlasterPacket::Pong { .. }, _)) => LatencyMeasurement {
-                        rtt_ms: Some(probe_start.elapsed().as_secs_f64() * 1000.0),
-                        elapsed_time: start.elapsed(),
-                    },
-                    _ => LatencyMeasurement {
-                        rtt_ms: None,
-                        elapsed_time: start.elapsed(),
-                    },
+                    Some((BlasterPacket::Pong { .. }, _)) => LatencyMeasurement::success(
+                        t_start_us,
+                        probe_start.elapsed().as_micros() as u64,
+                    ),
+                    _ => LatencyMeasurement::dropped(t_start_us),
                 },
-                _ => LatencyMeasurement {
-                    rtt_ms: None,
-                    elapsed_time: start.elapsed(),
-                },
+                _ => LatencyMeasurement::dropped(t_start_us),
             },
             Err(e) => {
                 trace!("UDP send error: {e}");
-                LatencyMeasurement {
-                    rtt_ms: None,
-                    elapsed_time: start.elapsed(),
-                }
+                LatencyMeasurement::dropped(t_start_us)
             }
         };
 
@@ -271,12 +322,13 @@ async fn run_download(
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
     let mut buf = vec![0u8; payload_size + 64];
-    let mut measurements = Vec::new();
+    let mut samples: Vec<Sample> = Vec::new();
     let mut rx_stats = ReceiveStats::default();
 
     while start_time.elapsed() < duration {
-        let in_warmup = start_time.elapsed() < warmup;
+        let is_warmup = start_time.elapsed() < warmup;
         let recv_start = Instant::now();
+        let t_start_us = offset_us(start_time, recv_start);
         match timeout(Duration::from_millis(200), socket.recv(&mut buf)).await {
             Ok(Ok(n)) => {
                 let recv_ts = now_us();
@@ -284,32 +336,29 @@ async fn run_download(
                     BlasterPacket::decode(&buf[..n])
                 {
                     rx_stats.record(seq, payload_len as u64, send_ts_us, recv_ts);
-                    let m = ThroughputMeasurement::new(payload_len as u64, recv_start.elapsed());
-                    if !in_warmup {
-                        measurements.push(m.clone());
-                        let _ = tx.send(m);
-                    }
+                    let duration_us = recv_start.elapsed().as_micros() as u64;
+                    let s = Sample::success(t_start_us, duration_us, payload_len as u64, is_warmup);
+                    samples.push(s.clone());
+                    let _ = tx.send(s);
                 }
             }
             Ok(Err(e)) => {
-                let m = ThroughputMeasurement::new_error(
+                let duration_us = recv_start.elapsed().as_micros() as u64;
+                let s = Sample::failure(
+                    t_start_us,
+                    duration_us,
                     ConnectionError::Unknown(format!("UDP recv error: {e}")),
-                    recv_start.elapsed(),
                     0,
+                    is_warmup,
                 );
-                if !in_warmup {
-                    measurements.push(m.clone());
-                    let _ = tx.send(m);
-                }
+                samples.push(s.clone());
+                let _ = tx.send(s);
                 break;
             }
             Err(_) => continue,
         }
     }
 
-    // Send FIN even though server-side stats aren't authoritative for
-    // download (we measured locally); it lets the server reap the
-    // session promptly.
     let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
 
     drop(tx);
@@ -326,9 +375,11 @@ async fn run_download(
         rx_stats.jitter_us()
     );
 
-    let streams = vec![StreamMeasurements {
+    let start_offset_us = samples.first().map(|s| s.t_start_us).unwrap_or(0);
+    let streams = vec![StreamSamples {
         stream_id: 0,
-        measurements: measurements.clone(),
+        start_offset_us,
+        samples,
     }];
     let udp_stats = Some(UdpRunStats {
         observed_by: UdpStatsSide::Local,
@@ -340,11 +391,12 @@ async fn run_download(
         jitter_us: rx_stats.jitter_us(),
     });
     Ok(ThroughputResult {
-        measurements,
         streams,
-        total_duration: measurement_duration(start_time, end_time, warmup),
+        total_duration_us: measurement_duration_us(start_time, end_time, warmup),
         timestamp: Utc::now(),
         udp_stats,
+        udp_series: Vec::new(),
+        udp_series_window_us: 0,
     })
 }
 
@@ -379,7 +431,6 @@ async fn run_upload(
     )
     .await?;
 
-    // Random payload, sent on every DATA packet.
     let mut payload = vec![0u8; payload_size];
     rand::rng().fill_bytes(&mut payload);
 
@@ -393,12 +444,13 @@ async fn run_upload(
     let start_time = Instant::now();
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
-    let mut measurements = Vec::new();
+    let mut samples: Vec<Sample> = Vec::new();
     let mut seq: u64 = 1;
 
     while start_time.elapsed() < duration {
-        let in_warmup = start_time.elapsed() < warmup;
+        let is_warmup = start_time.elapsed() < warmup;
         let send_start = Instant::now();
+        let t_start_us = offset_us(start_time, send_start);
         let p = BlasterPacket::Data {
             seq,
             send_ts_us: now_us(),
@@ -406,11 +458,10 @@ async fn run_upload(
         let bytes = p.encode_to_vec(Some(&payload));
         match socket.send(&bytes).await {
             Ok(_) => {
-                let m = ThroughputMeasurement::new(payload_size as u64, send_start.elapsed());
-                if !in_warmup {
-                    measurements.push(m.clone());
-                    let _ = tx.send(m);
-                }
+                let duration_us = send_start.elapsed().as_micros() as u64;
+                let s = Sample::success(t_start_us, duration_us, payload_size as u64, is_warmup);
+                samples.push(s.clone());
+                let _ = tx.send(s);
                 seq += 1;
             }
             Err(e) => {
@@ -419,26 +470,24 @@ async fn run_upload(
                 // "back off, try again", not "test is over". We record the
                 // failed attempt for accounting and yield so the kernel can
                 // drain. Any other errno (host unreachable, etc.) we record
-                // and keep going too - the symmetric loop on the server side
-                // will simply observe loss.
+                // and keep going too.
                 let kind = e.kind();
-                let m = ThroughputMeasurement::new_error(
+                let duration_us = send_start.elapsed().as_micros() as u64;
+                let s = Sample::failure(
+                    t_start_us,
+                    duration_us,
                     ConnectionError::TransferFailed(format!("UDP send error: {e}")),
-                    send_start.elapsed(),
                     0,
+                    is_warmup,
                 );
-                if !in_warmup {
-                    measurements.push(m.clone());
-                    let _ = tx.send(m);
-                }
+                samples.push(s.clone());
+                let _ = tx.send(s);
                 if matches!(
                     kind,
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
                 ) {
                     tokio::task::yield_now().await;
                 } else {
-                    // For non-transient errors, brief sleep to avoid a
-                    // tight error loop while still keeping the test alive.
                     sleep(Duration::from_millis(1)).await;
                 }
                 // Note: we deliberately do *not* increment `seq` here -
@@ -454,10 +503,7 @@ async fn run_upload(
         }
     }
 
-    // FIN + REPORT collection. Try a few times in case the FIN is
-    // dropped on the way to the server. The client measurements above
-    // are local "sent" counts; the report tells us how many actually
-    // arrived.
+    // FIN + REPORT collection.
     let mut report: Option<BlasterPacket> = None;
     for _ in 0..5 {
         let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
@@ -505,16 +551,19 @@ async fn run_upload(
         .await;
 
     let end_time = Instant::now();
-    let streams = vec![StreamMeasurements {
+    let start_offset_us = samples.first().map(|s| s.t_start_us).unwrap_or(0);
+    let streams = vec![StreamSamples {
         stream_id: 0,
-        measurements: measurements.clone(),
+        start_offset_us,
+        samples,
     }];
     Ok(ThroughputResult {
-        measurements,
         streams,
-        total_duration: measurement_duration(start_time, end_time, warmup),
+        total_duration_us: measurement_duration_us(start_time, end_time, warmup),
         timestamp: Utc::now(),
         udp_stats,
+        udp_series: Vec::new(),
+        udp_series_window_us: 0,
     })
 }
 

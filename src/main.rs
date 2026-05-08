@@ -25,7 +25,7 @@ use crate::performance::udp::server::run_udp_server;
 use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
 use crate::utils::export::{export_report, export_report_html};
 use crate::utils::file::can_write;
-use crate::utils::import::{import_report_cbor, import_report_json};
+use crate::utils::import::import_report_cbor;
 use crate::utils::progress::with_progress_counter;
 
 mod cli;
@@ -88,7 +88,6 @@ async fn main() -> Result<()> {
             chunk_size,
             accounting,
             target_rate_mbps,
-            json,
         } => {
             let warmup = std::time::Duration::from_secs(warmup);
             let accounting = match accounting {
@@ -194,15 +193,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            if json {
-                // Stdout becomes machine-readable; informational lines
-                // go to stderr so a `| jq` pipeline still works.
-                eprintln!("{}", "Client test completed.".green().bold());
-                println!("{}", serde_json::to_string(&report)?);
-            } else {
-                println!("{}", "Client test completed.".green().bold());
-                println!("{report:#}");
-            }
+            println!("{}", "Client test completed.".green().bold());
+            println!("{report:#}");
 
             // If export file is specified, write results
             if let Some(export) = &export {
@@ -413,93 +405,48 @@ async fn main() -> Result<()> {
             if !file.is_file() {
                 return Err(eyre::eyre!("Report path is not a file: {}", file.display()));
             }
-            if let Some(ext) = file.extension() {
-                match ext.to_string_lossy().as_ref() {
-                    "json" => {
-                        let report = with_progress_counter(
-                            "Loading report from JSON file",
-                            import_report_json(&file),
-                        )
-                        .await?;
-
-                        match export_html {
-                            None => {
-                                // Print report in stdout
-                                println!("{report:#}");
-                            }
-                            Some(html_file) => {
-                                // Export to HTML
-                                match with_progress_counter(
-                                    "Exporting report to HTML",
-                                    export_report_html(&report, &html_file),
-                                )
-                                .await
-                                {
-                                    Ok(_) => println!(
-                                        "{}",
-                                        format!("HTML report exported to {}", html_file.display())
-                                            .cyan()
-                                    ),
-                                    Err(e) => eprintln!("Error exporting to HTML: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    "cbor" => {
-                        let report = with_progress_counter(
-                            "Loading report from CBOR file",
-                            import_report_cbor(&file),
-                        )
-                        .await?;
-
-                        match export_html {
-                            None => {
-                                // Print report in stdout
-                                println!("{report:#}");
-                            }
-                            Some(html_file) => {
-                                // Export to HTML
-                                match with_progress_counter(
-                                    "Exporting report to HTML",
-                                    export_report_html(&report, &html_file),
-                                )
-                                .await
-                                {
-                                    Ok(_) => println!(
-                                        "{}",
-                                        format!("HTML report exported to {}", html_file.display())
-                                            .cyan()
-                                    ),
-                                    Err(e) => eprintln!("Error exporting to HTML: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    "html" => {
-                        return Err(eyre::eyre!(
-                            "HTML report format should be opened via a web browser: {}",
-                            file.display()
-                        ));
-                    }
-                    _ => match with_progress_counter(
-                        "Loading report from file (assuming JSON format)",
-                        import_report_json(&file),
-                    )
-                    .await
-                    {
-                        Ok(report) => {
-                            println!("{report:#}");
-                        }
-                        Err(e) => {
-                            eprintln!("Error parsing report (assumed to be JSON): {e}");
-                        }
-                    },
+            let ext = file
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            match ext.as_deref() {
+                Some("html") => {
+                    return Err(eyre::eyre!(
+                        "HTML reports are for browsers, not re-import: {}",
+                        file.display()
+                    ));
                 }
-            } else {
-                return Err(eyre::eyre!(
-                    "Report file must have an extension: {}",
-                    file.display()
-                ));
+                Some("cbor") | None => {
+                    let report = with_progress_counter(
+                        "Loading report from CBOR file",
+                        import_report_cbor(&file),
+                    )
+                    .await?;
+                    match export_html {
+                        None => println!("{report:#}"),
+                        Some(html_file) => {
+                            match with_progress_counter(
+                                "Exporting report to HTML",
+                                export_report_html(&report, &html_file),
+                            )
+                            .await
+                            {
+                                Ok(_) => println!(
+                                    "{}",
+                                    format!("HTML report exported to {}", html_file.display())
+                                        .cyan()
+                                ),
+                                Err(e) => eprintln!("Error exporting to HTML: {e}"),
+                            }
+                        }
+                    }
+                }
+                Some(other) => {
+                    return Err(eyre::eyre!(
+                        "Unsupported report extension `.{other}`: only `.cbor` is accepted ({})",
+                        file.display()
+                    ));
+                }
             }
         }
 
@@ -515,7 +462,6 @@ async fn main() -> Result<()> {
             no_tls,
             accounting,
             export,
-            json,
         } => {
             let cfg = SuiteConfig {
                 server,
@@ -550,45 +496,14 @@ async fn main() -> Result<()> {
 
             let suite = run_suite(cfg).await?;
 
-            if json {
-                eprintln!("{}", "Suite completed.".green().bold());
-                println!("{}", serde_json::to_string(&suite)?);
-            } else {
-                println!("{}", "Suite completed.".green().bold());
-                println!("{suite}");
-            }
+            println!("{}", "Suite completed.".green().bold());
+            println!("{suite}");
 
             if let Some(export) = &export {
-                // Per-measurement vectors balloon at multi-Gbps speeds
-                // (hundreds of thousands of entries) and produce
-                // 100+ MB JSON files. Decimate before writing so the
-                // exported report is usable without losing the shape
-                // of the percentile distribution.
-                let mut suite_for_export = suite.clone();
-                for nr in &mut suite_for_export.reports {
-                    use crate::report::TestResult;
-                    match &mut nr.report.result {
-                        TestResult::Simple(t) => t.downsample_for_export(5_000),
-                        TestResult::Network(net) => {
-                            for v in net.download.values_mut() {
-                                v.downsample_for_export(5_000);
-                            }
-                            for v in net.upload.values_mut() {
-                                v.downsample_for_export(5_000);
-                            }
-                        }
-                    }
-                }
-                let bytes = match export.extension().and_then(|s| s.to_str()) {
-                    Some("cbor") => {
-                        let mut buf = Vec::new();
-                        ciborium::into_writer(&suite_for_export, &mut buf)
-                            .map_err(|e| eyre::eyre!("CBOR encode: {e}"))?;
-                        buf
-                    }
-                    _ => serde_json::to_vec_pretty(&suite_for_export)?,
-                };
-                tokio::fs::write(export, &bytes).await?;
+                let mut buf = Vec::new();
+                ciborium::into_writer(&suite, &mut buf)
+                    .map_err(|e| eyre::eyre!("CBOR encode: {e}"))?;
+                tokio::fs::write(export, &buf).await?;
                 eprintln!(
                     "{}",
                     format!("Suite report exported to {}", export.display()).cyan()

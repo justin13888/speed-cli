@@ -17,9 +17,10 @@ use tracing::trace;
 use crate::{
     TestType,
     performance::http::HttpVersion,
+    performance::http::server::decode_base64_urlsafe,
     report::{
         ConnectionError, HttpTestConfig, LatencyMeasurement, LatencyResult, NetworkTestResult,
-        StreamMeasurements, TestReport, ThroughputMeasurement, ThroughputResult,
+        PeerIdentity, Sample, StreamSamples, TestReport, ThroughputResult,
     },
     utils::{
         format::format_bytes,
@@ -29,37 +30,51 @@ use crate::{
     },
 };
 
-fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Duration {
+const SERVER_ID_HEADER: &str = "x-speed-cli-server-id";
+
+fn parse_server_identity(resp: &reqwest::Response) -> Option<PeerIdentity> {
+    let value = resp.headers().get(SERVER_ID_HEADER)?.to_str().ok()?;
+    let bytes = decode_base64_urlsafe(value)?;
+    ciborium::from_reader::<PeerIdentity, _>(bytes.as_slice()).ok()
+}
+
+fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
     end.duration_since(start)
         .saturating_sub(warmup)
         .max(Duration::from_millis(1))
+        .as_micros() as u64
+}
+
+#[inline]
+fn offset_us(start: Instant, now: Instant) -> u64 {
+    now.duration_since(start).as_micros() as u64
 }
 
 fn collect_streams(
-    results: Vec<Result<Vec<ThroughputMeasurement>, tokio::task::JoinError>>,
+    results: Vec<Result<Vec<Sample>, tokio::task::JoinError>>,
     direction: &'static str,
-) -> (Vec<StreamMeasurements>, Vec<ThroughputMeasurement>) {
+) -> Vec<StreamSamples> {
     let mut streams = Vec::with_capacity(results.len());
-    let mut flat = Vec::new();
     for (idx, result) in results.into_iter().enumerate() {
         match result {
-            Ok(task_measurements) => {
-                flat.extend(task_measurements.iter().cloned());
-                streams.push(StreamMeasurements {
-                    stream_id: idx,
-                    measurements: task_measurements,
+            Ok(task_samples) => {
+                streams.push(StreamSamples {
+                    stream_id: idx as u32,
+                    start_offset_us: task_samples.first().map(|s| s.t_start_us).unwrap_or(0),
+                    samples: task_samples,
                 });
             }
             Err(e) => {
                 tracing::error!("HTTP {direction} task {idx} panicked or was cancelled: {e}");
-                streams.push(StreamMeasurements {
-                    stream_id: idx,
-                    measurements: Vec::new(),
+                streams.push(StreamSamples {
+                    stream_id: idx as u32,
+                    start_offset_us: 0,
+                    samples: Vec::new(),
                 });
             }
         }
     }
-    (streams, flat)
+    streams
 }
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
@@ -88,38 +103,38 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     let mut result = NetworkTestResult::new_http().with_accounting(config.accounting);
 
-    // Create HTTP client based on version preference
     let client = create_http_client(&config.http_version).await?;
 
-    // Pre-flight: quickly fail with a useful error if the server isn't
-    // there or doesn't speak the expected protocol, instead of letting the
-    // user wait the full test duration before discovering the problem.
     let info_url = format!("{}/info", config.server_url);
-    match tokio::time::timeout(Duration::from_secs(5), client.get(&info_url).send()).await {
-        Ok(Ok(resp)) if resp.status().is_success() => {
-            tracing::debug!("Server pre-flight check passed: {}", info_url);
-        }
-        Ok(Ok(resp)) => {
-            return Err(eyre::eyre!(
-                "Server pre-flight check returned status {} for {}",
-                resp.status(),
-                info_url
-            ));
-        }
-        Ok(Err(e)) => {
-            return Err(eyre::eyre!(
-                "Server pre-flight check failed for {}: {}",
-                info_url,
-                e
-            ));
-        }
-        Err(_) => {
-            return Err(eyre::eyre!(
-                "Server pre-flight check timed out after 5s ({})",
-                info_url
-            ));
-        }
-    }
+    let mut server_identity: Option<PeerIdentity> = None;
+    let preflight_remote =
+        match tokio::time::timeout(Duration::from_secs(5), client.get(&info_url).send()).await {
+            Ok(Ok(resp)) if resp.status().is_success() => {
+                tracing::debug!("Server pre-flight check passed: {}", info_url);
+                server_identity = parse_server_identity(&resp);
+                resp.remote_addr()
+            }
+            Ok(Ok(resp)) => {
+                return Err(eyre::eyre!(
+                    "Server pre-flight check returned status {} for {}",
+                    resp.status(),
+                    info_url
+                ));
+            }
+            Ok(Err(e)) => {
+                return Err(eyre::eyre!(
+                    "Server pre-flight check failed for {}: {}",
+                    info_url,
+                    e
+                ));
+            }
+            Err(_) => {
+                return Err(eyre::eyre!(
+                    "Server pre-flight check timed out after 5s ({})",
+                    info_url
+                ));
+            }
+        };
 
     match config.test_type {
         TestType::LatencyOnly => {
@@ -166,7 +181,6 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
             }
         }
         TestType::Bidirectional => {
-            // Run download and upload sequentially
             for payload_size in &config.payload_sizes {
                 result.download.insert(
                     *payload_size,
@@ -197,7 +211,6 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
             }
         }
         TestType::Simultaneous => {
-            // Run download and upload concurrently
             for payload_size in &config.payload_sizes {
                 let (download_result, upload_result) = tokio::join!(
                     run_download_test(
@@ -232,11 +245,15 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
         }
     }
 
-    Ok((start_time, config, result).into())
+    let mut report: TestReport = (start_time, config, result).into();
+    // Reqwest doesn't expose the underlying socket's local_addr; we
+    // record the server-side address only.
+    report.peers.client.remote_addr = preflight_remote;
+    report.peers.server.identity = server_identity;
+    Ok(report)
 }
 
 async fn create_http_client(version: &HttpVersion) -> Result<Client> {
-    // Ensure crypto provider is initialized before creating TLS client
     ensure_crypto_provider();
 
     let mut builder = ClientBuilder::new()
@@ -247,11 +264,6 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         .tcp_keepalive(Duration::from_secs(60))
         .tcp_nodelay(true)
         .use_rustls_tls()
-        // Cert validation is intentionally disabled. speed-cli runs against
-        // ephemeral test servers (often the self-signed pair from gen-cert.sh),
-        // so requiring real PKI would force every user to manage a CA bundle
-        // for no measurement benefit. Reported HTTPS results therefore do not
-        // include cert-validation overhead.
         .danger_accept_invalid_certs(true);
 
     match version {
@@ -261,19 +273,17 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         HttpVersion::HTTP2 | HttpVersion::H2C => {
             builder = builder
                 .http2_prior_knowledge()
-                .http2_max_frame_size(Some(65536)) // 64KB (max allowed)
-                .http2_adaptive_window(true); // Enable adaptive flow control
+                .http2_max_frame_size(Some(65536))
+                .http2_adaptive_window(true);
         }
         HttpVersion::HTTP3 => {
             builder = builder.http3_prior_knowledge();
-            // .http3_congestion_bbr();
         }
     }
 
     builder.build().context("Failed to create HTTP client")
 }
 
-/// Measure HTTP latency by simply sending HEAD requests to the server
 async fn measure_http_latency(
     client: &Client,
     server_url: &str,
@@ -285,50 +295,38 @@ async fn measure_http_latency(
 
     eprintln!("Measuring HTTP latency for {duration:?}...");
 
-    // Create progress bar for latency measurement
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
     let start = Instant::now();
-
-    // Set up instrumentation
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
 
     while start.elapsed() < duration {
         let request_start = Instant::now();
+        let t_start_us = offset_us(start, request_start);
         let in_warmup = start.elapsed() < warmup;
         match client.head(&url).send().await {
             Ok(_response) => {
-                let rtt = request_start.elapsed().as_secs_f64() * 1000.0;
-                let measurement = LatencyMeasurement {
-                    rtt_ms: Some(rtt),
-                    elapsed_time: start.elapsed(),
-                };
+                let rtt_us = request_start.elapsed().as_micros() as u64;
+                let measurement = LatencyMeasurement::success(t_start_us, rtt_us);
                 if !in_warmup {
                     measurements.push(measurement.clone());
                     let _ = tx.send(measurement);
                 }
             }
             Err(e) => {
-                let measurement = LatencyMeasurement {
-                    rtt_ms: None,
-                    elapsed_time: start.elapsed(),
-                };
+                let measurement = LatencyMeasurement::dropped(t_start_us);
                 if !in_warmup {
                     measurements.push(measurement.clone());
                     let _ = tx.send(measurement);
                 }
-
                 trace!("HTTP request error while measuring latency: {e}");
             }
         }
 
-        // Wait between requests to avoid overwhelming the server
         sleep(Duration::from_millis(100)).await;
     }
 
-    // Drop the sender to signal stats collector to finish
     drop(tx);
 
-    // Wait for stats collector to complete and get measurements
     measurements = stats_collector
         .finish(progress_bar, "Latency measurement complete".to_string())
         .await;
@@ -358,12 +356,8 @@ async fn run_download_test(
         parallel_connections.to_string().yellow()
     );
 
-    // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Download, duration);
-
     let start_time = Instant::now();
-
-    // Set up instrumentation
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
 
@@ -375,59 +369,56 @@ async fn run_download_test(
         let server_url = server_url.to_string();
 
         let task = tokio::spawn(async move {
-            let mut local_measurements = Vec::new();
+            let mut local_samples: Vec<Sample> = Vec::new();
             while start_time.elapsed() < duration {
                 let download_start = Instant::now();
-                let in_warmup = start_time.elapsed() < warmup;
+                let t_start_us = offset_us(start_time, download_start);
+                let is_warmup = start_time.elapsed() < warmup;
                 match download_chunk(&client, &server_url, i, payload_size, chunk_size).await {
                     Ok(bytes) => {
-                        let measurement =
-                            ThroughputMeasurement::new(bytes, download_start.elapsed());
-                        if !in_warmup {
-                            local_measurements.push(measurement.clone());
-                            let _ = tx.send(measurement);
-                        }
+                        let duration_us = download_start.elapsed().as_micros() as u64;
+                        let s = Sample::success(t_start_us, duration_us, bytes, is_warmup);
+                        local_samples.push(s.clone());
+                        let _ = tx.send(s);
                     }
                     Err(e) => {
-                        let measurements = ThroughputMeasurement::Failure {
-                            error: ConnectionError::Unknown(e.to_string()),
-                            duration: download_start.elapsed(),
-                            retry_count: 0, // No retries in this case
-                        };
-                        if !in_warmup {
-                            local_measurements.push(measurements.clone());
-                            let _ = tx.send(measurements);
-                        }
-
+                        let duration_us = download_start.elapsed().as_micros() as u64;
+                        let s = Sample::failure(
+                            t_start_us,
+                            duration_us,
+                            ConnectionError::Unknown(e.to_string()),
+                            0,
+                            is_warmup,
+                        );
+                        local_samples.push(s.clone());
+                        let _ = tx.send(s);
                         break;
                     }
                 }
             }
 
-            local_measurements
+            local_samples
         });
 
         tasks.push(task);
     }
 
-    // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
-
     drop(tx);
     let _ = stats_collector
         .finish(progress_bar, "Download complete".to_string())
         .await;
 
-    let (streams, measurements) = collect_streams(results, "download");
-
+    let streams = collect_streams(results, "download");
     let end_time = Instant::now();
 
     Ok(ThroughputResult {
-        measurements,
         streams,
-        total_duration: measurement_duration(start_time, end_time, warmup),
+        total_duration_us: measurement_duration_us(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
         udp_stats: None,
+        udp_series: Vec::new(),
+        udp_series_window_us: 0,
     })
 }
 
@@ -446,12 +437,9 @@ async fn run_upload_test(
         parallel_connections.to_string().yellow()
     );
 
-    // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
-
     let start_time = Instant::now();
 
-    // Generate random upload data at the size of chunk_size
     let chunk_data = {
         let mut data = vec![0u8; chunk_size];
         rng().fill_bytes(&mut data);
@@ -459,73 +447,70 @@ async fn run_upload_test(
     };
     debug_assert!(chunk_data.len() == chunk_size, "Chunk data size mismatch");
 
-    // Set up instrumentation
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
 
     let mut tasks = Vec::new();
 
-    for i in 0..parallel_connections {
+    for _ in 0..parallel_connections {
         let client = client.clone();
         let tx = tx.clone();
         let server_url = server_url.to_string();
         let chunk_data = chunk_data.clone();
 
         let task = tokio::spawn(async move {
-            let mut local_measurements = Vec::new();
+            let mut local_samples: Vec<Sample> = Vec::new();
             while start_time.elapsed() < duration {
                 let upload_start = Instant::now();
-                let in_warmup = start_time.elapsed() < warmup;
+                let t_start_us = offset_us(start_time, upload_start);
+                let is_warmup = start_time.elapsed() < warmup;
                 match upload_chunk(&client, &server_url, payload_size, chunk_data.clone()).await {
                     Ok(bytes) => {
-                        let measurement = ThroughputMeasurement::new(bytes, upload_start.elapsed());
-                        if !in_warmup {
-                            local_measurements.push(measurement.clone());
-                            let _ = tx.send(measurement);
-                        }
+                        let duration_us = upload_start.elapsed().as_micros() as u64;
+                        let s = Sample::success(t_start_us, duration_us, bytes, is_warmup);
+                        local_samples.push(s.clone());
+                        let _ = tx.send(s);
                     }
                     Err(e) => {
-                        let measurement = ThroughputMeasurement::new_error(
+                        let duration_us = upload_start.elapsed().as_micros() as u64;
+                        let s = Sample::failure(
+                            t_start_us,
+                            duration_us,
                             ConnectionError::Unknown(e.to_string()),
-                            upload_start.elapsed(),
                             0,
+                            is_warmup,
                         );
-                        if !in_warmup {
-                            local_measurements.push(measurement.clone());
-                            let _ = tx.send(measurement);
-                        }
+                        local_samples.push(s.clone());
+                        let _ = tx.send(s);
                     }
                 }
             }
 
-            local_measurements
+            local_samples
         });
 
         tasks.push(task);
     }
 
-    // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
-
     drop(tx);
     let _ = stats_collector
         .finish(progress_bar, "Upload complete".to_string())
         .await;
 
-    let (streams, measurements) = collect_streams(results, "upload");
-
+    let streams = collect_streams(results, "upload");
     let end_time = Instant::now();
 
     Ok(ThroughputResult {
-        measurements,
         streams,
-        total_duration: measurement_duration(start_time, end_time, warmup),
+        total_duration_us: measurement_duration_us(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
         udp_stats: None,
+        udp_series: Vec::new(),
+        udp_series_window_us: 0,
     })
 }
 
-/// Download a chunk of data from the server
 async fn download_chunk(
     client: &Client,
     server_url: &str,
@@ -547,7 +532,6 @@ async fn download_chunk(
         total_bytes += chunk.len() as u64;
     }
 
-    // Debug assert that total_bytes is within margin of error (10%)
     debug_assert!(
         payload_size.to_f64() * 0.9 <= total_bytes.to_f64()
             && total_bytes.to_f64() <= payload_size.to_f64() * 1.1,
@@ -561,8 +545,7 @@ async fn download_chunk(
 /// stream of `chunk_size` chunks. This is the right shape for a
 /// throughput test: we measure the rate at which the network can carry
 /// one application-level upload, not the rate at which the client can
-/// perform N back-to-back requests (the previous behavior was the
-/// latter, which conflated request rate with throughput).
+/// perform N back-to-back requests.
 async fn upload_chunk(
     client: &Client,
     server_url: &str,

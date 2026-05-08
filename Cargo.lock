@@ -2446,7 +2446,6 @@ dependencies = [
  "reqwest",
  "rustls",
  "serde",
- "serde_json",
  "statistical",
  "tempfile",
  "thiserror 2.0.12",

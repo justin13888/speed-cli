@@ -1,8 +1,8 @@
 use axum::{
-    Json, Router,
+    Router,
     body::Body,
     extract::{DefaultBodyLimit, Query},
-    http::{Method, StatusCode, header},
+    http::{HeaderName, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -12,12 +12,97 @@ use eyre::Result;
 use futures::StreamExt as _;
 use futures::stream;
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::LazyLock as SyncLazy;
 use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, sync::Once};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
+
+use crate::report::PeerIdentity;
+
+const SERVER_ID_HEADER: &str = "x-speed-cli-server-id";
+
+fn server_identity_header_value() -> HeaderValue {
+    // Encode the local PeerIdentity as base64-CBOR once at startup.
+    // Header values are ASCII-safe; base64 (URL-safe, no padding) keeps
+    // the wire compact and avoids escaping concerns. Falls back to an
+    // empty value on the (impossible-in-practice) failure path so the
+    // header layer can still be installed.
+    let mut buf = Vec::new();
+    if ciborium::into_writer(&PeerIdentity::local(), &mut buf).is_ok() {
+        let encoded = base64_urlsafe(&buf);
+        if let Ok(v) = HeaderValue::from_str(&encoded) {
+            return v;
+        }
+    }
+    HeaderValue::from_static("")
+}
+
+fn base64_urlsafe(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let chunks = input.chunks_exact(3);
+    let rem = chunks.remainder();
+    for c in chunks {
+        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        out.push(ALPHABET[(n & 0x3f) as usize] as char);
+    }
+    match rem {
+        [a] => {
+            let n = (*a as u32) << 16;
+            out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+            out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        }
+        [a, b] => {
+            let n = ((*a as u32) << 16) | ((*b as u32) << 8);
+            out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+            out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+            out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        }
+        _ => {}
+    }
+    out
+}
+
+pub fn decode_base64_urlsafe(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let chunks = bytes.chunks(4);
+    for c in chunks {
+        if c.len() < 2 {
+            return None;
+        }
+        let a = val(c[0])?;
+        let b = val(c[1])?;
+        let cc = if c.len() > 2 { val(c[2])? } else { 0 };
+        let d = if c.len() > 3 { val(c[3])? } else { 0 };
+        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((cc as u32) << 6) | d as u32;
+        out.push(((n >> 16) & 0xff) as u8);
+        if c.len() > 2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if c.len() > 3 {
+            out.push((n & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
 
 use crate::utils::tls::get_self_signed_cert;
 
@@ -136,7 +221,11 @@ fn create_router(enable_cors: bool, max_upload_size: usize) -> Router {
         .route("/latency", get(latency_handler).head(latency_handler))
         .route("/info", get(info_handler))
         .route("/health", get(health_handler))
-        .layer(DefaultBodyLimit::max(max_upload_size));
+        .layer(DefaultBodyLimit::max(max_upload_size))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static(SERVER_ID_HEADER),
+            server_identity_header_value(),
+        ));
 
     if enable_cors {
         router = router.layer(
@@ -224,32 +313,20 @@ async fn upload_handler(body: Body) -> impl IntoResponse {
             Err(_) => break,
         }
     }
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "bytes_received": total_bytes })),
-    )
+    (StatusCode::OK, format!("{total_bytes}"))
 }
 
 async fn latency_handler() -> impl IntoResponse {
     (StatusCode::OK, "OK")
 }
 
-#[derive(Serialize)]
-struct ServerInfo {
-    server_name: String,
-    version: String,
-    available_endpoints: Vec<&'static str>,
-}
-
 async fn info_handler() -> impl IntoResponse {
-    let info = ServerInfo {
-        server_name: "Rust Hyper/Axum Server".to_string(),
-        version: "1.0.0".to_string(),
-        available_endpoints: vec!["/download", "/upload", "/latency", "/info", "/health"],
-    };
-    (StatusCode::OK, Json(info))
+    (
+        StatusCode::OK,
+        "speed-cli HTTP server\nendpoints: /download /upload /latency /info /health\n",
+    )
 }
 
 async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+    (StatusCode::OK, "ok")
 }

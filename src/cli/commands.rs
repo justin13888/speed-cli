@@ -66,7 +66,9 @@ pub enum Commands {
         #[clap(group = "protocol")]
         http3: bool,
 
-        /// Export results to file (JSON, CBOR, or HTML depending on extension)
+        /// Export results to file. `.cbor` (or no extension) writes the
+        /// raw CBOR data report; `.html` writes a rendered single-file
+        /// report. Other extensions are rejected.
         #[arg(short, long)]
         export: Option<PathBuf>,
 
@@ -100,11 +102,6 @@ pub enum Commands {
         /// shape via `tc`.
         #[arg(long, default_value = "0")]
         target_rate_mbps: u64,
-
-        /// Emit machine-readable JSON to stdout instead of the pretty
-        /// text report.
-        #[arg(long)]
-        json: bool,
     },
 
     /// Run as server
@@ -163,7 +160,7 @@ pub enum Commands {
 
     /// Print previously saved results
     Report {
-        /// Path to the results file (JSON or CBOR)
+        /// Path to the results file (CBOR).
         #[arg(short, long)]
         file: PathBuf,
 
@@ -219,13 +216,8 @@ pub enum Commands {
         #[arg(long, value_enum, default_value_t = AccountingArg::Goodput)]
         accounting: AccountingArg,
 
-        /// Export the suite report to a file (JSON or CBOR).
+        /// Export the suite report to a CBOR file.
         #[arg(short, long)]
         export: Option<PathBuf>,
-
-        /// Emit machine-readable JSON to stdout instead of the pretty
-        /// text report. Combine with `--export` to also save to disk.
-        #[arg(long)]
-        json: bool,
     },
 }

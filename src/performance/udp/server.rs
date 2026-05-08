@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
 use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
+use crate::report::PeerIdentity;
 
 /// Hard ceiling on per-source sessions. Beyond this we evict the
 /// least-recently-active session.
@@ -154,9 +155,34 @@ impl BlasterServer {
                     debug!("pong send failed to {}: {}", peer, e);
                 }
             }
-            BlasterPacket::Pong { .. } | BlasterPacket::Report { .. } => {
+            BlasterPacket::Hello { .. } => {
+                self.handle_hello(peer).await;
+            }
+            BlasterPacket::Pong { .. }
+            | BlasterPacket::Report { .. }
+            | BlasterPacket::HelloAck { .. } => {
                 // Server-bound; clients send these. Ignore.
             }
+        }
+    }
+
+    async fn handle_hello(&self, peer: SocketAddr) {
+        let mut id_buf = Vec::new();
+        if ciborium::into_writer(&PeerIdentity::local(), &mut id_buf).is_err() {
+            return;
+        }
+        let mut addr_buf = Vec::new();
+        if ciborium::into_writer(&peer, &mut addr_buf).is_err() {
+            return;
+        }
+        let ack = BlasterPacket::HelloAck {
+            identity_cbor: id_buf,
+            observed_client_addr_cbor: addr_buf,
+            server_epoch_us: now_us(),
+        };
+        let bytes = ack.encode_to_vec(None);
+        if let Err(e) = self.socket.send_to(&bytes, peer).await {
+            debug!("HelloAck send failed to {}: {}", peer, e);
         }
     }
 

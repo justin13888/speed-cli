@@ -6,7 +6,7 @@ use humansize::{BINARY, BaseUnit, DECIMAL, format_size};
 use num_format::{Locale, ToFormattedString};
 use serde::{Deserialize, Serialize};
 
-use crate::report::{ConnectionError, ThroughputMeasurement};
+use crate::report::{ConnectionError, Outcome, Sample};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -42,24 +42,27 @@ impl Default for ThroughputAccounting {
     }
 }
 
-/// Per-stream measurements for a single parallel connection / stream
-/// within a multi-stream throughput test.
+/// Per-stream samples for a single parallel connection / stream within
+/// a multi-stream throughput test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamMeasurements {
+pub struct StreamSamples {
     /// Index of the stream within the test (0-based).
-    pub stream_id: usize,
-    /// Per-chunk measurements from this stream.
-    pub measurements: Vec<ThroughputMeasurement>,
+    pub stream_id: u32,
+    /// Wall-clock offset (microseconds from test start) at which this
+    /// stream began transferring data. Lets a renderer plot streams
+    /// against a common time axis even when they start at different
+    /// times.
+    pub start_offset_us: u64,
+    /// Per-sample observations from this stream.
+    pub samples: Vec<Sample>,
 }
 
-impl StreamMeasurements {
+impl StreamSamples {
     pub fn bytes_transferred(&self) -> u64 {
-        self.measurements
+        self.samples
             .iter()
-            .map(|m| match m {
-                ThroughputMeasurement::Success { bytes, .. } => *bytes,
-                ThroughputMeasurement::Failure { .. } => 0,
-            })
+            .filter(|s| !s.is_warmup && s.is_success())
+            .map(|s| s.bytes)
             .sum()
     }
 
@@ -75,24 +78,30 @@ impl StreamMeasurements {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThroughputResult {
-    /// Aggregate measurements (flatten of all streams). Used for the
-    /// summary metrics and kept stable for older consumers.
-    pub measurements: Vec<ThroughputMeasurement>,
-    /// Per-stream breakdown. Empty for tests that don't have a notion of
-    /// streams (e.g., today's UDP path or imported reports written
-    /// before per-stream data was tracked).
-    #[serde(default)]
-    pub streams: Vec<StreamMeasurements>,
-    /// Total duration of the test
-    pub total_duration: Duration,
-
+    /// Per-stream sample data. The single source of truth for per-sample
+    /// observations - aggregate metrics are computed by iterating these
+    /// lazily.
+    pub streams: Vec<StreamSamples>,
+    /// Total measurement duration (post-warmup), in microseconds.
+    pub total_duration_us: u64,
     pub timestamp: DateTime<Utc>,
 
-    /// UDP-only: receiver-side packet stats. Populated locally for UDP
-    /// download (the client receives) and from the server REPORT for
-    /// UDP upload (the server receives). `None` for TCP / HTTP runs.
+    /// UDP-only: aggregate receiver-side packet stats. Populated locally
+    /// for UDP download and from the server REPORT for UDP upload.
+    /// `None` for TCP / HTTP runs.
     #[serde(default)]
     pub udp_stats: Option<UdpRunStats>,
+
+    /// UDP-only: per-window receiver-side snapshot series, populated
+    /// when the receiver emits periodic stats. Empty (`Vec::new()`) for
+    /// TCP / HTTP, or for UDP runs where the series transport failed.
+    #[serde(default)]
+    pub udp_series: Vec<UdpStatsBucket>,
+
+    /// Width of each `udp_series` bucket, in microseconds. `0` when
+    /// `udp_series` is empty.
+    #[serde(default)]
+    pub udp_series_window_us: u32,
 }
 
 /// Receiver-side UDP packet accounting. Shipped per direction in
@@ -134,34 +143,41 @@ impl UdpRunStats {
     }
 }
 
+/// One window of receiver-side UDP statistics. A vector of these forms a
+/// time-series suitable for plotting loss / jitter stability over the
+/// whole test duration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UdpStatsBucket {
+    /// Offset of the start of this window from the receiver's session
+    /// start, in microseconds. The receiver and sender share the same
+    /// epoch (negotiated in the `Hello` handshake) so this aligns with
+    /// `Sample.t_start_us` on the corresponding stream.
+    pub t_offset_us: u64,
+    pub received: u64,
+    pub bytes_received: u64,
+    pub lost: u64,
+    pub out_of_order: u64,
+    pub duplicates: u64,
+    /// RFC 3550 jitter at the end of the window, in microseconds.
+    pub jitter_us: u32,
+}
+
 impl ThroughputResult {
-    /// Reduce per-measurement detail to at most `max_samples` entries
-    /// per stream (and per aggregate). At multi-Gbps speeds the
-    /// untrimmed vector grows into the hundreds of thousands and pushes
-    /// JSON exports past 100 MB; this caps the file size while
-    /// preserving percentile fidelity (uniform-stride decimation, which
-    /// keeps the order statistics).
-    ///
-    /// Aggregate stats already computed against the full vector are
-    /// unaffected; this only mutates the on-disk representation.
-    pub fn downsample_for_export(&mut self, max_samples: usize) {
-        fn decimate<T: Clone>(v: &mut Vec<T>, max: usize) {
-            if v.len() <= max || max == 0 {
-                return;
-            }
-            let stride = v.len() as f64 / max as f64;
-            let mut out = Vec::with_capacity(max);
-            let mut i = 0.0;
-            while (i as usize) < v.len() && out.len() < max {
-                out.push(v[i as usize].clone());
-                i += stride;
-            }
-            *v = out;
-        }
-        decimate(&mut self.measurements, max_samples);
-        for s in &mut self.streams {
-            decimate(&mut s.measurements, max_samples);
-        }
+    /// Iterator over every sample across every stream. Aggregate metrics
+    /// build on this; warmup-aware variants below filter out
+    /// `is_warmup` samples.
+    pub fn samples_iter(&self) -> impl Iterator<Item = &Sample> {
+        self.streams.iter().flat_map(|s| s.samples.iter())
+    }
+
+    /// Iterator over non-warmup samples — what aggregate stats use.
+    pub fn non_warmup_iter(&self) -> impl Iterator<Item = &Sample> {
+        self.samples_iter().filter(|s| !s.is_warmup)
+    }
+
+    /// Total non-warmup duration as a `Duration`.
+    pub fn total_duration(&self) -> Duration {
+        Duration::from_micros(self.total_duration_us)
     }
 }
 
@@ -177,7 +193,7 @@ impl fmt::Display for ThroughputResult {
             f,
             "  {}: {}",
             "Duration".bright_green().bold(),
-            format!("{:.2}s", self.total_duration.as_secs_f64()).yellow()
+            format!("{:.2}s", self.total_duration().as_secs_f64()).yellow()
         )?;
         writeln!(
             f,
@@ -270,9 +286,8 @@ impl fmt::Display for ThroughputResult {
         writeln!(
             f,
             "  {}: {}",
-            "Measurements".bright_green().bold(),
-            self.measurements
-                .len()
+            "Samples".bright_green().bold(),
+            self.sample_count()
                 .to_formatted_string(&Locale::en)
                 .white()
         )?;
@@ -280,23 +295,16 @@ impl fmt::Display for ThroughputResult {
         // Per-stream breakdown, only when we have more than one stream.
         // For single-stream tests the aggregate above is everything you need.
         if self.streams.len() > 1 {
-            writeln!(
-                f,
-                "  {}:",
-                "Per-Stream".bright_green().bold()
-            )?;
+            writeln!(f, "  {}:", "Per-Stream".bright_green().bold())?;
             for s in &self.streams {
-                let bps = s.avg_throughput_bps(self.total_duration);
+                let bps = s.avg_throughput_bps(self.total_duration());
                 writeln!(
                     f,
-                    "    stream {:>3}: {} ({} chunks)",
+                    "    stream {:>3}: {} ({} samples)",
                     s.stream_id.to_string().yellow(),
-                    format_size(
-                        bps as u64,
-                        DECIMAL.base_unit(BaseUnit::Bit).suffix("/s")
-                    )
-                    .magenta(),
-                    s.measurements.len().to_formatted_string(&Locale::en).white()
+                    format_size(bps as u64, DECIMAL.base_unit(BaseUnit::Bit).suffix("/s"))
+                        .magenta(),
+                    s.samples.len().to_formatted_string(&Locale::en).white()
                 )?;
             }
         }
@@ -344,6 +352,18 @@ impl fmt::Display for ThroughputResult {
             )?;
         }
 
+        if !self.udp_series.is_empty() {
+            writeln!(
+                f,
+                "  {}: {} buckets @ {} ms each",
+                "UDP Stats Series".bright_green().bold(),
+                self.udp_series.len().to_formatted_string(&Locale::en).cyan(),
+                (self.udp_series_window_us / 1000)
+                    .to_formatted_string(&Locale::en)
+                    .yellow()
+            )?;
+        }
+
         writeln!(
             f,
             "  {}: {}",
@@ -359,75 +379,58 @@ impl fmt::Display for ThroughputResult {
 }
 
 impl ThroughputResult {
-    /// Returns total number of bytes transferred
+    /// Total non-warmup samples across all streams (success + failure).
+    pub fn sample_count(&self) -> usize {
+        self.non_warmup_iter().count()
+    }
+
+    /// Total bytes transferred across non-warmup successful samples.
     pub fn bytes_transferred(&self) -> u64 {
-        self.measurements
-            .iter()
-            .map(|m| match m {
-                ThroughputMeasurement::Success { bytes, .. } => *bytes,
-                ThroughputMeasurement::Failure { .. } => 0,
-            })
+        self.non_warmup_iter()
+            .filter(|s| s.is_success())
+            .map(|s| s.bytes)
             .sum()
     }
 
-    /// Returns the average throughput in bytes per second
+    /// Average throughput in bytes per second.
     pub fn avg_throughput(&self) -> f64 {
-        if self.total_duration.is_zero() {
+        if self.total_duration_us == 0 {
             return 0.0;
         }
-
-        (self.bytes_transferred() as f64) / self.total_duration.as_secs_f64()
+        (self.bytes_transferred() as f64) / (self.total_duration_us as f64 / 1_000_000.0)
     }
 
     /// Estimate wire-rate average throughput in bits per second by adding
     /// per-segment / per-packet framing overhead to the goodput numbers.
-    ///
-    /// `overhead_per_segment` should be one of `WIRE_OVERHEAD_TCP_BYTES`
-    /// or `WIRE_OVERHEAD_UDP_BYTES` (for IPv4); pass `mtu = STANDARD_MTU`
-    /// unless you've measured otherwise.
-    pub fn avg_throughput_wire_bps(
-        &self,
-        overhead_per_segment: usize,
-        mtu: usize,
-    ) -> f64 {
-        if self.total_duration.is_zero() || mtu == 0 {
+    pub fn avg_throughput_wire_bps(&self, overhead_per_segment: usize, mtu: usize) -> f64 {
+        if self.total_duration_us == 0 || mtu == 0 {
             return 0.0;
         }
         let payload_per_segment = mtu.saturating_sub(overhead_per_segment).max(1) as u64;
         let total_overhead: u64 = self
-            .measurements
-            .iter()
-            .filter_map(|m| match m {
-                ThroughputMeasurement::Success { bytes, .. } => Some(*bytes),
-                ThroughputMeasurement::Failure { .. } => None,
-            })
-            .map(|bytes| {
-                let segments = bytes.div_ceil(payload_per_segment);
+            .non_warmup_iter()
+            .filter(|s| s.is_success())
+            .map(|s| {
+                let segments = s.bytes.div_ceil(payload_per_segment);
                 segments * overhead_per_segment as u64
             })
             .sum();
         let total_wire_bytes = self.bytes_transferred() + total_overhead;
-        (total_wire_bytes as f64 * 8.0) / self.total_duration.as_secs_f64()
+        (total_wire_bytes as f64 * 8.0) / (self.total_duration_us as f64 / 1_000_000.0)
     }
 
-    /// Returns per-measurement throughput samples in bits per second, for
-    /// successful measurements only.
+    /// Per-sample throughput in bps for non-warmup successful samples,
+    /// sorted ascending. Used by percentile helpers.
     fn sample_bps_sorted(&self) -> Vec<f64> {
         let mut samples: Vec<f64> = self
-            .measurements
-            .iter()
-            .filter_map(|m| match m {
-                ThroughputMeasurement::Success { .. } => Some(m.throughput_bps()),
-                ThroughputMeasurement::Failure { .. } => None,
-            })
+            .non_warmup_iter()
+            .filter(|s| s.is_success())
+            .map(|s| s.throughput_bps())
             .collect();
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         samples
     }
 
-    /// Returns the n-th percentile of per-measurement throughput in bits per
-    /// second. Returns None if there are no successful samples or `n` is
-    /// outside [0, 100].
     pub fn percentile_throughput_bps(&self, n: f64) -> Option<f64> {
         if !(0.0..=100.0).contains(&n) {
             return None;
@@ -446,95 +449,66 @@ impl ThroughputResult {
         Some(samples[index])
     }
 
-    /// Min per-measurement throughput in bits per second.
     pub fn min_throughput_bps(&self) -> Option<f64> {
         self.percentile_throughput_bps(0.0)
     }
 
-    /// Max per-measurement throughput in bits per second.
     pub fn max_throughput_bps(&self) -> Option<f64> {
         self.percentile_throughput_bps(100.0)
     }
 
-    /// Returns the connection success rate as a percentage (0.0 to 1.0)
     pub fn connection_success_rate(&self) -> f64 {
-        if self.measurements.is_empty() {
+        let total = self.non_warmup_iter().count();
+        if total == 0 {
             return 0.0;
         }
-
-        let successful_connections = self
-            .measurements
-            .iter()
-            .filter(|m| matches!(m, ThroughputMeasurement::Success { .. }))
-            .count();
-
-        successful_connections as f64 / self.measurements.len() as f64
+        let successful = self.non_warmup_iter().filter(|s| s.is_success()).count();
+        successful as f64 / total as f64
     }
 
-    /// Returns the request success rate as a percentage (0.0 to 1.0)
-    /// This is the same as connection success rate in this context
     pub fn request_success_rate(&self) -> f64 {
         self.connection_success_rate()
     }
 
-    /// Returns retry statistics: (total_retries, successful_after_retry, failed_after_retry)
+    /// `(total_retries, successful_after_retry, failed_after_retry)`.
     pub fn retry_statistics(&self) -> (u32, u32, u32) {
         let mut total_retries = 0;
         let successful_after_retry = 0;
         let mut failed_after_retry = 0;
-
-        for measurement in &self.measurements {
-            match measurement {
-                ThroughputMeasurement::Success { .. } => {
-                    // For successful measurements, we assume no retries were needed
-                    // This could be enhanced if success measurements tracked retry count
-                }
-                ThroughputMeasurement::Failure { retry_count, .. } => {
-                    total_retries += retry_count;
-                    failed_after_retry += 1;
-                }
+        for s in self.non_warmup_iter() {
+            if let Outcome::Failure { retry_count, .. } = &s.outcome {
+                total_retries += retry_count;
+                failed_after_retry += 1;
             }
         }
-
         (total_retries, successful_after_retry, failed_after_retry)
     }
 
-    /// Returns the success rate after retries (0.0 to 1.0)
     pub fn retry_success_rate(&self) -> f64 {
         let (total_retries, successful_after_retry, failed_after_retry) = self.retry_statistics();
-
         if total_retries == 0 {
-            return 1.0; // No retries needed means 100% success
+            return 1.0;
         }
-
         successful_after_retry as f64 / (successful_after_retry + failed_after_retry) as f64
     }
 
-    /// Returns error distribution by type
     pub fn error_distribution(&self) -> HashMap<String, u32> {
         let mut distribution = HashMap::new();
-
-        for measurement in &self.measurements {
-            if let ThroughputMeasurement::Failure { error, .. } = measurement {
-                let error_type = match error {
+        for s in self.non_warmup_iter() {
+            if let Outcome::Failure { error, .. } = &s.outcome {
+                let kind = match error {
                     ConnectionError::ConnectionFailed(_) => "Connection Failed",
                     ConnectionError::TransferFailed(_) => "Transfer Failed",
                     ConnectionError::Timeout(_) => "Timeout",
                     ConnectionError::Unknown(_) => "Unknown",
                 };
-
-                *distribution.entry(error_type.to_string()).or_insert(0) += 1;
+                *distribution.entry(kind.to_string()).or_insert(0) += 1;
             }
         }
-
         distribution
     }
 
-    /// Returns the total number of errors
     pub fn total_errors(&self) -> u32 {
-        self.measurements
-            .iter()
-            .filter(|m| matches!(m, ThroughputMeasurement::Failure { .. }))
-            .count() as u32
+        self.non_warmup_iter().filter(|s| !s.is_success()).count() as u32
     }
 }

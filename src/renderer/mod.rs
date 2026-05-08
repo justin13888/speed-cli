@@ -22,14 +22,11 @@ use std::io::{self, Write};
 ///
 /// ## Example
 ///
-/// ```rust
+/// ```ignore
 /// use speed_cli::renderer::ToHtml;
 /// use speed_cli::report::TestReport;
 /// use std::fs::File;
 /// use std::io::BufWriter;
-///
-/// // Assuming you have a TestReport instance
-/// let report = /* ... */;
 ///
 /// // Stream directly to file (memory efficient for large reports)
 /// let file = File::create("report.html")?;
@@ -572,9 +569,9 @@ impl ToHtml for ThroughputResult {
                 </div>
             </div>"#,
             format_bytes_u64(self.bytes_transferred()),
-            self.total_duration.as_secs_f64(),
+            self.total_duration().as_secs_f64(),
             format_throughput(self.avg_throughput()),
-            self.measurements.len(),
+            self.sample_count(),
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         )
     }
@@ -607,9 +604,9 @@ impl ToHtml for ThroughputResult {
                 </div>
             </div>"#,
             format_bytes_u64(self.bytes_transferred()),
-            self.total_duration.as_secs_f64(),
+            self.total_duration().as_secs_f64(),
             format_throughput(self.avg_throughput()),
-            self.measurements.len(),
+            self.sample_count(),
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         )
     }
@@ -994,47 +991,39 @@ impl ToHtml for LatencyMeasurement {
     }
 
     fn to_html(&self) -> String {
-        match self.rtt_ms {
+        match self.rtt_ms() {
             Some(rtt) => format!(r#"<span style="color: #28a745;">{rtt:.2} ms</span>"#),
             None => r#"<span style="color: #dc3545;">dropped</span>"#.to_string(),
         }
     }
 }
 
-// Implementation for ThroughputMeasurement
-impl ToHtml for ThroughputMeasurement {
+// Implementation for Sample (per-chunk throughput observation)
+impl ToHtml for Sample {
     fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         write!(writer, "{}", self.to_html())
     }
 
     fn to_html(&self) -> String {
-        match self {
-            ThroughputMeasurement::Success { bytes, duration } => {
-                format!(
-                    r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8f9fa; border-radius: 4px; margin: 5px 0;">
+        match &self.outcome {
+            Outcome::Success => format!(
+                r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8f9fa; border-radius: 4px; margin: 5px 0;">
                         <span>{} in {} ms</span>
                         <span style="color: #6f42c1;">{}</span>
                     </div>"#,
-                    format_bytes_u64(*bytes),
-                    duration.as_millis(),
-                    format_throughput(self.throughput_bps())
-                )
-            }
-            ThroughputMeasurement::Failure {
-                error,
-                duration,
-                retry_count,
-            } => {
-                format!(
-                    r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8d7da; border-radius: 4px; margin: 5px 0;">
+                format_bytes_u64(self.bytes),
+                self.duration_us / 1000,
+                format_throughput(self.throughput_bps())
+            ),
+            Outcome::Failure { error, retry_count } => format!(
+                r#"<div style="display: flex; justify-content: space-between; padding: 8px; background-color: #f8d7da; border-radius: 4px; margin: 5px 0;">
                         <span style="color: #721c24;">Error: {} (after {} ms, {} retries)</span>
                         <span style="color: #dc3545;">Failed</span>
                     </div>"#,
-                    error,
-                    duration.as_millis(),
-                    retry_count
-                )
-            }
+                error,
+                self.duration_us / 1000,
+                retry_count
+            ),
         }
     }
 }

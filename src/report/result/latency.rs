@@ -1,108 +1,87 @@
 use std::fmt::{self, Display, Formatter};
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use colored::*;
 use serde::{Deserialize, Serialize};
 
+use crate::report::LatencyMeasurement;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LatencyResult {
-    /// List of RTT measurements in milliseconds
+    /// List of RTT measurements (in microseconds, as `Option<u64>`).
     pub measurements: Vec<LatencyMeasurement>,
     pub timestamp: DateTime<Utc>,
 }
 
 impl LatencyResult {
-    /// Returns list of all RTT measurements that are not None
-    pub fn rtts(&self) -> Vec<f64> {
-        self.measurements.iter().filter_map(|m| m.rtt_ms).collect()
+    /// All non-dropped RTTs in milliseconds (the unit the renderer and
+    /// Display impls operate in).
+    pub fn rtts_ms(&self) -> Vec<f64> {
+        self.measurements
+            .iter()
+            .filter_map(|m| m.rtt_ms())
+            .collect()
     }
 
-    /// Total number of measurements
     pub fn count(&self) -> usize {
         self.measurements.len()
     }
 
-    /// Number of successful measurements (where RTT is not None)
     pub fn successful_count(&self) -> usize {
         self.measurements
             .iter()
-            .filter(|m| m.rtt_ms.is_some())
+            .filter(|m| m.rtt_us.is_some())
             .count()
     }
 
-    /// Returns number of dropped measurements (where RTT is None)
     pub fn dropped_count(&self) -> usize {
         self.measurements
             .iter()
-            .filter(|m| m.rtt_ms.is_none())
+            .filter(|m| m.rtt_us.is_none())
             .count()
     }
 
-    /// Returns average RTT. If no measurements, returns 0.0
     pub fn avg_rtt(&self) -> Option<f64> {
-        let mut sum = 0.0;
-        let mut count = 0;
-
-        for measurement in self.measurements.iter() {
-            if let Some(rtt) = measurement.rtt_ms {
-                sum += rtt;
-                count += 1;
-            }
+        let rtts = self.rtts_ms();
+        if rtts.is_empty() {
+            return None;
         }
-
-        if count > 0 {
-            Some(sum / count as f64)
-        } else {
-            None
-        }
+        Some(rtts.iter().sum::<f64>() / rtts.len() as f64)
     }
 
-    /// Returns minimum RTT if available, otherwise None.
     pub fn min_rtt(&self) -> Option<f64> {
-        self.rtts().into_iter().fold(None, |acc, rtt| {
-            Some(acc.map_or(rtt, |current_min| rtt.min(current_min)))
-        })
+        self.rtts_ms()
+            .into_iter()
+            .fold(None, |acc, rtt| Some(acc.map_or(rtt, |m| rtt.min(m))))
     }
 
-    /// Returns n-th percentile RTT.
-    /// If n is out of bounds, returns None.
     pub fn percentile_rtt(&self, n: f64) -> Option<f64> {
         if !(0.0..=100.0).contains(&n) {
             return None;
         }
-        let mut rtts = self.rtts();
+        let mut rtts = self.rtts_ms();
         if rtts.is_empty() {
             return None;
         }
         rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Handle edge cases
         if n == 0.0 {
             return Some(rtts[0]);
         }
         if n == 100.0 {
             return Some(rtts[rtts.len() - 1]);
         }
-
-        // Calculate index using the nearest-rank method
         let index = ((n / 100.0) * (rtts.len() - 1) as f64).round() as usize;
         Some(rtts[index])
     }
 
-    /// Returns maximum RTT if available, otherwise None.
     pub fn max_rtt(&self) -> Option<f64> {
-        self.rtts().into_iter().fold(None, |acc, rtt| {
-            Some(acc.map_or(rtt, |current_max| rtt.max(current_max)))
-        })
+        self.rtts_ms()
+            .into_iter()
+            .fold(None, |acc, rtt| Some(acc.map_or(rtt, |m| rtt.max(m))))
     }
 
-    /// Population standard deviation of RTT in milliseconds. Useful as a
-    /// summary of spread but distinct from the network-engineering
-    /// definition of "jitter" (see [`Self::jitter_rfc3550`]). Returns None
-    /// if there are no successful samples.
     pub fn rtt_stddev(&self) -> Option<f64> {
-        let rtts = self.rtts();
+        let rtts = self.rtts_ms();
         if rtts.is_empty() {
             return None;
         }
@@ -112,29 +91,24 @@ impl LatencyResult {
         Some(variance.sqrt())
     }
 
-    /// RFC 3550 jitter (interarrival jitter) in milliseconds.
-    ///
-    /// Implements the RTP definition:
+    /// RFC 3550 jitter in milliseconds.
     ///
     /// ```text
     /// J(0) = 0
     /// J(i) = J(i-1) + (|D(i-1, i)| - J(i-1)) / 16
     /// ```
-    ///
     /// where `D(i-1, i)` is the difference between the inter-sample arrival
-    /// gap (`elapsed_time(i) - elapsed_time(i-1)`) and the corresponding RTT
-    /// delta. This captures sustained variation in packet timing rather
-    /// than just overall RTT spread, which is what most "jitter" metrics
-    /// in network tooling actually mean. Returns None if there are fewer
-    /// than two successful samples.
+    /// gap and the corresponding RTT delta. Captures sustained timing
+    /// variation rather than overall RTT spread. Returns None if there are
+    /// fewer than two successful samples.
     pub fn jitter_rfc3550(&self) -> Option<f64> {
-        let mut prev: Option<(f64, f64)> = None; // (rtt_ms, elapsed_ms)
+        let mut prev: Option<(f64, f64)> = None; // (rtt_ms, t_start_ms)
         let mut jitter: f64 = 0.0;
         let mut updates: u32 = 0;
 
         for m in &self.measurements {
-            let Some(rtt) = m.rtt_ms else { continue };
-            let elapsed_ms = m.elapsed_time.as_secs_f64() * 1000.0;
+            let Some(rtt) = m.rtt_ms() else { continue };
+            let elapsed_ms = m.t_start_us as f64 / 1000.0;
             if let Some((prev_rtt, prev_elapsed)) = prev {
                 let arrival_gap = elapsed_ms - prev_elapsed;
                 let rtt_delta = rtt - prev_rtt;
@@ -193,7 +167,6 @@ impl Display for LatencyResult {
                 format!("{avg:.2} ms").cyan()
             )?;
         }
-
         if let Some(min) = self.min_rtt() {
             writeln!(
                 f,
@@ -202,7 +175,6 @@ impl Display for LatencyResult {
                 format!("{min:.2} ms").green()
             )?;
         }
-
         if let Some(p25) = self.percentile_rtt(25.0) {
             writeln!(
                 f,
@@ -211,7 +183,6 @@ impl Display for LatencyResult {
                 format!("{p25:.2} ms").yellow()
             )?;
         }
-
         if let Some(p50) = self.percentile_rtt(50.0) {
             writeln!(
                 f,
@@ -220,7 +191,6 @@ impl Display for LatencyResult {
                 format!("{p50:.2} ms").yellow()
             )?;
         }
-
         if let Some(p75) = self.percentile_rtt(75.0) {
             writeln!(
                 f,
@@ -229,7 +199,6 @@ impl Display for LatencyResult {
                 format!("{p75:.2} ms").yellow()
             )?;
         }
-
         if let Some(max) = self.max_rtt() {
             writeln!(
                 f,
@@ -238,7 +207,6 @@ impl Display for LatencyResult {
                 format!("{max:.2} ms").yellow()
             )?;
         }
-
         if let Some(stddev) = self.rtt_stddev() {
             writeln!(
                 f,
@@ -247,7 +215,6 @@ impl Display for LatencyResult {
                 format!("{stddev:.2} ms").magenta()
             )?;
         }
-
         if let Some(jitter) = self.jitter_rfc3550() {
             writeln!(
                 f,
@@ -271,34 +238,18 @@ impl Display for LatencyResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LatencyMeasurement {
-    /// RTT in milliseconds. If dropped, it is None.
-    pub rtt_ms: Option<f64>,
-    pub elapsed_time: Duration,
-}
-
-impl Display for LatencyMeasurement {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.rtt_ms {
-            Some(rtt) => write!(f, "{rtt:.2} ms"),
-            None => write!(f, "{}", "dropped".red()),
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn create_test_latency_result(rtts: Vec<Option<f64>>) -> LatencyResult {
-        let measurements = rtts
+    fn build_result(rtts_ms: Vec<Option<f64>>) -> LatencyResult {
+        let measurements = rtts_ms
             .into_iter()
             .map(|rtt_ms| LatencyMeasurement {
-                rtt_ms,
-                elapsed_time: Duration::from_millis(0),
+                t_start_us: 0,
+                rtt_us: rtt_ms.map(|ms| (ms * 1000.0) as u64),
             })
             .collect();
-
         LatencyResult {
             measurements,
             timestamp: Utc::now(),
@@ -307,15 +258,13 @@ mod tests {
 
     #[test]
     fn test_percentile_calculation() {
-        // Test with sorted values: [10, 20, 30, 40, 50]
-        let result = create_test_latency_result(vec![
+        let result = build_result(vec![
             Some(10.0),
             Some(20.0),
             Some(30.0),
             Some(40.0),
             Some(50.0),
         ]);
-
         assert_eq!(result.percentile_rtt(0.0), Some(10.0));
         assert_eq!(result.percentile_rtt(25.0), Some(20.0));
         assert_eq!(result.percentile_rtt(50.0), Some(30.0));
@@ -325,14 +274,13 @@ mod tests {
 
     #[test]
     fn test_percentile_with_unsorted_values() {
-        let result = create_test_latency_result(vec![
+        let result = build_result(vec![
             Some(50.0),
             Some(10.0),
             Some(30.0),
             Some(20.0),
             Some(40.0),
         ]);
-
         assert_eq!(result.percentile_rtt(0.0), Some(10.0));
         assert_eq!(result.percentile_rtt(50.0), Some(30.0));
         assert_eq!(result.percentile_rtt(100.0), Some(50.0));
@@ -340,9 +288,7 @@ mod tests {
 
     #[test]
     fn test_percentile_with_dropped_measurements() {
-        let result =
-            create_test_latency_result(vec![Some(10.0), None, Some(30.0), None, Some(50.0)]);
-
+        let result = build_result(vec![Some(10.0), None, Some(30.0), None, Some(50.0)]);
         assert_eq!(result.percentile_rtt(0.0), Some(10.0));
         assert_eq!(result.percentile_rtt(50.0), Some(30.0));
         assert_eq!(result.percentile_rtt(100.0), Some(50.0));
@@ -350,21 +296,20 @@ mod tests {
 
     #[test]
     fn test_percentile_invalid_range() {
-        let result = create_test_latency_result(vec![Some(10.0), Some(20.0)]);
-
+        let result = build_result(vec![Some(10.0), Some(20.0)]);
         assert_eq!(result.percentile_rtt(-1.0), None);
         assert_eq!(result.percentile_rtt(101.0), None);
     }
 
     #[test]
     fn test_percentile_empty_measurements() {
-        let result = create_test_latency_result(vec![]);
+        let result = build_result(vec![]);
         assert_eq!(result.percentile_rtt(50.0), None);
     }
 
     #[test]
     fn test_percentile_all_dropped() {
-        let result = create_test_latency_result(vec![None, None, None]);
+        let result = build_result(vec![None, None, None]);
         assert_eq!(result.percentile_rtt(50.0), None);
     }
 }
