@@ -9,6 +9,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use clap::Parser;
 use cli::{Cli, Commands};
 use performance::http::server::{HttpServerConfig, run_http_server};
+use performance::suite::{SuiteConfig, run_suite};
 use performance::tcp::client::run_tcp_client;
 use performance::udp::client::run_udp_client;
 
@@ -87,6 +88,7 @@ async fn main() -> Result<()> {
             chunk_size,
             accounting,
             target_rate_mbps,
+            json,
         } => {
             let warmup = std::time::Duration::from_secs(warmup);
             let accounting = match accounting {
@@ -192,10 +194,15 @@ async fn main() -> Result<()> {
                 }
             };
 
-            println!("{}", "Client test completed.".green().bold());
-
-            // Print test report
-            println!("{report:#}");
+            if json {
+                // Stdout becomes machine-readable; informational lines
+                // go to stderr so a `| jq` pipeline still works.
+                eprintln!("{}", "Client test completed.".green().bold());
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("{}", "Client test completed.".green().bold());
+                println!("{report:#}");
+            }
 
             // If export file is specified, write results
             if let Some(export) = &export {
@@ -493,6 +500,99 @@ async fn main() -> Result<()> {
                     "Report file must have an extension: {}",
                     file.display()
                 ));
+            }
+        }
+
+        Commands::Suite {
+            server,
+            tcp_udp_port,
+            http_port,
+            https_port,
+            duration,
+            warmup,
+            connections,
+            udp_target_rate_mbps,
+            no_tls,
+            accounting,
+            export,
+            json,
+        } => {
+            let cfg = SuiteConfig {
+                server,
+                tcp_udp_port,
+                http_port,
+                https_port,
+                phase_duration: std::time::Duration::from_secs(duration),
+                warmup: std::time::Duration::from_secs(warmup),
+                connections,
+                udp_target_rate_mbps,
+                accounting: match accounting {
+                    cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
+                    cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
+                },
+                include_tls: !no_tls,
+            };
+
+            // Validate export path early.
+            if let Some(export) = &export {
+                if let Some(parent) = export.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    fs::create_dir_all(parent)?;
+                }
+                if !can_write(export)? {
+                    return Err(eyre::eyre!(
+                        "Export file is not writable: {}",
+                        export.display()
+                    ));
+                }
+            }
+
+            let suite = run_suite(cfg).await?;
+
+            if json {
+                eprintln!("{}", "Suite completed.".green().bold());
+                println!("{}", serde_json::to_string(&suite)?);
+            } else {
+                println!("{}", "Suite completed.".green().bold());
+                println!("{suite}");
+            }
+
+            if let Some(export) = &export {
+                // Per-measurement vectors balloon at multi-Gbps speeds
+                // (hundreds of thousands of entries) and produce
+                // 100+ MB JSON files. Decimate before writing so the
+                // exported report is usable without losing the shape
+                // of the percentile distribution.
+                let mut suite_for_export = suite.clone();
+                for nr in &mut suite_for_export.reports {
+                    use crate::report::TestResult;
+                    match &mut nr.report.result {
+                        TestResult::Simple(t) => t.downsample_for_export(5_000),
+                        TestResult::Network(net) => {
+                            for v in net.download.values_mut() {
+                                v.downsample_for_export(5_000);
+                            }
+                            for v in net.upload.values_mut() {
+                                v.downsample_for_export(5_000);
+                            }
+                        }
+                    }
+                }
+                let bytes = match export.extension().and_then(|s| s.to_str()) {
+                    Some("cbor") => {
+                        let mut buf = Vec::new();
+                        ciborium::into_writer(&suite_for_export, &mut buf)
+                            .map_err(|e| eyre::eyre!("CBOR encode: {e}"))?;
+                        buf
+                    }
+                    _ => serde_json::to_vec_pretty(&suite_for_export)?,
+                };
+                tokio::fs::write(export, &bytes).await?;
+                eprintln!(
+                    "{}",
+                    format!("Suite report exported to {}", export.display()).cyan()
+                );
             }
         }
     }

@@ -100,6 +100,11 @@ pub enum Commands {
         /// shape via `tc`.
         #[arg(long, default_value = "0")]
         target_rate_mbps: u64,
+
+        /// Emit machine-readable JSON to stdout instead of the pretty
+        /// text report.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Run as server
@@ -165,5 +170,62 @@ pub enum Commands {
         /// Export results to HTML
         #[arg(long)]
         export_html: Option<PathBuf>,
+    },
+
+    /// Run the comprehensive end-to-end suite against a server. Drives
+    /// every protocol speed-cli supports (TCP, UDP, HTTP/1, h2c,
+    /// HTTP/2-TLS) and produces one combined report. HTTP/3 is skipped
+    /// because the bundled server does not yet implement it.
+    Suite {
+        /// Server hostname or IP. Defaults to 127.0.0.1.
+        #[arg(short, long, default_value = "127.0.0.1")]
+        server: String,
+
+        /// TCP/UDP port (servers expose both on the same port).
+        #[arg(long, default_value = "5201")]
+        tcp_udp_port: u16,
+
+        /// HTTP (cleartext) port.
+        #[arg(long, default_value = "8080")]
+        http_port: u16,
+
+        /// HTTPS port.
+        #[arg(long, default_value = "8443")]
+        https_port: u16,
+
+        /// Duration *per phase* in seconds. Total wall-clock is roughly
+        /// this × (number of phases) (~7 phases by default).
+        #[arg(short, long, default_value = "8")]
+        duration: u64,
+
+        /// Warmup seconds inside each phase.
+        #[arg(long, default_value = "1")]
+        warmup: u64,
+
+        /// Parallel connections / streams.
+        #[arg(short, long, default_value = "4")]
+        connections: usize,
+
+        /// UDP target rate in Mbps for throughput phase. 0 = saturate.
+        #[arg(long, default_value = "100")]
+        udp_target_rate_mbps: u64,
+
+        /// Skip TLS phases (HTTPS/HTTP-2). Useful when the server
+        /// wasn't started with `--https`.
+        #[arg(long)]
+        no_tls: bool,
+
+        /// Goodput vs wire-rate accounting.
+        #[arg(long, value_enum, default_value_t = AccountingArg::Goodput)]
+        accounting: AccountingArg,
+
+        /// Export the suite report to a file (JSON or CBOR).
+        #[arg(short, long)]
+        export: Option<PathBuf>,
+
+        /// Emit machine-readable JSON to stdout instead of the pretty
+        /// text report. Combine with `--export` to also save to disk.
+        #[arg(long)]
+        json: bool,
     },
 }

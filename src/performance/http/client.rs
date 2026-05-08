@@ -73,7 +73,7 @@ fn ensure_crypto_provider() {
 // TODO: Need to optimize HTTPS (e.g. HTTP/2) tests for throughput
 
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
-    println!(
+    eprintln!(
         "{}",
         format!(
             "Starting {} speed test to server {}...",
@@ -283,7 +283,7 @@ async fn measure_http_latency(
     let url = format!("{server_url}/latency");
     let mut measurements = Vec::new();
 
-    println!("Measuring HTTP latency for {duration:?}...");
+    eprintln!("Measuring HTTP latency for {duration:?}...");
 
     // Create progress bar for latency measurement
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
@@ -352,7 +352,7 @@ async fn run_download_test(
     duration: Duration,
     warmup: Duration,
 ) -> Result<ThroughputResult> {
-    println!(
+    eprintln!(
         "Starting download test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -427,6 +427,7 @@ async fn run_download_test(
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
+        udp_stats: None,
     })
 }
 
@@ -439,7 +440,7 @@ async fn run_upload_test(
     duration: Duration,
     warmup: Duration,
 ) -> Result<ThroughputResult> {
-    println!(
+    eprintln!(
         "Starting upload test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -520,6 +521,7 @@ async fn run_upload_test(
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
+        udp_stats: None,
     })
 }
 
@@ -555,6 +557,12 @@ async fn download_chunk(
     Ok(total_bytes)
 }
 
+/// Upload `payload_size` bytes as a *single* POST whose body is a
+/// stream of `chunk_size` chunks. This is the right shape for a
+/// throughput test: we measure the rate at which the network can carry
+/// one application-level upload, not the rate at which the client can
+/// perform N back-to-back requests (the previous behavior was the
+/// latter, which conflated request rate with throughput).
 async fn upload_chunk(
     client: &Client,
     server_url: &str,
@@ -562,39 +570,35 @@ async fn upload_chunk(
     chunk_data: Vec<u8>,
 ) -> Result<u64> {
     let chunk_size = chunk_data.len();
-    let total_bytes_to_send = payload_size;
-    let mut total_bytes_sent = 0u64;
+    if chunk_size == 0 || payload_size == 0 {
+        return Ok(0);
+    }
+    let num_chunks = payload_size.div_ceil(chunk_size);
+    let chunk_template = bytes::Bytes::from(chunk_data);
 
-    // Calculate how many chunks we need to send
-    let num_chunks = total_bytes_to_send.div_ceil(chunk_size); // Ceiling division
-
-    for chunk_index in 0..num_chunks {
-        let remaining_bytes = total_bytes_to_send - (chunk_index * chunk_size);
-        let current_chunk_size = std::cmp::min(chunk_size, remaining_bytes);
-
-        // Use only the needed portion of chunk_data for the last chunk
-        let chunk_to_send = if current_chunk_size == chunk_size {
-            chunk_data.clone()
+    let stream = futures::stream::iter((0..num_chunks).map(move |i| {
+        let bytes_already = i * chunk_size;
+        let remaining = payload_size - bytes_already;
+        let this_chunk = chunk_size.min(remaining);
+        let bytes = if this_chunk == chunk_size {
+            chunk_template.clone()
         } else {
-            chunk_data[..current_chunk_size].to_vec()
+            chunk_template.slice(0..this_chunk)
         };
+        Ok::<_, std::io::Error>(bytes)
+    }));
 
-        let response = client
-            .post(format!("{server_url}/upload"))
-            .header("Content-Type", "application/octet-stream")
-            .header("X-Chunk-Index", chunk_index.to_string())
-            .header("X-Total-Chunks", num_chunks.to_string())
-            .body(chunk_to_send)
-            .send()
-            .await?;
+    let response = client
+        .post(format!("{server_url}/upload"))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", payload_size.to_string())
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await?;
 
-        // Ensure the upload was successful
-        if !response.status().is_success() {
-            eyre::bail!("Upload failed with status: {}", response.status());
-        }
-
-        total_bytes_sent += current_chunk_size as u64;
+    if !response.status().is_success() {
+        eyre::bail!("Upload failed with status: {}", response.status());
     }
 
-    Ok(total_bytes_sent)
+    Ok(payload_size as u64)
 }

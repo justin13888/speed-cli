@@ -536,6 +536,15 @@ impl ProductionTcpHandler {
                 );
                 res
             }
+            b'P' => {
+                let res = self.handle_ping(&mut shutdown_rx).await;
+                info!(
+                    "Ping connection {} {}",
+                    self.connection_id,
+                    if res.is_ok() { "completed" } else { "failed" }
+                );
+                res
+            }
             _ => {
                 warn!("Unknown command byte: {}", command);
                 self.metrics
@@ -786,6 +795,50 @@ impl ProductionTcpHandler {
                 }
                 _ = shutdown_rx.recv() => {
                     info!("Full-duplex: shutdown signal");
+                    break Ok(());
+                }
+            }
+        }
+    }
+
+    /// Handle an in-stream ping/pong session. The client writes 8-byte
+    /// little-endian timestamps; we echo each one back as soon as it
+    /// arrives. This measures application-level RTT on a *warm* TCP
+    /// connection, which is what most "ping over TCP" benchmarks
+    /// actually want - distinct from the connect-time latency that the
+    /// older client mode measured.
+    async fn handle_ping(
+        &mut self,
+        shutdown_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        debug!("Handling ping request");
+        let mut buf = [0u8; 8];
+        loop {
+            tokio::select! {
+                read = timeout(self.config.read_timeout, self.socket.read_exact(&mut buf)) => {
+                    match read {
+                        Ok(Ok(_)) => {
+                            self.stats.add_bytes(8);
+                            if let Err(e) = self.socket.write_all(&buf).await {
+                                debug!("ping echo write error: {}", e);
+                                break Ok(());
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            // EOF or read error - peer closed cleanly,
+                            // not an error worth flagging.
+                            debug!("ping read ended: {}", e);
+                            break Ok(());
+                        }
+                        Err(_) => {
+                            // Idle past read_timeout - peer probably done.
+                            break Ok(());
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
                     break Ok(());
                 }
             }

@@ -47,7 +47,7 @@ async fn run_full_duplex_test(
     read_buffer_size: usize,
     warmup: Duration,
 ) -> Result<(ThroughputResult, ThroughputResult)> {
-    println!(
+    eprintln!(
         "Starting TCP full-duplex test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -224,12 +224,14 @@ async fn run_full_duplex_test(
             streams: dl_streams,
             total_duration: duration_eff,
             timestamp,
+            udp_stats: None,
         },
         ThroughputResult {
             measurements: ul_flat,
             streams: ul_streams,
             total_duration: duration_eff,
             timestamp,
+            udp_stats: None,
         },
     ))
 }
@@ -269,7 +271,7 @@ fn collect_streams(
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
 
-    println!(
+    eprintln!(
         "{}",
         format!("Starting TCP test to server {}...", server_addr.cyan())
             .green()
@@ -414,66 +416,111 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     Ok((start_time, config, result).into())
 }
 
-/// Measure TCP latency by establishing connections and measuring round-trip time
+/// Measure TCP application-level RTT on a *warmed* TCP connection by
+/// pinging the server's `'P'` handler. Distinct from connect-time
+/// latency: a TCP three-way handshake involves an extra packet round
+/// and is heavily influenced by syncookies / accept-queue depth, which
+/// is not what most users mean by "TCP latency". This number is
+/// directly comparable to UDP and HTTP RTT in this same tool.
 async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyResult>> {
     let addr = format!("{}:{}", config.server, config.port);
     let duration = config.duration;
     let warmup = config.warmup;
     let mut measurements = Vec::new();
 
-    println!("Measuring TCP latency for {duration:?}...");
+    eprintln!("Measuring TCP in-stream RTT for {duration:?}...");
 
-    // Create progress bar for latency measurement
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
-
     let start = Instant::now();
-
-    // Set up instrumentation
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
 
-    while start.elapsed() < duration {
-        let connect_start = Instant::now();
-        let in_warmup = start.elapsed() < warmup;
-        match TcpStream::connect(&addr).await {
-            Ok(mut stream) => {
-                if let Err(e) = stream.set_nodelay(true) {
-                    tracing::debug!("TCP set_nodelay failed: {e}");
-                }
-                let rtt = connect_start.elapsed().as_secs_f64() * 1000.0;
-                let measurement = LatencyMeasurement {
-                    rtt_ms: Some(rtt),
-                    elapsed_time: start.elapsed(),
-                };
-                if !in_warmup {
-                    measurements.push(measurement.clone());
-                    let _ = tx.send(measurement);
-                }
+    let mut stream = match TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(eyre::eyre!("TCP latency: connect to {} failed: {}", addr, e));
+        }
+    };
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::debug!("TCP set_nodelay failed on latency stream: {e}");
+    }
+    if let Err(e) = stream.write_all(b"P").await {
+        return Err(eyre::eyre!("TCP latency: failed to send 'P' command: {}", e));
+    }
+    // Drain the (potential) idle period so the server is in select.
+    sleep(Duration::from_millis(10)).await;
 
-                // Close the connection cleanly
-                let _ = stream.shutdown().await;
+    let mut send_buf = [0u8; 8];
+    let mut recv_buf = [0u8; 8];
+    // Probe ~every 10ms (well below the floor where added latency
+    // would matter). Configurable knob is a good follow-up.
+    let probe_interval = Duration::from_millis(10);
+
+    while start.elapsed() < duration {
+        let in_warmup = start.elapsed() < warmup;
+        let probe_start = Instant::now();
+        // Write a fresh nonce so we can detect if the echo is offset
+        // (would only happen on a corrupted stream; we just discard).
+        let nonce: u64 = probe_start.elapsed().as_micros() as u64;
+        send_buf.copy_from_slice(&nonce.to_le_bytes());
+        let measurement = match stream.write_all(&send_buf).await {
+            Ok(()) => {
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    stream.read_exact(&mut recv_buf),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {
+                        let echoed = u64::from_le_bytes(recv_buf);
+                        if echoed != nonce {
+                            tracing::debug!("TCP latency: nonce mismatch, discarding sample");
+                            LatencyMeasurement {
+                                rtt_ms: None,
+                                elapsed_time: start.elapsed(),
+                            }
+                        } else {
+                            LatencyMeasurement {
+                                rtt_ms: Some(probe_start.elapsed().as_secs_f64() * 1000.0),
+                                elapsed_time: start.elapsed(),
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        trace!("TCP latency read error: {e}");
+                        LatencyMeasurement {
+                            rtt_ms: None,
+                            elapsed_time: start.elapsed(),
+                        }
+                    }
+                    Err(_) => {
+                        tracing::debug!("TCP latency: read timeout, dropped sample");
+                        LatencyMeasurement {
+                            rtt_ms: None,
+                            elapsed_time: start.elapsed(),
+                        }
+                    }
+                }
             }
             Err(e) => {
-                let measurement = LatencyMeasurement {
+                trace!("TCP latency write error: {e}");
+                LatencyMeasurement {
                     rtt_ms: None,
                     elapsed_time: start.elapsed(),
-                };
-                if !in_warmup {
-                    measurements.push(measurement.clone());
-                    let _ = tx.send(measurement);
                 }
-
-                trace!("TCP connection error while measuring latency: {e}");
             }
+        };
+
+        if !in_warmup {
+            measurements.push(measurement.clone());
+            let _ = tx.send(measurement);
         }
 
-        // Wait between connections to avoid overwhelming the server
-        sleep(Duration::from_millis(100)).await;
+        sleep(probe_interval).await;
     }
 
-    // Drop the sender to signal stats collector to finish
+    let _ = stream.shutdown().await;
     drop(tx);
 
-    // Wait for stats collector to complete and get measurements
     measurements = stats_collector
         .finish(progress_bar, "Latency measurement complete".to_string())
         .await;
@@ -497,7 +544,7 @@ async fn run_download_test(
     read_buffer_size: usize,
     warmup: Duration,
 ) -> Result<ThroughputResult> {
-    println!(
+    eprintln!(
         "Starting TCP download test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -599,6 +646,7 @@ async fn run_download_test(
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
+        udp_stats: None,
     })
 }
 
@@ -610,7 +658,7 @@ async fn run_upload_test(
     duration: Duration,
     warmup: Duration,
 ) -> Result<ThroughputResult> {
-    println!(
+    eprintln!(
         "Starting TCP upload test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -643,51 +691,82 @@ async fn run_upload_test(
             let addr = format!("{server}:{port}");
             let mut local_measurements = Vec::new();
 
-            match TcpStream::connect(&addr).await {
-                Ok(mut stream) => {
-                    if let Err(e) = stream.set_nodelay(true) {
-                        tracing::debug!("TCP set_nodelay failed on upload conn {i}: {e}");
+            // Reconnect-on-error loop. A flaky link can RST a single
+            // socket without killing the test; rebuild the connection
+            // and keep measuring. Bound the reconnect attempts so we
+            // can't busy-loop if the server is gone.
+            let mut reconnects_remaining: u32 = 5;
+            'outer: while start_time.elapsed() < duration {
+                let mut stream = match TcpStream::connect(&addr).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let measurement = ThroughputMeasurement::new_error(
+                            ConnectionError::ConnectionFailed(format!(
+                                "TCP connect (upload) on conn {i}: {e}"
+                            )),
+                            Duration::from_millis(0),
+                            0,
+                        );
+                        local_measurements.push(measurement.clone());
+                        let _ = tx.send(measurement);
+                        if reconnects_remaining == 0 {
+                            break 'outer;
+                        }
+                        reconnects_remaining -= 1;
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
                     }
-                    // Send upload command
-                    if let Err(e) = stream.write_all(b"U").await {
-                        eprintln!("Failed to send upload command on connection {i}: {e}");
-                        return local_measurements;
+                };
+                if let Err(e) = stream.set_nodelay(true) {
+                    tracing::debug!("TCP set_nodelay failed on upload conn {i}: {e}");
+                }
+                if let Err(e) = stream.write_all(b"U").await {
+                    eprintln!("Failed to send upload command on connection {i}: {e}");
+                    if reconnects_remaining == 0 {
+                        break 'outer;
                     }
+                    reconnects_remaining -= 1;
+                    continue;
+                }
 
-                    while start_time.elapsed() < duration {
-                        let write_start = Instant::now();
-                        let in_warmup = start_time.elapsed() < warmup;
-                        match stream.write_all(&data).await {
-                            Ok(_) => {
-                                let measurement = ThroughputMeasurement::new(
-                                    data.len() as u64,
-                                    write_start.elapsed(),
-                                );
-                                if !in_warmup {
-                                    local_measurements.push(measurement.clone());
-                                    let _ = tx.send(measurement);
-                                }
+                while start_time.elapsed() < duration {
+                    let write_start = Instant::now();
+                    let in_warmup = start_time.elapsed() < warmup;
+                    match stream.write_all(&data).await {
+                        Ok(_) => {
+                            let measurement = ThroughputMeasurement::new(
+                                data.len() as u64,
+                                write_start.elapsed(),
+                            );
+                            if !in_warmup {
+                                local_measurements.push(measurement.clone());
+                                let _ = tx.send(measurement);
                             }
-                            Err(e) => {
-                                let measurement = ThroughputMeasurement::new_error(
-                                    ConnectionError::Unknown(format!(
-                                        "TCP write error on connection {i}: {e}"
-                                    )),
-                                    write_start.elapsed(),
-                                    0,
-                                );
-                                if !in_warmup {
-                                    local_measurements.push(measurement.clone());
-                                    let _ = tx.send(measurement);
-                                }
-                                break;
+                        }
+                        Err(e) => {
+                            let measurement = ThroughputMeasurement::new_error(
+                                ConnectionError::TransferFailed(format!(
+                                    "TCP write on conn {i}: {e}"
+                                )),
+                                write_start.elapsed(),
+                                0,
+                            );
+                            if !in_warmup {
+                                local_measurements.push(measurement.clone());
+                                let _ = tx.send(measurement);
                             }
+                            // Connection is dead; break inner loop so
+                            // outer reconnects (if budget remains).
+                            break;
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!("TCP connection error on connection {i}: {e}");
+                // Inner loop exited - either duration elapsed or stream
+                // died. If duration elapsed, outer loop will exit too.
+                if reconnects_remaining == 0 {
+                    break;
                 }
+                reconnects_remaining -= 1;
             }
 
             local_measurements
@@ -714,5 +793,6 @@ async fn run_upload_test(
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
+        udp_stats: None,
     })
 }

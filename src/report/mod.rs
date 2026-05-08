@@ -3,21 +3,25 @@ use colored::*;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 
+use crate::utils::env::Environment;
+
 mod config;
 mod errors;
 mod measurement;
 mod result;
+mod suite;
 
 pub use config::*;
 pub use errors::*;
 pub use measurement::*;
 pub use result::*;
+pub use suite::*;
 
 /// Current report schema version. Bump when an incompatible structural
 /// change lands (renaming a field, removing a variant, changing
 /// semantics). Additive changes - new optional fields tagged with
 /// `#[serde(default)]` - do *not* require a bump.
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
 fn default_schema_version() -> u32 {
     // Reports written before schema versioning was introduced are treated
@@ -43,6 +47,10 @@ pub struct TestReport {
     pub timestamp: DateTime<Utc>,
     /// Version of speed-cli that generated this report
     pub version: String,
+    /// Snapshot of the local environment when the test ran. `None` on
+    /// reports written before schema 2.
+    #[serde(default)]
+    pub environment: Option<Environment>,
 }
 
 impl TestReport {
@@ -59,6 +67,7 @@ impl TestReport {
             result,
             timestamp,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            environment: Some(Environment::capture()),
         }
     }
 }
@@ -77,6 +86,7 @@ where
             result: result.into(),
             timestamp: timestamp.into(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            environment: Some(Environment::capture()),
         }
     }
 }
@@ -124,6 +134,12 @@ impl Display for TestReport {
                 .yellow()
         )?;
         writeln!(f)?;
+
+        if let Some(env) = &self.environment {
+            writeln!(f, "{}", "Environment:".bright_white().bold().underline())?;
+            write!(f, "{env}")?;
+            writeln!(f)?;
+        }
 
         writeln!(f, "{}", "Configuration:".bright_white().bold().underline())?;
         write!(f, "{}", self.config)?;

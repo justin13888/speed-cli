@@ -87,6 +87,82 @@ pub struct ThroughputResult {
     pub total_duration: Duration,
 
     pub timestamp: DateTime<Utc>,
+
+    /// UDP-only: receiver-side packet stats. Populated locally for UDP
+    /// download (the client receives) and from the server REPORT for
+    /// UDP upload (the server receives). `None` for TCP / HTTP runs.
+    #[serde(default)]
+    pub udp_stats: Option<UdpRunStats>,
+}
+
+/// Receiver-side UDP packet accounting. Shipped per direction in
+/// [`ThroughputResult::udp_stats`]. Whichever side acted as receiver
+/// for the run is the side these stats describe — the field
+/// [`UdpRunStats::observed_by`] makes that explicit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UdpRunStats {
+    pub observed_by: UdpStatsSide,
+    pub received_packets: u64,
+    pub bytes_received: u64,
+    pub lost_packets: u64,
+    pub out_of_order: u64,
+    pub duplicates: u64,
+    /// RFC 3550 interarrival jitter in microseconds.
+    pub jitter_us: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UdpStatsSide {
+    /// Stats computed by the local (client) side. Used for downloads
+    /// where the client is the receiver.
+    Local,
+    /// Stats reported by the remote (server) side via the blaster
+    /// protocol's REPORT packet. Used for uploads.
+    Remote,
+}
+
+impl UdpRunStats {
+    /// Loss as a fraction in [0.0, 1.0]. Returns `None` if no packets
+    /// were sent (avoids 0/0).
+    pub fn loss_fraction(&self) -> Option<f64> {
+        let sent = self.received_packets + self.lost_packets;
+        if sent == 0 {
+            return None;
+        }
+        Some(self.lost_packets as f64 / sent as f64)
+    }
+}
+
+impl ThroughputResult {
+    /// Reduce per-measurement detail to at most `max_samples` entries
+    /// per stream (and per aggregate). At multi-Gbps speeds the
+    /// untrimmed vector grows into the hundreds of thousands and pushes
+    /// JSON exports past 100 MB; this caps the file size while
+    /// preserving percentile fidelity (uniform-stride decimation, which
+    /// keeps the order statistics).
+    ///
+    /// Aggregate stats already computed against the full vector are
+    /// unaffected; this only mutates the on-disk representation.
+    pub fn downsample_for_export(&mut self, max_samples: usize) {
+        fn decimate<T: Clone>(v: &mut Vec<T>, max: usize) {
+            if v.len() <= max || max == 0 {
+                return;
+            }
+            let stride = v.len() as f64 / max as f64;
+            let mut out = Vec::with_capacity(max);
+            let mut i = 0.0;
+            while (i as usize) < v.len() && out.len() < max {
+                out.push(v[i as usize].clone());
+                i += stride;
+            }
+            *v = out;
+        }
+        decimate(&mut self.measurements, max_samples);
+        for s in &mut self.streams {
+            decimate(&mut s.measurements, max_samples);
+        }
+    }
 }
 
 impl fmt::Display for ThroughputResult {
@@ -223,6 +299,49 @@ impl fmt::Display for ThroughputResult {
                     s.measurements.len().to_formatted_string(&Locale::en).white()
                 )?;
             }
+        }
+
+        if let Some(udp) = &self.udp_stats {
+            let side = match udp.observed_by {
+                UdpStatsSide::Local => "client-local",
+                UdpStatsSide::Remote => "server-reported",
+            };
+            writeln!(
+                f,
+                "  {} ({}):",
+                "UDP Packet Stats".bright_green().bold(),
+                side.bright_blue()
+            )?;
+            writeln!(
+                f,
+                "    Packets received: {}",
+                udp.received_packets.to_formatted_string(&Locale::en).cyan()
+            )?;
+            writeln!(
+                f,
+                "    Lost: {} {}",
+                udp.lost_packets.to_formatted_string(&Locale::en).red(),
+                match udp.loss_fraction() {
+                    Some(f) => format!("({:.3}%)", f * 100.0),
+                    None => String::new(),
+                }
+                .red()
+            )?;
+            writeln!(
+                f,
+                "    Out-of-order: {}",
+                udp.out_of_order.to_formatted_string(&Locale::en).yellow()
+            )?;
+            writeln!(
+                f,
+                "    Duplicates: {}",
+                udp.duplicates.to_formatted_string(&Locale::en).yellow()
+            )?;
+            writeln!(
+                f,
+                "    Jitter (RFC 3550): {} us",
+                udp.jitter_us.to_formatted_string(&Locale::en).magenta()
+            )?;
         }
 
         writeln!(

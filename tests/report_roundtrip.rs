@@ -26,6 +26,7 @@ fn make_sample_report() -> TestReport {
         streams: Vec::new(),
         total_duration: Duration::from_secs(1),
         timestamp: Utc::now(),
+        udp_stats: None,
     };
     net.download.insert(1024, throughput.clone());
     net.upload.insert(1024, throughput);

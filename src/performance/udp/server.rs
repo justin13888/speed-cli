@@ -263,6 +263,7 @@ impl BlasterServer {
                 lost: sess.rx.lost(),
                 out_of_order: sess.rx.out_of_order,
                 jitter_us: sess.rx.jitter_us(),
+                duplicates: sess.rx.duplicates,
             }
         };
         let bytes = report.encode_to_vec(None);

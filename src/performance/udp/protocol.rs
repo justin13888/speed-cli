@@ -77,12 +77,16 @@ pub enum BlasterPacket {
     Report {
         received: u64,
         bytes_received: u64,
-        /// `lost = max_seq - received`. Negative scenarios (extreme
-        /// reorder past the window) are clamped to 0.
+        /// `lost = max_seq - (received - duplicates)`. Saturates at 0
+        /// when reordering pushes a sequence number past the highest
+        /// seen.
         lost: u64,
         out_of_order: u64,
         /// RFC 3550 interarrival jitter in microseconds.
         jitter_us: u64,
+        /// Packets whose sequence number had been seen before. Older
+        /// peers that don't include this field decode as `0`.
+        duplicates: u64,
     },
     /// Latency probe.
     Ping {
@@ -132,6 +136,7 @@ impl BlasterPacket {
                 lost,
                 out_of_order,
                 jitter_us,
+                duplicates,
             } => {
                 out.put_u8(KIND_REPORT);
                 out.put_u8(0);
@@ -141,6 +146,7 @@ impl BlasterPacket {
                 out.put_u64(*lost);
                 out.put_u64(*out_of_order);
                 out.put_u64(*jitter_us);
+                out.put_u64(*duplicates);
             }
             BlasterPacket::Ping { send_ts_us } => {
                 out.put_u8(KIND_PING);
@@ -216,6 +222,9 @@ impl BlasterPacket {
                 let lost = buf.get_u64();
                 let out_of_order = buf.get_u64();
                 let jitter_us = buf.get_u64();
+                // duplicates was added later; treat absence as 0 so we
+                // can decode reports from older peers without crashing.
+                let duplicates = if buf.remaining() >= 8 { buf.get_u64() } else { 0 };
                 Some((
                     BlasterPacket::Report {
                         received,
@@ -223,6 +232,7 @@ impl BlasterPacket {
                         lost,
                         out_of_order,
                         jitter_us,
+                        duplicates,
                     },
                     0,
                 ))
@@ -250,25 +260,49 @@ impl BlasterPacket {
     }
 }
 
-/// Tracks per-session loss / OOO / jitter on the receiving side.
+/// Tracks per-session loss / OOO / duplicates / jitter on the
+/// receiving side. Loss is computed at report time so that reordering
+/// across the highest-seq mark doesn't get counted as a permanent loss.
 #[derive(Debug, Default)]
 pub struct ReceiveStats {
     pub max_seq: u64,
     pub received: u64,
     pub bytes_received: u64,
     pub out_of_order: u64,
-    /// Smoothed RFC 3550 interarrival jitter in microseconds (Q4
-    /// fixed-point isn't used here; we keep it as f64 for simplicity
-    /// and round at report time).
+    pub duplicates: u64,
+    /// Smoothed RFC 3550 interarrival jitter in microseconds.
     jitter: f64,
     /// Previous (recv_us - send_us) sample for jitter calc.
     prev_transit_us: Option<i128>,
+    /// Sliding "we've seen this seq before" set for the most recent
+    /// REORDER_WINDOW packets. Anything older we ignore for duplicate
+    /// detection - dups across a multi-second window aren't useful
+    /// signal.
+    recent_seqs: std::collections::VecDeque<u64>,
+    recent_seqs_set: std::collections::HashSet<u64>,
 }
+
+/// How far back we'll detect duplicates. Packets reordered by more
+/// than this are not counted as duplicates (they'll just look like
+/// out-of-order receives, which they functionally are).
+const REORDER_WINDOW: usize = 4096;
 
 impl ReceiveStats {
     pub fn record(&mut self, seq: u64, payload_bytes: u64, send_ts_us: u64, recv_ts_us: u64) {
         self.received += 1;
         self.bytes_received += payload_bytes;
+
+        if self.recent_seqs_set.contains(&seq) {
+            self.duplicates += 1;
+        } else {
+            self.recent_seqs.push_back(seq);
+            self.recent_seqs_set.insert(seq);
+            if self.recent_seqs.len() > REORDER_WINDOW
+                && let Some(old) = self.recent_seqs.pop_front()
+            {
+                self.recent_seqs_set.remove(&old);
+            }
+        }
 
         if seq > self.max_seq {
             self.max_seq = seq;
@@ -284,11 +318,12 @@ impl ReceiveStats {
         self.prev_transit_us = Some(cur);
     }
 
-    /// `lost = max_seq - received`. Saturates at 0; OOO packets are
-    /// counted in `received` so this estimates packets that the sender
-    /// emitted but the receiver never saw.
+    /// `lost = max_seq - (received - duplicates)`. Subtracting
+    /// duplicates avoids counting a re-sent packet as if it filled a
+    /// hole. Saturates at 0 to handle pathological reorder.
     pub fn lost(&self) -> u64 {
-        self.max_seq.saturating_sub(self.received)
+        let unique = self.received.saturating_sub(self.duplicates);
+        self.max_seq.saturating_sub(unique)
     }
 
     pub fn jitter_us(&self) -> u64 {
@@ -374,6 +409,43 @@ mod tests {
         assert_eq!(s.received, 3);
         assert_eq!(s.max_seq, 4);
         assert_eq!(s.lost(), 1);
+        assert_eq!(s.duplicates, 0);
+    }
+
+    #[test]
+    fn receive_stats_counts_duplicates_and_excludes_them_from_loss() {
+        // Re-sent packets (e.g. middlebox replay) should be counted as
+        // duplicates and *not* as filling a gap. seqs: 1,2,2,4 → 3 unique,
+        // 1 dup, max_seq 4 → lost = 4 - 3 = 1.
+        let mut s = ReceiveStats::default();
+        s.record(1, 100, 0, 100);
+        s.record(2, 100, 100, 200);
+        s.record(2, 100, 100, 250); // duplicate
+        s.record(4, 100, 300, 400);
+        assert_eq!(s.received, 4);
+        assert_eq!(s.duplicates, 1);
+        assert_eq!(s.lost(), 1);
+    }
+
+    #[test]
+    fn report_packet_roundtrip_includes_duplicates() {
+        let p = BlasterPacket::Report {
+            received: 100,
+            bytes_received: 100_000,
+            lost: 5,
+            out_of_order: 2,
+            jitter_us: 42,
+            duplicates: 3,
+        };
+        let bytes = p.encode_to_vec(None);
+        let (decoded, _) = BlasterPacket::decode(&bytes).unwrap();
+        match decoded {
+            BlasterPacket::Report { duplicates, lost, .. } => {
+                assert_eq!(duplicates, 3);
+                assert_eq!(lost, 5);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

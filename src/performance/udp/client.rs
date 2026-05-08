@@ -29,7 +29,8 @@ use crate::{
     TestType,
     report::{
         ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, StreamMeasurements,
-        TestReport, ThroughputMeasurement, ThroughputResult, UdpTestConfig,
+        TestReport, ThroughputMeasurement, ThroughputResult, UdpRunStats, UdpStatsSide,
+        UdpTestConfig,
     },
     utils::{
         format::format_bytes,
@@ -47,7 +48,7 @@ fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Durat
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
-    println!(
+    eprintln!(
         "{}",
         format!("Starting UDP test to server {}...", server_addr.cyan())
             .green()
@@ -148,7 +149,7 @@ async fn run_latency(
     duration: Duration,
     warmup: Duration,
 ) -> Result<Option<LatencyResult>> {
-    println!("Measuring UDP latency for {duration:?}...");
+    eprintln!("Measuring UDP latency for {duration:?}...");
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -242,7 +243,7 @@ async fn run_download(
     warmup: Duration,
     target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
-    println!(
+    eprintln!(
         "UDP download: {} payload, {} target rate",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
@@ -329,11 +330,21 @@ async fn run_download(
         stream_id: 0,
         measurements: measurements.clone(),
     }];
+    let udp_stats = Some(UdpRunStats {
+        observed_by: UdpStatsSide::Local,
+        received_packets: rx_stats.received,
+        bytes_received: rx_stats.bytes_received,
+        lost_packets: rx_stats.lost(),
+        out_of_order: rx_stats.out_of_order,
+        duplicates: rx_stats.duplicates,
+        jitter_us: rx_stats.jitter_us(),
+    });
     Ok(ThroughputResult {
         measurements,
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: Utc::now(),
+        udp_stats,
     })
 }
 
@@ -344,7 +355,7 @@ async fn run_upload(
     warmup: Duration,
     target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
-    println!(
+    eprintln!(
         "UDP upload: {} payload, {} target rate",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
@@ -400,8 +411,17 @@ async fn run_upload(
                     measurements.push(m.clone());
                     let _ = tx.send(m);
                 }
+                seq += 1;
             }
             Err(e) => {
+                // UDP send failures are *expected* at saturation: ENOBUFS
+                // (kernel send queue full) and EAGAIN/WouldBlock both mean
+                // "back off, try again", not "test is over". We record the
+                // failed attempt for accounting and yield so the kernel can
+                // drain. Any other errno (host unreachable, etc.) we record
+                // and keep going too - the symmetric loop on the server side
+                // will simply observe loss.
+                let kind = e.kind();
                 let m = ThroughputMeasurement::new_error(
                     ConnectionError::TransferFailed(format!("UDP send error: {e}")),
                     send_start.elapsed(),
@@ -411,10 +431,21 @@ async fn run_upload(
                     measurements.push(m.clone());
                     let _ = tx.send(m);
                 }
-                break;
+                if matches!(
+                    kind,
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
+                ) {
+                    tokio::task::yield_now().await;
+                } else {
+                    // For non-transient errors, brief sleep to avoid a
+                    // tight error loop while still keeping the test alive.
+                    sleep(Duration::from_millis(1)).await;
+                }
+                // Note: we deliberately do *not* increment `seq` here -
+                // the packet was never put on the wire, so the receiver
+                // shouldn't count it as a gap.
             }
         }
-        seq += 1;
 
         if let Some(d) = inter_packet_delay {
             sleep(d).await;
@@ -439,21 +470,34 @@ async fn run_upload(
             break;
         }
     }
-    if let Some(BlasterPacket::Report {
+    let udp_stats = if let Some(BlasterPacket::Report {
         received,
         bytes_received,
         lost,
         out_of_order,
         jitter_us,
+        duplicates,
     }) = report
     {
         debug!(
-            "server REPORT: received={} bytes={} lost={} oos={} jitter={}us",
-            received, bytes_received, lost, out_of_order, jitter_us
+            "server REPORT: received={} bytes={} lost={} oos={} dups={} jitter={}us",
+            received, bytes_received, lost, out_of_order, duplicates, jitter_us
         );
+        Some(UdpRunStats {
+            observed_by: UdpStatsSide::Remote,
+            received_packets: received,
+            bytes_received,
+            lost_packets: lost,
+            out_of_order,
+            duplicates,
+            jitter_us,
+        })
     } else {
-        tracing::warn!("UDP upload: no REPORT received from server");
-    }
+        tracing::warn!(
+            "UDP upload: no REPORT received from server; loss/jitter will be unreported"
+        );
+        None
+    };
 
     drop(tx);
     let _ = stats_collector
@@ -470,6 +514,7 @@ async fn run_upload(
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: Utc::now(),
+        udp_stats,
     })
 }
 
