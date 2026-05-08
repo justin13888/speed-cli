@@ -1,27 +1,35 @@
+//! UDP blaster client.
+//!
+//! Three modes:
+//! - **Latency**: send PING / wait for PONG, measure round-trip time.
+//! - **Download**: ask the server to send to us at `target_rate_bps`
+//!   for `duration`, count what we got. Loss / OOO / jitter are
+//!   computed locally from the DATA stream.
+//! - **Upload**: send to the server at the target rate, then ask for a
+//!   REPORT to see how many packets actually arrived.
+//!
+//! Pacing uses `tokio::time::sleep`, which has roughly 1 ms
+//! resolution. That caps the achievable target rate at a few hundred
+//! Mbps before pacing starts to bunch packets. For higher rates, set
+//! `target_rate_bps = 0` ("saturate") and let the kernel + scheduler
+//! decide.
+
 use bytes::Bytes;
 use chrono::Utc;
 use colored::Colorize as _;
-use eyre::Result;
-use parking_lot::Mutex;
+use eyre::{Result, eyre};
 use rand::RngCore;
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
-use tracing::trace;
+use tracing::{debug, trace};
 
-use super::congestion::{BbrCongestionControl, CongestionControl};
-use super::pacing::{PacedSend, Pacer};
-use super::protocol::{
-    ConnectionState, InFlightPacket, LossRecovery, StpPacket, calculate_rtt,
-    current_timestamp_micros,
-};
+use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
 use crate::{
     TestType,
     report::{
-        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, TestReport,
-        ThroughputMeasurement, ThroughputResult, UdpTestConfig,
+        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, StreamMeasurements,
+        TestReport, ThroughputMeasurement, ThroughputResult, UdpTestConfig,
     },
     utils::{
         format::format_bytes,
@@ -37,188 +45,8 @@ fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Durat
         .max(Duration::from_millis(1))
 }
 
-// TODO: Verify upload, download, latency modes all work correctly
-// TODO: Improve the STP implementation performance
-
-/// STP Client for bandwidth measurement
-pub struct StpClient {
-    socket: UdpSocket,
-    connection: ConnectionState,
-    congestion_control: Box<dyn CongestionControl + Send>,
-    loss_recovery: LossRecovery,
-    pacer: Pacer,
-
-    // Statistics
-    bytes_sent: u64,
-    bytes_acked: u64,
-    packets_sent: u64,
-    packets_acked: u64,
-    rtt_samples: Vec<Duration>,
-
-    // Timestamps for tracking
-    ack_timestamps: Arc<Mutex<HashMap<u64, u64>>>,
-}
-
-impl StpClient {
-    pub async fn new(server_addr: &str) -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        socket.connect(server_addr).await?;
-
-        let peer_addr = server_addr.parse()?;
-        let connection = ConnectionState::new(peer_addr);
-        let congestion_control = Box::new(BbrCongestionControl::new());
-        let initial_rate = congestion_control.get_sending_rate();
-
-        Ok(Self {
-            socket,
-            connection,
-            congestion_control,
-            loss_recovery: LossRecovery::new(),
-            pacer: Pacer::new(initial_rate),
-            bytes_sent: 0,
-            bytes_acked: 0,
-            packets_sent: 0,
-            packets_acked: 0,
-            rtt_samples: Vec::new(),
-            ack_timestamps: Arc::new(Mutex::new(HashMap::new())),
-        })
-    }
-
-    /// Send data with STP protocol
-    pub async fn send_data(&mut self, payload: Bytes) -> Result<()> {
-        let packet_number = self.connection.next_packet_number();
-        let packet = StpPacket::new(
-            packet_number,
-            self.connection.last_received_packet,
-            self.connection.last_received_timestamp,
-            payload.clone(),
-        );
-
-        // Store timestamp for RTT calculation
-        {
-            let mut timestamps = self.ack_timestamps.lock();
-            timestamps.insert(packet_number, packet.header.timestamp);
-        }
-
-        // Pace the sending
-        let wait_duration = self.pacer.schedule_next_send(packet.payload.len() + 32);
-        if let Some(duration) = wait_duration {
-            PacedSend::new(Some(duration)).await;
-        }
-
-        // Send packet
-        let encoded = packet.encode();
-        self.socket.send(&encoded).await?;
-
-        // Update statistics and congestion control
-        let now = Instant::now();
-        self.bytes_sent += encoded.len() as u64;
-        self.packets_sent += 1;
-
-        self.congestion_control.on_packet_sent(encoded.len(), now);
-        self.pacer
-            .update_rate(self.congestion_control.get_sending_rate());
-
-        // Track in-flight packet
-        let in_flight = InFlightPacket::new(packet_number, encoded.len(), encoded);
-        self.loss_recovery.on_packet_sent(in_flight);
-
-        Ok(())
-    }
-
-    /// Process received ACK packet
-    pub async fn process_ack(&mut self, data: &[u8]) -> Result<()> {
-        if let Some(packet) = StpPacket::decode(Bytes::copy_from_slice(data)) {
-            self.connection.update_from_received(&packet.header);
-
-            let now = Instant::now();
-
-            // Calculate RTT if we have the timestamp
-            let rtt = if packet.header.ack_timestamp_echo > 0 {
-                calculate_rtt(packet.header.ack_timestamp_echo)
-            } else {
-                Duration::from_millis(1) // Default minimum RTT
-            };
-
-            // Process acknowledgment
-            let (acked_packets, lost_packets) =
-                self.loss_recovery.on_ack_received(packet.header.latest_ack);
-
-            // Update statistics for acked packets.
-            //
-            // Karn's algorithm: skip RTT samples for retransmitted packets,
-            // since we can't tell whether the ACK is for the original or the
-            // retransmission, and including those samples biases the RTT
-            // estimate upward.
-            for acked in &acked_packets {
-                self.bytes_acked += acked.size as u64;
-                self.packets_acked += 1;
-                if !acked.retransmitted {
-                    self.rtt_samples.push(rtt);
-                }
-
-                // Notify congestion control
-                self.congestion_control
-                    .on_ack_received(acked.size, rtt, now);
-            }
-
-            // Handle lost packets
-            for lost in &lost_packets {
-                self.congestion_control.on_packet_lost(lost.size, now);
-
-                // Retransmit lost packet with new packet number
-                let new_packet_number = self.connection.next_packet_number();
-                let retransmit_packet = StpPacket::decode(lost.data.clone()).map(|mut p| {
-                    p.header.packet_number = new_packet_number;
-                    p.header.timestamp = current_timestamp_micros();
-                    p.header.latest_ack = self.connection.last_received_packet;
-                    p.header.ack_timestamp_echo = self.connection.last_received_timestamp;
-                    p
-                });
-
-                if let Some(packet) = retransmit_packet {
-                    let encoded = packet.encode();
-                    self.socket.send(&encoded).await?;
-
-                    // Track retransmission
-                    let mut retransmit_in_flight =
-                        InFlightPacket::new(new_packet_number, encoded.len(), encoded);
-                    retransmit_in_flight.retransmitted = true;
-                    self.loss_recovery.on_packet_sent(retransmit_in_flight);
-                }
-            }
-
-            // Update pacing rate
-            self.pacer
-                .update_rate(self.congestion_control.get_sending_rate());
-        }
-
-        Ok(())
-    }
-
-    /// Get current throughput statistics
-    pub fn get_stats(&self) -> (u64, u64, u64, u64, f64, Duration) {
-        let avg_rtt = if self.rtt_samples.is_empty() {
-            Duration::from_millis(0)
-        } else {
-            let sum: Duration = self.rtt_samples.iter().sum();
-            sum / self.rtt_samples.len() as u32
-        };
-
-        (
-            self.bytes_sent,
-            self.bytes_acked,
-            self.packets_sent,
-            self.packets_acked,
-            self.congestion_control.get_sending_rate(),
-            avg_rtt,
-        )
-    }
-}
-
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
-
     println!(
         "{}",
         format!("Starting UDP test to server {}...", server_addr.cyan())
@@ -226,32 +54,34 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
             .bold()
     );
 
-    // Pre-flight: send one PING and require a response within 1s. STP
-    // servers ACK any well-formed packet, so this is a cheap way to
-    // surface "server not running" / "blocked by firewall" before
-    // committing to the full test.
+    if config.parallel_streams > 1 {
+        tracing::warn!(
+            "UDP test was asked for {} parallel streams, but the blaster runs a single \
+             stream per session. Multi-stream UDP is tracked in the Phase 3 follow-up.",
+            config.parallel_streams
+        );
+    }
+
+    // Pre-flight: PING/PONG with a 1s timeout.
     {
-        let probe = StpClient::new(&server_addr).await?;
-        let ping = StpPacket::new(1, 0, 0, Bytes::from("PING"));
-        probe.socket.send(&ping.encode()).await.map_err(|e| {
-            eyre::eyre!(
-                "UDP pre-flight send to {} failed: {}",
-                server_addr,
-                e
-            )
-        })?;
-        let mut buf = [0u8; 2048];
-        match timeout(Duration::from_secs(1), probe.socket.recv(&mut buf)).await {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        socket.connect(&server_addr).await?;
+        let p = BlasterPacket::Ping {
+            send_ts_us: now_us(),
+        };
+        socket.send(&p.encode_to_vec(None)).await?;
+        let mut buf = vec![0u8; 4096];
+        match timeout(Duration::from_secs(1), socket.recv(&mut buf)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                return Err(eyre::eyre!(
+                return Err(eyre!(
                     "UDP pre-flight recv from {} failed: {}",
                     server_addr,
                     e
                 ));
             }
             Err(_) => {
-                return Err(eyre::eyre!(
+                return Err(eyre!(
                     "UDP pre-flight: no response from {} within 1s",
                     server_addr
                 ));
@@ -260,118 +90,51 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     }
 
     let start_time = Utc::now();
-
     let mut result = NetworkTestResult::new_udp().with_accounting(config.accounting);
-
-    // The UDP throughput tests use a single STP stream; multi-stream UDP
-    // would need a per-stream sender/receiver and aggregation, which is
-    // scoped for the Phase 3 UDP rewrite. Until then, warn loudly when the
-    // user asks for >1 streams instead of silently single-streaming.
-    if config.parallel_streams > 1 {
-        tracing::warn!(
-            "UDP test was asked for {} parallel streams, but the current STP \
-             implementation only supports 1; running a single stream. \
-             Multi-stream UDP is tracked in Phase 3 of the roadmap.",
-            config.parallel_streams
-        );
-    }
-
     let duration = Duration::from_secs(config.duration);
     let warmup = config.warmup;
+    let target_rate = config.target_rate_bps;
 
     match config.test_type {
         TestType::LatencyOnly => {
-            result.latency = measure_udp_latency(&config).await?;
+            result.latency = run_latency(&server_addr, duration, warmup).await?;
         }
         TestType::Download => {
-            for payload_size in &config.payload_sizes {
+            for sz in &config.payload_sizes {
                 result.download.insert(
-                    *payload_size,
-                    run_download_test(
-                        &config.server,
-                        config.port,
-                        config.parallel_streams,
-                        *payload_size,
-                        duration,
-                        warmup,
-                    )
-                    .await?,
+                    *sz,
+                    run_download(&server_addr, *sz, duration, warmup, target_rate).await?,
                 );
             }
         }
         TestType::Upload => {
-            for payload_size in &config.payload_sizes {
+            for sz in &config.payload_sizes {
                 result.upload.insert(
-                    *payload_size,
-                    run_upload_test(
-                        &config.server,
-                        config.port,
-                        config.parallel_streams,
-                        *payload_size,
-                        duration,
-                        warmup,
-                    )
-                    .await?,
+                    *sz,
+                    run_upload(&server_addr, *sz, duration, warmup, target_rate).await?,
                 );
             }
         }
         TestType::Bidirectional => {
-            // Run download and upload sequentially
-            for payload_size in &config.payload_sizes {
-                result.download.insert(
-                    *payload_size,
-                    run_download_test(
-                        &config.server,
-                        config.port,
-                        config.parallel_streams,
-                        *payload_size,
-                        duration,
-                        warmup,
-                    )
-                    .await?,
-                );
-                result.upload.insert(
-                    *payload_size,
-                    run_upload_test(
-                        &config.server,
-                        config.port,
-                        config.parallel_streams,
-                        *payload_size,
-                        duration,
-                        warmup,
-                    )
-                    .await?,
-                );
+            for sz in &config.payload_sizes {
+                let dl = run_download(&server_addr, *sz, duration, warmup, target_rate).await?;
+                let ul = run_upload(&server_addr, *sz, duration, warmup, target_rate).await?;
+                result.download.insert(*sz, dl);
+                result.upload.insert(*sz, ul);
             }
         }
         TestType::Simultaneous => {
-            // Run download and upload concurrently
-            for payload_size in &config.payload_sizes {
-                let (download_result, upload_result) = tokio::join!(
-                    run_download_test(
-                        &config.server,
-                        config.port,
-                        config.parallel_streams,
-                        *payload_size,
-                        duration,
-                        warmup,
-                    ),
-                    run_upload_test(
-                        &config.server,
-                        config.port,
-                        config.parallel_streams,
-                        *payload_size,
-                        duration,
-                        warmup,
-                    )
+            for sz in &config.payload_sizes {
+                let (dl, ul) = tokio::join!(
+                    run_download(&server_addr, *sz, duration, warmup, target_rate),
+                    run_upload(&server_addr, *sz, duration, warmup, target_rate),
                 );
-
-                result.download.insert(*payload_size, download_result?);
-                result.upload.insert(*payload_size, upload_result?);
+                result.download.insert(*sz, dl?);
+                result.upload.insert(*sz, ul?);
             }
         }
         TestType::FullDuplex => {
-            return Err(eyre::eyre!(
+            return Err(eyre!(
                 "FullDuplex test type is TCP-only. Use --type=simultaneous for UDP."
             ));
         }
@@ -380,69 +143,48 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     Ok((start_time, config, result).into())
 }
 
-/// Measure UDP latency using simple UDP packets.
-///
-/// One socket is reused across all probes; previously the latency loop
-/// re-bound and re-connected a fresh `StpClient` per iteration, so every
-/// reported "RTT" included `bind` + `connect` + `StpClient::new`
-/// allocation cost rather than just the network round trip.
-async fn measure_udp_latency(config: &UdpTestConfig) -> Result<Option<LatencyResult>> {
-    let addr = format!("{}:{}", config.server, config.port);
-    let duration = Duration::from_secs(config.duration);
-    let warmup = config.warmup;
-    let mut measurements = Vec::new();
-
+async fn run_latency(
+    server_addr: &str,
+    duration: Duration,
+    warmup: Duration,
+) -> Result<Option<LatencyResult>> {
     println!("Measuring UDP latency for {duration:?}...");
-
-    // Create progress bar for latency measurement
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
 
-    // Set up the client once; the loop just sends ping packets on its socket.
-    let mut client = StpClient::new(&addr).await?;
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.connect(server_addr).await?;
 
     let start = Instant::now();
-
-    // Set up instrumentation
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
-    let mut buffer = [0u8; 2048];
+    let mut buf = [0u8; 4096];
+    let mut measurements = Vec::new();
 
     while start.elapsed() < duration {
         let in_warmup = start.elapsed() < warmup;
-
-        // Send an STP ping packet
-        let ping_packet = StpPacket::new(
-            client.connection.next_packet_number(),
-            0,
-            0,
-            Bytes::from("PING"),
-        );
-
         let probe_start = Instant::now();
-        let measurement = match client.socket.send(&ping_packet.encode()).await {
-            Ok(_) => match timeout(Duration::from_millis(1000), client.socket.recv(&mut buffer))
-                .await
-            {
-                Ok(Ok(size)) => {
-                    if StpPacket::decode(Bytes::copy_from_slice(&buffer[..size])).is_some() {
-                        let rtt = probe_start.elapsed().as_secs_f64() * 1000.0;
-                        LatencyMeasurement {
-                            rtt_ms: Some(rtt),
-                            elapsed_time: start.elapsed(),
-                        }
-                    } else {
-                        LatencyMeasurement {
-                            rtt_ms: None,
-                            elapsed_time: start.elapsed(),
-                        }
-                    }
-                }
+
+        let p = BlasterPacket::Ping {
+            send_ts_us: now_us(),
+        };
+        let m = match socket.send(&p.encode_to_vec(None)).await {
+            Ok(_) => match timeout(Duration::from_secs(1), socket.recv(&mut buf)).await {
+                Ok(Ok(n)) => match BlasterPacket::decode(&buf[..n]) {
+                    Some((BlasterPacket::Pong { .. }, _)) => LatencyMeasurement {
+                        rtt_ms: Some(probe_start.elapsed().as_secs_f64() * 1000.0),
+                        elapsed_time: start.elapsed(),
+                    },
+                    _ => LatencyMeasurement {
+                        rtt_ms: None,
+                        elapsed_time: start.elapsed(),
+                    },
+                },
                 _ => LatencyMeasurement {
                     rtt_ms: None,
                     elapsed_time: start.elapsed(),
                 },
             },
             Err(e) => {
-                trace!("UDP send error while measuring latency: {e}");
+                trace!("UDP send error: {e}");
                 LatencyMeasurement {
                     rtt_ms: None,
                     elapsed_time: start.elapsed(),
@@ -451,18 +193,14 @@ async fn measure_udp_latency(config: &UdpTestConfig) -> Result<Option<LatencyRes
         };
 
         if !in_warmup {
-            measurements.push(measurement.clone());
-            let _ = tx.send(measurement);
+            measurements.push(m.clone());
+            let _ = tx.send(m);
         }
 
-        // Wait between packets to avoid overwhelming the server
         sleep(Duration::from_millis(100)).await;
     }
 
-    // Drop the sender to signal stats collector to finish
     drop(tx);
-
-    // Wait for stats collector to complete and get measurements
     measurements = stats_collector
         .finish(progress_bar, "Latency measurement complete".to_string())
         .await;
@@ -470,272 +208,275 @@ async fn measure_udp_latency(config: &UdpTestConfig) -> Result<Option<LatencyRes
     if measurements.is_empty() {
         return Ok(None);
     }
-
     Ok(Some(LatencyResult {
         measurements,
-        timestamp: chrono::Utc::now(),
+        timestamp: Utc::now(),
     }))
 }
 
-async fn run_download_test(
-    server: &str,
-    port: u16,
-    _parallel_connections: usize,
+/// Helper: send a START packet and wait briefly for the server to be
+/// ready. The server doesn't ACK START; we just give the kernel a tick
+/// to deliver it.
+async fn send_start(
+    socket: &UdpSocket,
+    mode: Mode,
+    target_rate_bps: u64,
+    payload_size: u32,
+    duration: Duration,
+) -> Result<()> {
+    let p = BlasterPacket::Start {
+        mode,
+        target_rate_bps,
+        payload_size,
+        duration_ms: duration.as_millis() as u64,
+    };
+    socket.send(&p.encode_to_vec(None)).await?;
+    sleep(Duration::from_millis(20)).await;
+    Ok(())
+}
+
+async fn run_download(
+    server_addr: &str,
     payload_size: usize,
     duration: Duration,
     warmup: Duration,
+    target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
     println!(
-        "Starting UDP download test with {} payload size...",
-        format_bytes(payload_size).yellow()
+        "UDP download: {} payload, {} target rate",
+        format_bytes(payload_size).yellow(),
+        if target_rate_bps == 0 {
+            "saturate".to_string()
+        } else {
+            format!("{} bps", target_rate_bps)
+        }
+        .yellow()
     );
-
-    // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Download, duration);
 
-    let mut measurements = Vec::new();
-    let start_time = Instant::now();
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.connect(server_addr).await?;
 
-    // Set up instrumentation
+    send_start(
+        &socket,
+        Mode::Download,
+        target_rate_bps,
+        payload_size as u32,
+        duration,
+    )
+    .await?;
+
+    let start_time = Instant::now();
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
-
-    let addr = format!("{server}:{port}");
-    let mut client = StpClient::new(&addr).await?;
-
-    // Send a download command to the server first, including the payload size
-    let download_cmd_data = format!("DOWNLOAD:{}", payload_size);
-    let download_cmd = StpPacket::new(
-        client.connection.next_packet_number(),
-        0,
-        0,
-        Bytes::from(download_cmd_data),
-    );
-    let encoded = download_cmd.encode();
-    // println!(
-    //     "Sending DOWNLOAD command to server... (size: {} bytes)",
-    //     encoded.len()
-    // );
-    client.socket.send(&encoded).await?;
-    // println!("DOWNLOAD command sent, waiting for response...");
-
-    let mut recv_buffer = vec![0u8; 2048];
-    let mut last_successful_receive = Instant::now();
-    let mut timeout_count = 0;
+    let mut buf = vec![0u8; payload_size + 64];
+    let mut measurements = Vec::new();
+    let mut rx_stats = ReceiveStats::default();
 
     while start_time.elapsed() < duration {
         let in_warmup = start_time.elapsed() < warmup;
-        // Try to receive data (non-blocking with short timeout)
-        match timeout(
-            Duration::from_millis(50),
-            client.socket.recv(&mut recv_buffer),
-        )
-        .await
-        {
-            Ok(Ok(size)) => {
-                let read_start = Instant::now();
-                last_successful_receive = read_start;
-                timeout_count = 0; // Reset timeout counter on successful receive
-
-                // Process received packet
-                if let Some(packet) =
-                    StpPacket::decode(Bytes::copy_from_slice(&recv_buffer[..size]))
+        let recv_start = Instant::now();
+        match timeout(Duration::from_millis(200), socket.recv(&mut buf)).await {
+            Ok(Ok(n)) => {
+                let recv_ts = now_us();
+                if let Some((BlasterPacket::Data { seq, send_ts_us }, payload_len)) =
+                    BlasterPacket::decode(&buf[..n])
                 {
-                    // Send ACK
-                    let ack_packet = StpPacket::ack_only(
-                        client.connection.next_packet_number(),
-                        packet.header.packet_number,
-                        packet.header.timestamp,
-                    );
-                    let _ = client.socket.send(&ack_packet.encode()).await;
-
-                    let measurement = ThroughputMeasurement::new(
-                        packet.payload.len() as u64,
-                        read_start.elapsed(),
-                    );
+                    rx_stats.record(seq, payload_len as u64, send_ts_us, recv_ts);
+                    let m = ThroughputMeasurement::new(payload_len as u64, recv_start.elapsed());
                     if !in_warmup {
-                        measurements.push(measurement.clone());
-                        let _ = tx.send(measurement);
-                    }
-                } else {
-                    // Invalid packet received - log as error
-                    let error_measurement = ThroughputMeasurement::new_error(
-                        ConnectionError::TransferFailed("Invalid STP packet received".to_string()),
-                        read_start.elapsed(),
-                        0,
-                    );
-                    if !in_warmup {
-                        measurements.push(error_measurement.clone());
-                        let _ = tx.send(error_measurement);
+                        measurements.push(m.clone());
+                        let _ = tx.send(m);
                     }
                 }
             }
             Ok(Err(e)) => {
-                // Socket error - log as error
-                let error_measurement = ThroughputMeasurement::new_error(
-                    ConnectionError::Unknown(format!("Socket receive error: {}", e)),
-                    last_successful_receive.elapsed(),
+                let m = ThroughputMeasurement::new_error(
+                    ConnectionError::Unknown(format!("UDP recv error: {e}")),
+                    recv_start.elapsed(),
                     0,
                 );
                 if !in_warmup {
-                    measurements.push(error_measurement.clone());
-                    let _ = tx.send(error_measurement);
+                    measurements.push(m.clone());
+                    let _ = tx.send(m);
                 }
-                break; // Exit on socket error
+                break;
             }
-            Err(_) => {
-                // Timeout - check if we've been waiting too long
-                timeout_count += 1;
-                let time_since_last_data = last_successful_receive.elapsed();
-
-                if time_since_last_data > Duration::from_secs(2) {
-                    // Log timeout as an error measurement
-                    let error_measurement = ThroughputMeasurement::new_error(
-                        ConnectionError::Timeout(format!(
-                            "No data received for {:.1}s",
-                            time_since_last_data.as_secs_f32()
-                        )),
-                        time_since_last_data,
-                        timeout_count,
-                    );
-                    if !in_warmup {
-                        measurements.push(error_measurement.clone());
-                        let _ = tx.send(error_measurement);
-                    }
-
-                    // Reset timeout tracking
-                    last_successful_receive = Instant::now();
-                    timeout_count = 0;
-                }
-                continue;
-            }
+            Err(_) => continue,
         }
-
-        // Small delay to prevent busy waiting
-        tokio::time::sleep(Duration::from_micros(500)).await;
     }
 
-    // Drop the sender to signal stats collector to finish
-    drop(tx);
+    // Send FIN even though server-side stats aren't authoritative for
+    // download (we measured locally); it lets the server reap the
+    // session promptly.
+    let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
 
-    // Wait for stats collector to complete and get measurements
-    measurements = stats_collector
+    drop(tx);
+    let _ = stats_collector
         .finish(progress_bar, "Download complete".to_string())
         .await;
 
     let end_time = Instant::now();
+    debug!(
+        "UDP download complete: {} packets, {} bytes, {} lost, jitter {} us",
+        rx_stats.received,
+        rx_stats.bytes_received,
+        rx_stats.lost(),
+        rx_stats.jitter_us()
+    );
 
-    let streams = vec![crate::report::StreamMeasurements {
+    let streams = vec![StreamMeasurements {
         stream_id: 0,
         measurements: measurements.clone(),
     }];
-
     Ok(ThroughputResult {
         measurements,
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
-        timestamp: chrono::Utc::now(),
+        timestamp: Utc::now(),
     })
 }
 
-async fn run_upload_test(
-    server: &str,
-    port: u16,
-    _parallel_connections: usize,
+async fn run_upload(
+    server_addr: &str,
     payload_size: usize,
     duration: Duration,
     warmup: Duration,
+    target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
     println!(
-        "Starting UDP upload test with {} payload size...",
-        format_bytes(payload_size).yellow()
+        "UDP upload: {} payload, {} target rate",
+        format_bytes(payload_size).yellow(),
+        if target_rate_bps == 0 {
+            "saturate".to_string()
+        } else {
+            format!("{} bps", target_rate_bps)
+        }
+        .yellow()
     );
-
-    // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
 
-    let mut measurements = Vec::new();
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.connect(server_addr).await?;
+
+    send_start(
+        &socket,
+        Mode::Upload,
+        target_rate_bps,
+        payload_size as u32,
+        duration,
+    )
+    .await?;
+
+    // Random payload, sent on every DATA packet.
+    let mut payload = vec![0u8; payload_size];
+    rand::rng().fill_bytes(&mut payload);
+
+    let inter_packet_delay = if target_rate_bps > 0 {
+        let bps = target_rate_bps as f64 / 8.0;
+        Some(Duration::from_secs_f64((payload_size as f64) / bps.max(1.0)))
+    } else {
+        None
+    };
+
     let start_time = Instant::now();
-
-    // Generate upload data
-    let mut upload_data = vec![0u8; payload_size];
-    rand::rng().fill_bytes(&mut upload_data);
-    let payload = Bytes::from(upload_data);
-
-    // Set up instrumentation
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
-
-    let addr = format!("{server}:{port}");
-    let mut client = StpClient::new(&addr).await?;
-
-    let mut recv_buffer = vec![0u8; 2048];
+    let mut measurements = Vec::new();
+    let mut seq: u64 = 1;
 
     while start_time.elapsed() < duration {
         let in_warmup = start_time.elapsed() < warmup;
-        // Send data if congestion control allows
-        let (bytes_sent, _, _, _, _sending_rate, _avg_rtt) = client.get_stats();
-        let bytes_in_flight = bytes_sent - client.bytes_acked;
-
-        if client.congestion_control.can_send(bytes_in_flight as usize) {
-            let write_start = Instant::now();
-            match client.send_data(payload.clone()).await {
-                Ok(_) => {
-                    let measurement =
-                        ThroughputMeasurement::new(payload.len() as u64, write_start.elapsed());
-                    if !in_warmup {
-                        measurements.push(measurement.clone());
-                        let _ = tx.send(measurement);
-                    }
-                }
-                Err(e) => {
-                    let measurement = ThroughputMeasurement::new_error(
-                        ConnectionError::TransferFailed(format!("UDP send error: {e}")),
-                        write_start.elapsed(),
-                        0,
-                    );
-                    if !in_warmup {
-                        measurements.push(measurement.clone());
-                        let _ = tx.send(measurement);
-                    }
-                    break;
+        let send_start = Instant::now();
+        let p = BlasterPacket::Data {
+            seq,
+            send_ts_us: now_us(),
+        };
+        let bytes = p.encode_to_vec(Some(&payload));
+        match socket.send(&bytes).await {
+            Ok(_) => {
+                let m = ThroughputMeasurement::new(payload_size as u64, send_start.elapsed());
+                if !in_warmup {
+                    measurements.push(m.clone());
+                    let _ = tx.send(m);
                 }
             }
+            Err(e) => {
+                let m = ThroughputMeasurement::new_error(
+                    ConnectionError::TransferFailed(format!("UDP send error: {e}")),
+                    send_start.elapsed(),
+                    0,
+                );
+                if !in_warmup {
+                    measurements.push(m.clone());
+                    let _ = tx.send(m);
+                }
+                break;
+            }
         }
+        seq += 1;
 
-        // Try to receive ACKs (non-blocking)
-        if let Ok(Ok((size, _))) = timeout(
-            Duration::from_millis(1),
-            client.socket.recv_from(&mut recv_buffer),
-        )
-        .await
-        {
-            let _ = client.process_ack(&recv_buffer[..size]).await;
+        if let Some(d) = inter_packet_delay {
+            sleep(d).await;
+        } else if seq % 256 == 0 {
+            tokio::task::yield_now().await;
         }
-
-        // Small delay to prevent busy waiting
-        tokio::time::sleep(Duration::from_micros(100)).await;
     }
 
-    // Drop the sender to signal stats collector to finish
-    drop(tx);
+    // FIN + REPORT collection. Try a few times in case the FIN is
+    // dropped on the way to the server. The client measurements above
+    // are local "sent" counts; the report tells us how many actually
+    // arrived.
+    let mut report: Option<BlasterPacket> = None;
+    for _ in 0..5 {
+        let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
+        let mut buf = vec![0u8; 4096];
+        if let Ok(Ok(n)) = timeout(Duration::from_millis(200), socket.recv(&mut buf)).await
+            && let Some((p, _)) = BlasterPacket::decode(&buf[..n])
+            && matches!(p, BlasterPacket::Report { .. })
+        {
+            report = Some(p);
+            break;
+        }
+    }
+    if let Some(BlasterPacket::Report {
+        received,
+        bytes_received,
+        lost,
+        out_of_order,
+        jitter_us,
+    }) = report
+    {
+        debug!(
+            "server REPORT: received={} bytes={} lost={} oos={} jitter={}us",
+            received, bytes_received, lost, out_of_order, jitter_us
+        );
+    } else {
+        tracing::warn!("UDP upload: no REPORT received from server");
+    }
 
-    // Wait for stats collector to complete and get measurements
-    measurements = stats_collector
+    drop(tx);
+    let _ = stats_collector
         .finish(progress_bar, "Upload complete".to_string())
         .await;
 
     let end_time = Instant::now();
-
-    let streams = vec![crate::report::StreamMeasurements {
+    let streams = vec![StreamMeasurements {
         stream_id: 0,
         measurements: measurements.clone(),
     }];
-
     Ok(ThroughputResult {
         measurements,
         streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
-        timestamp: chrono::Utc::now(),
+        timestamp: Utc::now(),
     })
+}
+
+// Bytes import is used implicitly through the protocol module but the
+// compiler still needs it for any future ad-hoc use; keep the import
+// from going unused. Tiny no-op.
+#[allow(dead_code)]
+fn _b() -> Bytes {
+    Bytes::new()
 }

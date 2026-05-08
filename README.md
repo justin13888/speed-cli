@@ -107,7 +107,7 @@ When running server with HTTP, the following endpoints are available:
 
 ### UDP Test Implementation
 
-The UDP test use a toy protocol called **Speed Test Protocol (STP)** that uses UDP with BBR for congestion control. It is designed to measure the available bandwidth between two endpoints, similar to how QUIC operates but without its entire suite of features.
+The UDP test uses a small, iperf3-u-style "blaster" protocol: a fixed-rate sender, no retransmissions, server-side counting of received / lost / out-of-order packets and RFC 3550 interarrival jitter. Use `--target-rate-mbps <N>` to pace at a specific rate, or leave it at the default `0` to saturate. Pacing uses `tokio::time::sleep` and is therefore approximate above ~100 Mbps; for higher rates either accept the bursting or shape externally with `tc fq`. A QUIC-based congestion-controlled UDP mode is on the roadmap.
 
 ## Future Improvements
 

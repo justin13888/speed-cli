@@ -86,12 +86,14 @@ async fn main() -> Result<()> {
             test_sizes,
             chunk_size,
             accounting,
+            target_rate_mbps,
         } => {
             let warmup = std::time::Duration::from_secs(warmup);
             let accounting = match accounting {
                 cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
                 cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
             };
+            let target_rate_bps: u64 = target_rate_mbps.saturating_mul(1_000_000);
             // Assert that exactly one specific protocol is enabled (no more, no less)
             // Count enabled protocols
             let protocols = [mode.is_some(), tcp, udp, http1, http2, h2c, http3];
@@ -158,7 +160,8 @@ async fn main() -> Result<()> {
                         test_sizes,
                     )
                     .with_warmup(warmup)
-                    .with_accounting(accounting);
+                    .with_accounting(accounting)
+                    .with_target_rate_bps(target_rate_bps);
 
                     run_udp_client(config).await?
                 }

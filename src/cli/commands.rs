@@ -92,6 +92,14 @@ pub enum Commands {
         /// framing overhead).
         #[arg(long, value_enum, default_value_t = AccountingArg::Goodput)]
         accounting: AccountingArg,
+
+        /// Target send rate for UDP tests in megabits per second. 0
+        /// (the default) means "saturate". Above ~100 Mbps the
+        /// blaster's `tokio::time::sleep` pacing starts bunching
+        /// packets; for those rates either accept the bursting or
+        /// shape via `tc`.
+        #[arg(long, default_value = "0")]
+        target_rate_mbps: u64,
     },
 
     /// Run as server

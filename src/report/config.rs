@@ -145,6 +145,13 @@ pub struct UdpTestConfig {
     /// Goodput vs wire-rate accounting.
     #[serde(default = "default_accounting")]
     pub accounting: ThroughputAccounting,
+    /// Target send rate in bits per second. Zero means "saturate" (the
+    /// blaster will send as fast as the runtime allows). For accurate
+    /// pacing above ~100 Mbps the kernel sleep granularity becomes the
+    /// limiting factor; this is a known issue called out in the
+    /// roadmap.
+    #[serde(default)]
+    pub target_rate_bps: u64,
 }
 
 impl UdpTestConfig {
@@ -173,6 +180,7 @@ impl UdpTestConfig {
             },
             warmup: DEFAULT_WARMUP,
             accounting: ThroughputAccounting::Goodput,
+            target_rate_bps: 0,
         }
     }
 
@@ -183,6 +191,11 @@ impl UdpTestConfig {
 
     pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
         self.accounting = accounting;
+        self
+    }
+
+    pub fn with_target_rate_bps(mut self, target_rate_bps: u64) -> Self {
+        self.target_rate_bps = target_rate_bps;
         self
     }
 }

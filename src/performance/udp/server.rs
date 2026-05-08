@@ -1,137 +1,110 @@
-use super::protocol::{ConnectionState, StpPacket};
-use crate::utils::format::{format_bytes, format_throughput};
+//! UDP blaster server.
+//!
+//! Listens on a single UDP socket, demultiplexes by source address, and
+//! handles three session kinds: download (server sends), upload (server
+//! receives), and latency (PING/PONG echo). Sessions are bounded by
+//! `MAX_SESSIONS` with LRU eviction and reaped when idle for longer
+//! than `SESSION_IDLE_TIMEOUT`. There's no congestion control; pacing
+//! during downloads is approximate (`tokio::time::sleep` granularity)
+//! and is documented as such.
+
 use bytes::Bytes;
 use colored::*;
 use eyre::Result;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
-/// Maximum number of concurrent UDP client sessions before LRU eviction.
-const MAX_SESSIONS: usize = 10_000;
-/// Sessions idle longer than this are evicted.
-const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// How often the idle-eviction task runs.
+use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
+
+/// Hard ceiling on per-source sessions. Beyond this we evict the
+/// least-recently-active session.
+pub const MAX_SESSIONS: usize = 10_000;
+/// Sessions idle longer than this are reaped.
+pub const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Cadence of the idle-eviction task.
 const EVICTION_INTERVAL: Duration = Duration::from_secs(30);
 
-/// STP Server for bandwidth measurement
-pub struct StpServer {
-    socket: UdpSocket,
-    clients: Arc<Mutex<HashMap<std::net::SocketAddr, StpClientState>>>,
-}
-
+/// Per-source session state. Discriminated by `mode` so we know how to
+/// react to subsequent packets after the START handshake.
 #[derive(Debug)]
-struct StpClientState {
-    connection: ConnectionState,
-    start_time: Instant,
-    total_bytes: u64,
-    packets_received: u64,
-    last_report: Instant,
+struct Session {
+    mode: Mode,
     last_seen: Instant,
-    local_packet_number: u64,
-    download_mode: bool,
-    download_payload_size: usize,
-    download_start_time: Option<Instant>,
+    /// Receiver-side stats - meaningful for Upload sessions; we
+    /// populate it incidentally on Download sessions too in case the
+    /// client sends ACKs or similar in a future protocol extension.
+    rx: ReceiveStats,
+    /// For download sessions only: the configuration handed to us via
+    /// START. The send loop runs in a background task keyed off the
+    /// session.
+    download_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl StpClientState {
-    fn new(client_addr: std::net::SocketAddr) -> Self {
-        let now = Instant::now();
-        Self {
-            connection: ConnectionState::new(client_addr),
-            start_time: now,
-            total_bytes: 0,
-            packets_received: 0,
-            last_report: now,
-            last_seen: now,
-            local_packet_number: 0,
-            download_mode: false,
-            download_payload_size: 1024,
-            download_start_time: None,
-        }
-    }
-
-    fn next_packet_number(&mut self) -> u64 {
-        self.local_packet_number += 1;
-        self.local_packet_number
-    }
+pub struct BlasterServer {
+    socket: Arc<UdpSocket>,
+    sessions: Arc<Mutex<HashMap<SocketAddr, Session>>>,
 }
 
-impl StpServer {
+impl BlasterServer {
     pub async fn new(addr: impl ToSocketAddrs) -> Result<Self> {
         let socket = UdpSocket::bind(&addr).await?;
         Ok(Self {
-            socket,
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            socket: Arc::new(socket),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     pub async fn run(&self, cancel: CancellationToken) -> Result<()> {
         info!(
-            "UDP server listening on {}",
+            "UDP blaster server listening on {}",
             self.socket.local_addr()?.to_string().green()
         );
 
-        // Periodic idle-session eviction task
-        let clients_for_evict = self.clients.clone();
-        let cancel_for_evict = cancel.clone();
+        // Idle-eviction task
+        let sessions = self.sessions.clone();
+        let cancel_evict = cancel.clone();
         let evict_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(EVICTION_INTERVAL);
-            interval.tick().await; // skip immediate first tick
+            interval.tick().await;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         let now = Instant::now();
-                        let mut clients = clients_for_evict.lock();
-                        let before = clients.len();
-                        clients.retain(|_, state| {
-                            now.duration_since(state.last_seen) < SESSION_IDLE_TIMEOUT
-                        });
-                        let evicted = before - clients.len();
-                        if evicted > 0 {
-                            debug!(
-                                "Evicted {} idle UDP sessions ({} remaining)",
-                                evicted,
-                                clients.len()
-                            );
+                        let mut s = sessions.lock();
+                        let before = s.len();
+                        s.retain(|_, sess| now.duration_since(sess.last_seen) < SESSION_IDLE_TIMEOUT);
+                        let after = s.len();
+                        if before != after {
+                            debug!("Evicted {} idle UDP sessions ({} remaining)", before - after, after);
                         }
                     }
-                    _ = cancel_for_evict.cancelled() => break,
+                    _ = cancel_evict.cancelled() => break,
                 }
             }
         });
 
-        let mut buffer = vec![0u8; 2048];
-
+        let mut buf = vec![0u8; 4096];
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!("UDP server received shutdown signal");
+                    info!("UDP blaster server received shutdown signal");
                     break;
                 }
-                recv = self.socket.recv_from(&mut buffer) => {
+                recv = self.socket.recv_from(&mut buf) => {
                     match recv {
-                        Ok((size, client_addr)) => {
-                            debug!("Received {} bytes from {}", size, client_addr);
-                            let clients = self.clients.clone();
-                            let socket = &self.socket;
-                            let data = Bytes::copy_from_slice(&buffer[..size]);
-
-                            // Handle packet immediately (no need to spawn task for simple ACK)
-                            if let Err(e) = self
-                                .handle_stp_packet(socket, clients, client_addr, data)
-                                .await
-                            {
-                                error!("Error handling STP packet from {}: {}", client_addr, e);
-                            }
+                        Ok((n, peer)) => {
+                            let data = &buf[..n];
+                            self.handle_packet(peer, data).await;
                         }
                         Err(e) => {
-                            error!("STP receive error: {}", e);
+                            error!("UDP recv error: {}", e);
                         }
                     }
                 }
@@ -139,236 +112,238 @@ impl StpServer {
         }
 
         evict_task.abort();
-        Ok(())
-    }
 
-    async fn handle_stp_packet(
-        &self,
-        socket: &UdpSocket,
-        clients: Arc<Mutex<HashMap<std::net::SocketAddr, StpClientState>>>,
-        client_addr: std::net::SocketAddr,
-        data: Bytes,
-    ) -> Result<()> {
-        if let Some(packet) = StpPacket::decode(data) {
-            let (ack_data, should_send_download_data, download_payload_size) = {
-                let mut clients_map = clients.lock();
-
-                // If this is a new session and we're at the cap, evict the
-                // least-recently-seen session to make room. This bounds the
-                // server's memory regardless of how many distinct source
-                // addresses send us packets.
-                if !clients_map.contains_key(&client_addr)
-                    && clients_map.len() >= MAX_SESSIONS
-                    && let Some(victim_addr) = clients_map
-                        .iter()
-                        .min_by_key(|(_, s)| s.last_seen)
-                        .map(|(addr, _)| *addr)
-                {
-                    debug!(
-                        "Session cap reached, evicting LRU session {} to admit {}",
-                        victim_addr, client_addr
-                    );
-                    clients_map.remove(&victim_addr);
-                }
-
-                let client_state = clients_map
-                    .entry(client_addr)
-                    .or_insert_with(|| StpClientState::new(client_addr));
-                client_state.last_seen = Instant::now();
-
-                // Check if this is a download command
-                if packet.payload.starts_with(b"DOWNLOAD") {
-                    client_state.download_mode = true;
-                    client_state.download_start_time = Some(Instant::now());
-
-                    // Parse payload size from DOWNLOAD:size format
-                    if let Ok(payload_str) = String::from_utf8(packet.payload.to_vec()) {
-                        info!("Received download command: '{}'", payload_str);
-                        if let Some(size_part) = payload_str.strip_prefix("DOWNLOAD:")
-                            && let Ok(size) = size_part.parse::<usize>()
-                        {
-                            client_state.download_payload_size = size;
-                            info!(
-                                "Client {} requested download mode with {} payload size",
-                                client_addr.to_string().cyan(),
-                                crate::utils::format::format_bytes(size).yellow()
-                            );
-                        } else {
-                            info!(
-                                "Client {} requested download mode (payload_str: '{}'), using default 1024 bytes",
-                                client_addr.to_string().cyan(),
-                                payload_str
-                            );
-                        }
-                    } else {
-                        info!(
-                            "Client {} requested download mode (invalid UTF-8), using default 1024 bytes",
-                            client_addr.to_string().cyan()
-                        );
-                    }
-                }
-
-                // Check if this is a ping packet for latency measurement
-                let is_ping = packet.payload.starts_with(b"PING");
-                if is_ping {
-                    info!("Client {} sent ping packet", client_addr.to_string().cyan());
-                }
-
-                // Update connection state
-                client_state.connection.update_from_received(&packet.header);
-                client_state.total_bytes += packet.payload.len() as u64;
-                client_state.packets_received += 1;
-
-                // Report progress periodically
-                if client_state.last_report.elapsed() >= Duration::from_secs(2) {
-                    let elapsed = client_state.start_time.elapsed();
-                    let current_mbps = if elapsed.as_secs_f64() > 0.0 {
-                        (client_state.total_bytes as f64 * 8.0)
-                            / (elapsed.as_secs_f64() * 1_000_000.0)
-                    } else {
-                        0.0
-                    };
-
-                    info!(
-                        "STP {}: {} packets, {} received, {} throughput",
-                        client_addr.to_string().cyan(),
-                        client_state.packets_received,
-                        format_bytes(client_state.total_bytes).yellow(),
-                        format_throughput(current_mbps).green()
-                    );
-
-                    client_state.last_report = Instant::now();
-                }
-
-                // Sessions are reaped by the idle-eviction task once
-                // SESSION_IDLE_TIMEOUT elapses with no traffic; we no longer
-                // try to infer end-of-session from packet shape.
-
-                // Prepare ACK
-                let ack_packet_number = client_state.next_packet_number();
-                let ack_packet = StpPacket::ack_only(
-                    ack_packet_number,
-                    packet.header.packet_number, // ACK this packet
-                    packet.header.timestamp,     // Echo the timestamp
-                );
-
-                (
-                    ack_packet.encode(),
-                    client_state.download_mode,
-                    client_state.download_payload_size,
-                )
-            }; // Lock is dropped here
-
-            // Send ACK without holding the lock
-            socket.send_to(&ack_data, client_addr).await?;
-
-            // If in download mode, send download data packets
-            if should_send_download_data {
-                info!("Sending download data to client {}", client_addr);
-
-                // Send a burst of packets to maintain throughput
-                // Maximum safe UDP packet size (considering ethernet MTU minus IP/UDP headers)
-                const MAX_UDP_PAYLOAD: usize = 1400;
-
-                for _ in 0..10 {
-                    // If payload is larger than max UDP size, fragment it
-                    if download_payload_size <= MAX_UDP_PAYLOAD {
-                        // Single packet
-                        let download_data = vec![0u8; download_payload_size];
-                        let payload = Bytes::from(download_data);
-
-                        // Get next packet number for download data
-                        let packet_number = {
-                            let mut clients_map = clients.lock();
-                            if let Some(client_state) = clients_map.get_mut(&client_addr) {
-                                client_state.next_packet_number()
-                            } else {
-                                break; // Client disconnected
-                            }
-                        };
-
-                        let download_packet = StpPacket::new(
-                            packet_number,
-                            0, // No ACK needed for download data
-                            0, // No timestamp echo
-                            payload,
-                        );
-
-                        match socket.send_to(&download_packet.encode(), client_addr).await {
-                            Ok(_) => {
-                                debug!(
-                                    "Sent download packet {} ({} bytes) to {}",
-                                    packet_number, download_payload_size, client_addr
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to send download packet to {}: {}", client_addr, e);
-                                break; // Stop if send fails
-                            }
-                        }
-                    } else {
-                        // Fragment large payload into multiple packets
-                        let mut remaining_bytes = download_payload_size;
-
-                        while remaining_bytes > 0 {
-                            let fragment_size = std::cmp::min(remaining_bytes, MAX_UDP_PAYLOAD);
-                            let fragment_data = vec![0u8; fragment_size];
-                            let payload = Bytes::from(fragment_data);
-
-                            // Get next packet number for each fragment
-                            let packet_number = {
-                                let mut clients_map = clients.lock();
-                                if let Some(client_state) = clients_map.get_mut(&client_addr) {
-                                    client_state.next_packet_number()
-                                } else {
-                                    break; // Client disconnected
-                                }
-                            };
-
-                            let download_packet = StpPacket::new(
-                                packet_number,
-                                0, // No ACK needed for download data
-                                0, // No timestamp echo
-                                payload,
-                            );
-
-                            match socket.send_to(&download_packet.encode(), client_addr).await {
-                                Ok(_) => {
-                                    debug!(
-                                        "Sent download fragment {} ({} bytes) to {}",
-                                        packet_number, fragment_size, client_addr
-                                    );
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Failed to send download fragment to {}: {}",
-                                        client_addr, e
-                                    );
-                                    break; // Stop if send fails
-                                }
-                            }
-
-                            remaining_bytes -= fragment_size;
-
-                            // Small delay between fragments
-                            tokio::time::sleep(Duration::from_micros(50)).await;
-                        }
-                    }
-
-                    // Small delay between packet bursts
-                    tokio::time::sleep(Duration::from_micros(500)).await;
-                }
+        // Drain any in-flight download tasks so we don't leave them
+        // hammering closed sockets.
+        let mut sessions = self.sessions.lock();
+        for (_, sess) in sessions.drain() {
+            if let Some(h) = sess.download_handle {
+                h.abort();
             }
         }
 
         Ok(())
     }
+
+    async fn handle_packet(&self, peer: SocketAddr, data: &[u8]) {
+        let Some((packet, payload_len)) = BlasterPacket::decode(data) else {
+            trace!("dropped non-blaster packet from {}", peer);
+            return;
+        };
+        let recv_ts = now_us();
+
+        match packet {
+            BlasterPacket::Start {
+                mode,
+                target_rate_bps,
+                payload_size,
+                duration_ms,
+            } => {
+                self.handle_start(peer, mode, target_rate_bps, payload_size, duration_ms)
+                    .await;
+            }
+            BlasterPacket::Data { seq, send_ts_us } => {
+                self.handle_data(peer, seq, send_ts_us, payload_len as u64, recv_ts);
+            }
+            BlasterPacket::Fin => {
+                self.handle_fin(peer).await;
+            }
+            BlasterPacket::Ping { send_ts_us } => {
+                let pong = BlasterPacket::Pong { send_ts_us }.encode_to_vec(None);
+                if let Err(e) = self.socket.send_to(&pong, peer).await {
+                    debug!("pong send failed to {}: {}", peer, e);
+                }
+            }
+            BlasterPacket::Pong { .. } | BlasterPacket::Report { .. } => {
+                // Server-bound; clients send these. Ignore.
+            }
+        }
+    }
+
+    async fn handle_start(
+        &self,
+        peer: SocketAddr,
+        mode: Mode,
+        target_rate_bps: u64,
+        payload_size: u32,
+        duration_ms: u64,
+    ) {
+        // Admit-or-evict. We also reset any prior session for this peer
+        // so a re-tested client gets fresh stats.
+        {
+            let mut sessions = self.sessions.lock();
+            if let Some(prev) = sessions.remove(&peer)
+                && let Some(h) = prev.download_handle
+            {
+                h.abort();
+            }
+            if !sessions.contains_key(&peer)
+                && sessions.len() >= MAX_SESSIONS
+                && let Some(victim) = sessions
+                    .iter()
+                    .min_by_key(|(_, s)| s.last_seen)
+                    .map(|(a, _)| *a)
+            {
+                debug!("session cap reached, evicting LRU {} for {}", victim, peer);
+                if let Some(s) = sessions.remove(&victim)
+                    && let Some(h) = s.download_handle
+                {
+                    h.abort();
+                }
+            }
+            sessions.insert(
+                peer,
+                Session {
+                    mode,
+                    last_seen: Instant::now(),
+                    rx: ReceiveStats::default(),
+                    download_handle: None,
+                },
+            );
+        }
+
+        info!(
+            "blaster START from {} mode={:?} rate={} bps payload={} duration={}ms",
+            peer.to_string().cyan(),
+            mode,
+            target_rate_bps,
+            payload_size,
+            duration_ms
+        );
+
+        if mode == Mode::Download {
+            // Spawn a sender task that runs for the requested duration.
+            let socket = self.socket.clone();
+            let sessions = self.sessions.clone();
+            let handle = tokio::spawn(download_sender(
+                socket,
+                peer,
+                target_rate_bps,
+                payload_size as usize,
+                Duration::from_millis(duration_ms),
+                sessions.clone(),
+            ));
+            if let Some(s) = self.sessions.lock().get_mut(&peer) {
+                s.download_handle = Some(handle);
+            }
+        }
+    }
+
+    fn handle_data(
+        &self,
+        peer: SocketAddr,
+        seq: u64,
+        send_ts_us: u64,
+        payload_bytes: u64,
+        recv_ts_us: u64,
+    ) {
+        let mut sessions = self.sessions.lock();
+        let Some(sess) = sessions.get_mut(&peer) else {
+            // No START seen for this peer; ignore. We deliberately do
+            // *not* auto-create a session on bare DATA, that was the
+            // STP-era DoS vector we fixed earlier.
+            return;
+        };
+        sess.last_seen = Instant::now();
+        sess.rx.record(seq, payload_bytes, send_ts_us, recv_ts_us);
+    }
+
+    async fn handle_fin(&self, peer: SocketAddr) {
+        let report = {
+            let mut sessions = self.sessions.lock();
+            let Some(sess) = sessions.remove(&peer) else {
+                return;
+            };
+            if let Some(h) = sess.download_handle {
+                h.abort();
+            }
+            BlasterPacket::Report {
+                received: sess.rx.received,
+                bytes_received: sess.rx.bytes_received,
+                lost: sess.rx.lost(),
+                out_of_order: sess.rx.out_of_order,
+                jitter_us: sess.rx.jitter_us(),
+            }
+        };
+        let bytes = report.encode_to_vec(None);
+        // Send a few copies to mitigate report-packet loss on lossy
+        // links. The client deduplicates by ignoring repeated REPORTs.
+        for _ in 0..3 {
+            let _ = self.socket.send_to(&bytes, peer).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }
 
+/// Run the server-side sender for a Download session.
+async fn download_sender(
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
+    target_rate_bps: u64,
+    payload_size: usize,
+    duration: Duration,
+    sessions: Arc<Mutex<HashMap<SocketAddr, Session>>>,
+) {
+    use rand::RngCore as _;
+    let mut payload = vec![0u8; payload_size];
+    rand::rng().fill_bytes(&mut payload);
+
+    let inter_packet_delay = if target_rate_bps > 0 {
+        // bytes per second from bps; seconds per packet from that.
+        let bytes_per_sec = target_rate_bps as f64 / 8.0;
+        let secs_per_packet = (payload_size as f64) / bytes_per_sec.max(1.0);
+        Some(Duration::from_secs_f64(secs_per_packet))
+    } else {
+        None // saturate
+    };
+
+    let start = Instant::now();
+    let mut seq: u64 = 1;
+    while start.elapsed() < duration {
+        // Bail if the session was evicted (e.g., FIN received).
+        if !sessions.lock().contains_key(&peer) {
+            break;
+        }
+
+        let pkt = BlasterPacket::Data {
+            seq,
+            send_ts_us: now_us(),
+        };
+        let bytes = pkt.encode_to_vec(Some(&payload));
+        if let Err(e) = socket.send_to(&bytes, peer).await {
+            debug!("blaster download send_to {} failed: {}", peer, e);
+            break;
+        }
+        seq += 1;
+
+        if let Some(d) = inter_packet_delay {
+            tokio::time::sleep(d).await;
+        } else {
+            // Yield occasionally so we don't monopolize the runtime.
+            if seq % 256 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    // End the session. The client should also send FIN to collect a
+    // REPORT, but if it doesn't we'll be reaped by idle eviction.
+    debug!("blaster download to {} sent {} packets", peer, seq - 1);
+}
+
+/// Convenience entry point used from `main.rs`.
 pub async fn run_udp_server(
     addr: impl ToSocketAddrs,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let server = StpServer::new(addr).await?;
+    let server = BlasterServer::new(addr).await?;
     server.run(cancel).await
+}
+
+// Backwards-compat shim. The Bytes import is unused in the new
+// protocol; this re-export keeps old call sites compiling without
+// touching the rest of the tree. Remove on the next major.
+#[allow(dead_code)]
+fn _bytes_marker() -> Bytes {
+    Bytes::new()
 }
