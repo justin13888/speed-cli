@@ -29,6 +29,8 @@ cargo install --path .
 
 The binary name is `speed-cli`. Note, for the HTTPS server, you may provide your own TLS certificate and key files via `--cert` and `--key`, or else a dummy cert will be used. A convenience script `./gen-cert.sh` is provided to generate self-signed certificates for testing purposes. This is not suitable for production use.
 
+> Note on HTTPS measurements: the client always skips TLS certificate validation (`danger_accept_invalid_certs`) so that self-signed test servers work out of the box. Reported HTTPS throughput and latency therefore exclude the cost of certificate-chain verification, OCSP, and revocation checks. If you need numbers that reflect production TLS overhead, validate against a real cert with another tool.
+
 ## Quick Start
 
 Note: If you're using HTTPS server, ensure you have `cert.pem` and `key.pem` files in the current directory or specify them with `--cert` and `--key` flags.

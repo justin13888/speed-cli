@@ -167,6 +167,11 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         .tcp_keepalive(Duration::from_secs(60))
         .tcp_nodelay(true)
         .use_rustls_tls()
+        // Cert validation is intentionally disabled. speed-cli runs against
+        // ephemeral test servers (often the self-signed pair from gen-cert.sh),
+        // so requiring real PKI would force every user to manage a CA bundle
+        // for no measurement benefit. Reported HTTPS results therefore do not
+        // include cert-validation overhead.
         .danger_accept_invalid_certs(true);
 
     match version {
@@ -330,7 +335,7 @@ async fn run_download_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                panic!("Task error: {e}");
+                tracing::error!("HTTP download task panicked or was cancelled: {e}");
             }
         }
     }
@@ -429,7 +434,7 @@ async fn run_upload_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                panic!("Task error: {e}");
+                tracing::error!("HTTP upload task panicked or was cancelled: {e}");
             }
         }
     }

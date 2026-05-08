@@ -14,7 +14,9 @@ use futures::stream;
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock as SyncLazy;
+use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, sync::Once};
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::utils::tls::get_self_signed_cert;
@@ -67,20 +69,25 @@ pub struct TlsConfig {
     pub key_path: PathBuf,
 }
 
-/// Runs the HTTP server.
-pub async fn run_http_server(config: HttpServerConfig) -> Result<()> {
+/// Runs the HTTP server, gracefully shutting down when `cancel` fires.
+pub async fn run_http_server(config: HttpServerConfig, cancel: CancellationToken) -> Result<()> {
     let app = create_router(config.enable_cors, config.max_upload_size);
 
     tracing::info!("HTTP server listening on {}", config.bind_addr);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            cancel.cancelled().await;
+            tracing::info!("HTTP server received shutdown signal, draining...");
+        })
+        .await?;
 
     Ok(())
 }
 
-/// Runs the HTTPS server.
-pub async fn run_https_server(config: HttpsServerConfig) -> Result<()> {
+/// Runs the HTTPS server, gracefully shutting down when `cancel` fires.
+pub async fn run_https_server(config: HttpsServerConfig, cancel: CancellationToken) -> Result<()> {
     // Ensure crypto provider is initialized before using TLS
     ensure_crypto_provider();
 
@@ -94,10 +101,21 @@ pub async fn run_https_server(config: HttpsServerConfig) -> Result<()> {
 
     tracing::info!("HTTPS server listening on {}", config.bind_addr);
 
-    // For axum_server, we bind and serve directly
-    axum_server::bind_rustls(config.bind_addr, tls_config)
+    let handle = axum_server::Handle::new();
+    let handle_for_shutdown = handle.clone();
+    let shutdown_task = tokio::spawn(async move {
+        cancel.cancelled().await;
+        tracing::info!("HTTPS server received shutdown signal, draining...");
+        handle_for_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
+    });
+
+    let result = axum_server::bind_rustls(config.bind_addr, tls_config)
+        .handle(handle)
         .serve(app.into_make_service())
-        .await?;
+        .await;
+
+    shutdown_task.abort();
+    result?;
 
     Ok(())
 }
@@ -186,12 +204,22 @@ async fn download_handler(Query(query): Query<DownloadQuery>) -> impl IntoRespon
 
     let body = Body::from_stream(stream);
 
-    Response::builder()
+    match Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_LENGTH, query.size.to_string())
         .body(body)
-        .unwrap()
+    {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!("Failed to build download response: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build response",
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn upload_handler(body: Body) -> impl IntoResponse {

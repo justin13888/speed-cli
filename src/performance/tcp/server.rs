@@ -1,5 +1,6 @@
 use colored::*;
 use eyre::{Context, Result};
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -8,6 +9,7 @@ use tokio::net::ToSocketAddrs;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, broadcast};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::utils::format::{format_bytes, format_throughput};
@@ -209,20 +211,34 @@ impl TcpServer {
     }
 }
 
-// TODO: Remove this vv
-/// Legacy function for backward compatibility - now uses the builder pattern
-pub async fn run_tcp_server(addr: impl ToSocketAddrs + std::fmt::Debug + Clone) -> Result<()> {
-    // Use the builder pattern with optimized settings for high-throughput testing
-    let server = TcpServerBuilder::new()
-        .max_connections(1000)
-        .connection_timeout(Duration::from_secs(300))
-        .read_timeout(Duration::from_secs(30))
-        .buffer_size(131072) // 128KB
-        .report_interval(Duration::from_secs(5))
-        .max_bytes_per_connection(Some(1_000_000_000_000)) // 1TB
-        .build();
+/// Run a TCP server with default high-throughput settings, gracefully
+/// shutting down when `cancel` fires.
+pub async fn run_tcp_server(
+    addr: impl ToSocketAddrs + std::fmt::Debug + Clone,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let server = Arc::new(
+        TcpServerBuilder::new()
+            .max_connections(1000)
+            .connection_timeout(Duration::from_secs(300))
+            .read_timeout(Duration::from_secs(30))
+            .buffer_size(131072) // 128KB
+            .report_interval(Duration::from_secs(5))
+            .max_bytes_per_connection(Some(1_000_000_000_000)) // 1TB
+            .build(),
+    );
 
-    server.run(addr).await
+    let server_for_shutdown = server.clone();
+    let shutdown_task = tokio::spawn(async move {
+        cancel.cancelled().await;
+        if let Err(e) = server_for_shutdown.shutdown().await {
+            error!("TCP server shutdown error: {}", e);
+        }
+    });
+
+    let result = server.run(addr).await;
+    shutdown_task.abort();
+    result
 }
 
 /// Builder for TcpServer with sensible defaults
@@ -303,8 +319,8 @@ struct ProductionTcpHandler {
 struct ConnectionStats {
     total_bytes: AtomicU64,
     start_time: Instant,
-    last_report: std::sync::Mutex<Instant>,
-    last_activity: std::sync::Mutex<Instant>,
+    last_report: Mutex<Instant>,
+    last_activity: Mutex<Instant>,
 }
 
 impl ConnectionStats {
@@ -313,18 +329,18 @@ impl ConnectionStats {
         Self {
             total_bytes: AtomicU64::new(0),
             start_time: now,
-            last_report: std::sync::Mutex::new(now),
-            last_activity: std::sync::Mutex::new(now),
+            last_report: Mutex::new(now),
+            last_activity: Mutex::new(now),
         }
     }
 
     fn add_bytes(&self, bytes: u64) {
         self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
-        *self.last_activity.lock().unwrap() = Instant::now();
+        *self.last_activity.lock() = Instant::now();
     }
 
     fn should_report(&self, report_interval: Duration) -> bool {
-        let mut last_report = self.last_report.lock().unwrap();
+        let mut last_report = self.last_report.lock();
         if last_report.elapsed() >= report_interval {
             *last_report = Instant::now();
             true
@@ -334,7 +350,7 @@ impl ConnectionStats {
     }
 
     fn is_idle(&self, timeout: Duration) -> bool {
-        self.last_activity.lock().unwrap().elapsed() > timeout
+        self.last_activity.lock().elapsed() > timeout
     }
 
     fn get_summary(&self) -> (u64, Duration, f64) {

@@ -291,7 +291,7 @@ async fn run_download_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                panic!("Task error: {e}");
+                tracing::error!("Download task panicked or was cancelled: {e}");
             }
         }
     }
@@ -410,7 +410,7 @@ async fn run_upload_test(
                 measurements.extend(task_measurements);
             }
             Err(e) => {
-                panic!("Task error: {e}");
+                tracing::error!("Upload task panicked or was cancelled: {e}");
             }
         }
     }

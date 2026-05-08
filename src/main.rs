@@ -2,6 +2,7 @@ use colored::*;
 use eyre::Result;
 use std::fs;
 use std::net::SocketAddr;
+use tokio_util::sync::CancellationToken;
 use tracing::trace;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -225,18 +226,22 @@ async fn main() -> Result<()> {
 
             println!("{}", "Starting server mode...".blue().bold());
 
+            // One cancel token shared by every listener; flipped by the signal
+            // handler below so each server can drain in its own way.
+            let cancel = CancellationToken::new();
+
             let mut handles: Vec<(&str, tokio::task::JoinHandle<_>)> = vec![];
 
             // Setup TCP
             if enable_tcp {
                 let tcp_addr = SocketAddr::new(bind, tcp_port.unwrap_or(DEFAULT_TCP_PORT));
-                handles.push(("TCP", tokio::spawn(run_tcp_server(tcp_addr))));
+                handles.push(("TCP", tokio::spawn(run_tcp_server(tcp_addr, cancel.clone()))));
             }
 
             // Setup UDP
             if enable_udp {
                 let udp_addr = SocketAddr::new(bind, udp_port.unwrap_or(DEFAULT_UDP_PORT));
-                handles.push(("UDP", tokio::spawn(run_udp_server(udp_addr))));
+                handles.push(("UDP", tokio::spawn(run_udp_server(udp_addr, cancel.clone()))));
             }
 
             // Setup HTTP server modes (i.e. HTTP/1.1 without TLS, h2c)
@@ -245,11 +250,14 @@ async fn main() -> Result<()> {
 
                 handles.push((
                     "HTTP",
-                    tokio::spawn(run_http_server(HttpServerConfig {
-                        bind_addr: http_addr,
-                        enable_cors: true,
-                        max_upload_size: MAX_HTTP_UPLOAD_SIZE,
-                    })),
+                    tokio::spawn(run_http_server(
+                        HttpServerConfig {
+                            bind_addr: http_addr,
+                            enable_cors: true,
+                            max_upload_size: MAX_HTTP_UPLOAD_SIZE,
+                        },
+                        cancel.clone(),
+                    )),
                 ));
             }
 
@@ -283,14 +291,54 @@ async fn main() -> Result<()> {
 
                 handles.push((
                     "HTTPS",
-                    tokio::spawn(run_https_server(HttpsServerConfig {
-                        bind_addr: https_addr,
-                        enable_cors: true,
-                        max_upload_size: MAX_HTTP_UPLOAD_SIZE,
-                        tls_config,
-                    })),
+                    tokio::spawn(run_https_server(
+                        HttpsServerConfig {
+                            bind_addr: https_addr,
+                            enable_cors: true,
+                            max_upload_size: MAX_HTTP_UPLOAD_SIZE,
+                            tls_config,
+                        },
+                        cancel.clone(),
+                    )),
                 ));
             }
+
+            // Signal handler: SIGINT (Ctrl+C) on all platforms, SIGTERM on Unix.
+            let cancel_for_signal = cancel.clone();
+            tokio::spawn(async move {
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{SignalKind, signal};
+                    let mut sigterm = match signal(SignalKind::terminate()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("Failed to install SIGTERM handler: {e}");
+                            return;
+                        }
+                    };
+                    tokio::select! {
+                        res = tokio::signal::ctrl_c() => {
+                            if let Err(e) = res {
+                                eprintln!("ctrl_c handler error: {e}");
+                                return;
+                            }
+                            println!("\n{}", "Received SIGINT, shutting down gracefully...".yellow().bold());
+                        }
+                        _ = sigterm.recv() => {
+                            println!("\n{}", "Received SIGTERM, shutting down gracefully...".yellow().bold());
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    if let Err(e) = tokio::signal::ctrl_c().await {
+                        eprintln!("ctrl_c handler error: {e}");
+                        return;
+                    }
+                    println!("\n{}", "Received SIGINT, shutting down gracefully...".yellow().bold());
+                }
+                cancel_for_signal.cancel();
+            });
 
             // Log servers to be startup
             println!(

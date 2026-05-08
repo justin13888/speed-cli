@@ -9,11 +9,17 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-// TODO: Is parking_lot for Mutex
+/// Maximum number of concurrent UDP client sessions before LRU eviction.
+const MAX_SESSIONS: usize = 10_000;
+/// Sessions idle longer than this are evicted.
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the idle-eviction task runs.
+const EVICTION_INTERVAL: Duration = Duration::from_secs(30);
 
-/// STP Server for bandwidth measurement  
+/// STP Server for bandwidth measurement
 pub struct StpServer {
     socket: UdpSocket,
     clients: Arc<Mutex<HashMap<std::net::SocketAddr, StpClientState>>>,
@@ -26,6 +32,7 @@ struct StpClientState {
     total_bytes: u64,
     packets_received: u64,
     last_report: Instant,
+    last_seen: Instant,
     local_packet_number: u64,
     download_mode: bool,
     download_payload_size: usize,
@@ -41,6 +48,7 @@ impl StpClientState {
             total_bytes: 0,
             packets_received: 0,
             last_report: now,
+            last_seen: now,
             local_packet_number: 0,
             download_mode: false,
             download_payload_size: 1024,
@@ -63,35 +71,75 @@ impl StpServer {
         })
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, cancel: CancellationToken) -> Result<()> {
         info!(
             "UDP server listening on {}",
             self.socket.local_addr()?.to_string().green()
         );
 
+        // Periodic idle-session eviction task
+        let clients_for_evict = self.clients.clone();
+        let cancel_for_evict = cancel.clone();
+        let evict_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(EVICTION_INTERVAL);
+            interval.tick().await; // skip immediate first tick
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let now = Instant::now();
+                        let mut clients = clients_for_evict.lock();
+                        let before = clients.len();
+                        clients.retain(|_, state| {
+                            now.duration_since(state.last_seen) < SESSION_IDLE_TIMEOUT
+                        });
+                        let evicted = before - clients.len();
+                        if evicted > 0 {
+                            debug!(
+                                "Evicted {} idle UDP sessions ({} remaining)",
+                                evicted,
+                                clients.len()
+                            );
+                        }
+                    }
+                    _ = cancel_for_evict.cancelled() => break,
+                }
+            }
+        });
+
         let mut buffer = vec![0u8; 2048];
 
         loop {
-            match self.socket.recv_from(&mut buffer).await {
-                Ok((size, client_addr)) => {
-                    debug!("Received {} bytes from {}", size, client_addr);
-                    let clients = self.clients.clone();
-                    let socket = &self.socket;
-                    let data = Bytes::copy_from_slice(&buffer[..size]);
-
-                    // Handle packet immediately (no need to spawn task for simple ACK)
-                    if let Err(e) = self
-                        .handle_stp_packet(socket, clients, client_addr, data)
-                        .await
-                    {
-                        error!("Error handling STP packet from {}: {}", client_addr, e);
-                    }
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("UDP server received shutdown signal");
+                    break;
                 }
-                Err(e) => {
-                    error!("STP receive error: {}", e);
+                recv = self.socket.recv_from(&mut buffer) => {
+                    match recv {
+                        Ok((size, client_addr)) => {
+                            debug!("Received {} bytes from {}", size, client_addr);
+                            let clients = self.clients.clone();
+                            let socket = &self.socket;
+                            let data = Bytes::copy_from_slice(&buffer[..size]);
+
+                            // Handle packet immediately (no need to spawn task for simple ACK)
+                            if let Err(e) = self
+                                .handle_stp_packet(socket, clients, client_addr, data)
+                                .await
+                            {
+                                error!("Error handling STP packet from {}: {}", client_addr, e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("STP receive error: {}", e);
+                        }
+                    }
                 }
             }
         }
+
+        evict_task.abort();
+        Ok(())
     }
 
     async fn handle_stp_packet(
@@ -104,9 +152,29 @@ impl StpServer {
         if let Some(packet) = StpPacket::decode(data) {
             let (ack_data, should_send_download_data, download_payload_size) = {
                 let mut clients_map = clients.lock();
+
+                // If this is a new session and we're at the cap, evict the
+                // least-recently-seen session to make room. This bounds the
+                // server's memory regardless of how many distinct source
+                // addresses send us packets.
+                if !clients_map.contains_key(&client_addr)
+                    && clients_map.len() >= MAX_SESSIONS
+                    && let Some(victim_addr) = clients_map
+                        .iter()
+                        .min_by_key(|(_, s)| s.last_seen)
+                        .map(|(addr, _)| *addr)
+                {
+                    debug!(
+                        "Session cap reached, evicting LRU session {} to admit {}",
+                        victim_addr, client_addr
+                    );
+                    clients_map.remove(&victim_addr);
+                }
+
                 let client_state = clients_map
                     .entry(client_addr)
                     .or_insert_with(|| StpClientState::new(client_addr));
+                client_state.last_seen = Instant::now();
 
                 // Check if this is a download command
                 if packet.payload.starts_with(b"DOWNLOAD") {
@@ -172,26 +240,9 @@ impl StpServer {
                     client_state.last_report = Instant::now();
                 }
 
-                // Handle connection teardown (empty payload could indicate end)
-                if packet.payload.is_empty() && client_state.packets_received > 100 {
-                    // This might be a termination signal
-                    let duration = client_state.start_time.elapsed();
-                    let final_mbps = if duration.as_secs_f64() > 0.0 {
-                        (client_state.total_bytes as f64 * 8.0)
-                            / (duration.as_secs_f64() * 1_000_000.0)
-                    } else {
-                        0.0
-                    };
-
-                    info!(
-                        "STP session from {} completed: {} packets received, {} total in {:.2}s ({})",
-                        client_addr.to_string().cyan(),
-                        client_state.packets_received,
-                        format_bytes(client_state.total_bytes).yellow(),
-                        duration.as_secs_f64(),
-                        format_throughput(final_mbps).green()
-                    );
-                }
+                // Sessions are reaped by the idle-eviction task once
+                // SESSION_IDLE_TIMEOUT elapses with no traffic; we no longer
+                // try to infer end-of-session from packet shape.
 
                 // Prepare ACK
                 let ack_packet_number = client_state.next_packet_number();
@@ -316,7 +367,10 @@ impl StpServer {
     }
 }
 
-pub async fn run_udp_server(addr: impl ToSocketAddrs) -> Result<()> {
+pub async fn run_udp_server(
+    addr: impl ToSocketAddrs,
+    cancel: CancellationToken,
+) -> Result<()> {
     let server = StpServer::new(addr).await?;
-    server.run().await
+    server.run(cancel).await
 }
