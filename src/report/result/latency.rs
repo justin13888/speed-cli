@@ -97,9 +97,11 @@ impl LatencyResult {
         })
     }
 
-    /// Returns jitter (standard deviation of RTT)
-    /// If no measurements, returns None
-    pub fn jitter(&self) -> Option<f64> {
+    /// Population standard deviation of RTT in milliseconds. Useful as a
+    /// summary of spread but distinct from the network-engineering
+    /// definition of "jitter" (see [`Self::jitter_rfc3550`]). Returns None
+    /// if there are no successful samples.
+    pub fn rtt_stddev(&self) -> Option<f64> {
         let rtts = self.rtts();
         if rtts.is_empty() {
             return None;
@@ -108,6 +110,42 @@ impl LatencyResult {
         let variance =
             rtts.iter().map(|&rtt| (rtt - mean).powi(2)).sum::<f64>() / rtts.len() as f64;
         Some(variance.sqrt())
+    }
+
+    /// RFC 3550 jitter (interarrival jitter) in milliseconds.
+    ///
+    /// Implements the RTP definition:
+    ///
+    /// ```text
+    /// J(0) = 0
+    /// J(i) = J(i-1) + (|D(i-1, i)| - J(i-1)) / 16
+    /// ```
+    ///
+    /// where `D(i-1, i)` is the difference between the inter-sample arrival
+    /// gap (`elapsed_time(i) - elapsed_time(i-1)`) and the corresponding RTT
+    /// delta. This captures sustained variation in packet timing rather
+    /// than just overall RTT spread, which is what most "jitter" metrics
+    /// in network tooling actually mean. Returns None if there are fewer
+    /// than two successful samples.
+    pub fn jitter_rfc3550(&self) -> Option<f64> {
+        let mut prev: Option<(f64, f64)> = None; // (rtt_ms, elapsed_ms)
+        let mut jitter: f64 = 0.0;
+        let mut updates: u32 = 0;
+
+        for m in &self.measurements {
+            let Some(rtt) = m.rtt_ms else { continue };
+            let elapsed_ms = m.elapsed_time.as_secs_f64() * 1000.0;
+            if let Some((prev_rtt, prev_elapsed)) = prev {
+                let arrival_gap = elapsed_ms - prev_elapsed;
+                let rtt_delta = rtt - prev_rtt;
+                let d = (arrival_gap - rtt_delta).abs();
+                jitter += (d - jitter) / 16.0;
+                updates += 1;
+            }
+            prev = Some((rtt, elapsed_ms));
+        }
+
+        if updates == 0 { None } else { Some(jitter) }
     }
 }
 
@@ -201,11 +239,20 @@ impl Display for LatencyResult {
             )?;
         }
 
-        if let Some(jitter) = self.jitter() {
+        if let Some(stddev) = self.rtt_stddev() {
             writeln!(
                 f,
                 "    {}: {}",
-                "Jitter".bright_blue().bold(),
+                "RTT Stddev".bright_blue().bold(),
+                format!("{stddev:.2} ms").magenta()
+            )?;
+        }
+
+        if let Some(jitter) = self.jitter_rfc3550() {
+            writeln!(
+                f,
+                "    {}: {}",
+                "Jitter (RFC 3550)".bright_blue().bold(),
                 format!("{jitter:.2} ms").magenta()
             )?;
         }

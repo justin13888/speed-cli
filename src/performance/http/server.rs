@@ -23,10 +23,19 @@ use crate::utils::tls::get_self_signed_cert;
 
 use crate::constants::DEFAULT_CHUNK_SIZE;
 
-/// Static buffer for download operations to avoid allocations
-static ZERO_BUFFER: SyncLazy<Arc<Bytes>> = SyncLazy::new(|| {
-    // 64KB zero buffer - large enough to avoid frequent copying but small enough for L1/L2 cache
-    Arc::new(Bytes::from(vec![0u8; 1024 * 1024 * 1024])) // 1GB buffer
+/// Static buffer for download operations to avoid allocations.
+///
+/// Filled with random bytes once at process start so compressing middleboxes
+/// (some VPNs, modems) can't deflate the stream and produce inflated
+/// throughput numbers. 1 MB is small enough to generate quickly on first
+/// access (~ms) but large enough that the per-chunk repeat path
+/// downstream rarely runs more than a handful of iterations even for
+/// hundred-MB payloads.
+static RAND_BUFFER: SyncLazy<Arc<Bytes>> = SyncLazy::new(|| {
+    use rand::RngCore as _;
+    let mut buf = vec![0u8; 1024 * 1024]; // 1 MB
+    rand::rng().fill_bytes(&mut buf);
+    Arc::new(Bytes::from(buf))
 });
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
@@ -138,25 +147,6 @@ fn create_router(enable_cors: bool, max_upload_size: usize) -> Router {
         );
     }
 
-    // // Use sampling-based tracing for high-throughput scenarios
-    // router = router.layer(
-    //     tower_http::trace::TraceLayer::new_for_http()
-    //         .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::DEBUG))
-    //         .on_response(
-    //             |response: &Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
-    //                 // Only log a subset of responses to reduce overhead during high load
-    //                 if rand::random::<f32>() < 0.1 {
-    //                     // 10% sampling rate
-    //                     debug!(
-    //                         status = ?response.status(),
-    //                         latency = ?latency,
-    //                         "HTTP response"
-    //                     );
-    //                 }
-    //             },
-    //         ),
-    // );
-
     router
 }
 
@@ -177,9 +167,8 @@ async fn download_handler(Query(query): Query<DownloadQuery>) -> impl IntoRespon
     let chunk_size = query.chunk_size;
     let chunks = total_size.div_ceil(chunk_size); // Round up division
 
-    let buffer_ref = Arc::clone(&ZERO_BUFFER);
+    let buffer_ref = Arc::clone(&RAND_BUFFER);
 
-    // TODO: Check how slow this is vv
     let stream = stream::iter(0..chunks).enumerate().map(move |(i, _)| {
         let bytes_sent = i * chunk_size;
         let remaining_bytes = total_size.saturating_sub(bytes_sent);

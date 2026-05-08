@@ -42,13 +42,14 @@ async fn http1_download_and_upload_roundtrip() -> Result<()> {
     let config = HttpTestConfig::new(
         "127.0.0.1".to_string(),
         Some(port),
-        1, // 1-second test
+        2, // 2-second test
         1, // single connection
         TestType::Bidirectional,
         vec![64 * 1024usize], // 64 KB payload
         Some(16 * 1024),      // 16 KB chunk
         HttpVersion::HTTP1,
-    );
+    )
+    .with_warmup(Duration::from_millis(0));
 
     let report = run_http_test(config).await?;
 

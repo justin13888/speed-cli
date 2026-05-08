@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
             server,
             port,
             duration,
+            warmup,
             mode,
             tcp,
             udp,
@@ -85,6 +86,7 @@ async fn main() -> Result<()> {
             test_sizes,
             chunk_size,
         } => {
+            let warmup = std::time::Duration::from_secs(warmup);
             // Assert that exactly one specific protocol is enabled (no more, no less)
             // Count enabled protocols
             let protocols = [mode.is_some(), tcp, udp, http1, http2, h2c, http3];
@@ -135,7 +137,8 @@ async fn main() -> Result<()> {
                         connections,
                         test_type,
                         test_sizes,
-                    );
+                    )
+                    .with_warmup(warmup);
 
                     run_tcp_client(config).await?
                 }
@@ -147,7 +150,8 @@ async fn main() -> Result<()> {
                         connections,
                         test_type,
                         test_sizes,
-                    );
+                    )
+                    .with_warmup(warmup);
 
                     run_udp_client(config).await?
                 }
@@ -170,7 +174,8 @@ async fn main() -> Result<()> {
                         test_sizes,
                         chunk_size,
                         http_version,
-                    );
+                    )
+                    .with_warmup(warmup);
 
                     run_http_test(config).await?
                 }

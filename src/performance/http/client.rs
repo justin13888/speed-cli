@@ -29,6 +29,12 @@ use crate::{
     },
 };
 
+fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Duration {
+    end.duration_since(start)
+        .saturating_sub(warmup)
+        .max(Duration::from_millis(1))
+}
+
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
 fn ensure_crypto_provider() {
@@ -58,10 +64,45 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     // Create HTTP client based on version preference
     let client = create_http_client(&config.http_version).await?;
 
+    // Pre-flight: quickly fail with a useful error if the server isn't
+    // there or doesn't speak the expected protocol, instead of letting the
+    // user wait the full test duration before discovering the problem.
+    let info_url = format!("{}/info", config.server_url);
+    match tokio::time::timeout(Duration::from_secs(5), client.get(&info_url).send()).await {
+        Ok(Ok(resp)) if resp.status().is_success() => {
+            tracing::debug!("Server pre-flight check passed: {}", info_url);
+        }
+        Ok(Ok(resp)) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check returned status {} for {}",
+                resp.status(),
+                info_url
+            ));
+        }
+        Ok(Err(e)) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check failed for {}: {}",
+                info_url,
+                e
+            ));
+        }
+        Err(_) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check timed out after 5s ({})",
+                info_url
+            ));
+        }
+    }
+
     match config.test_type {
         TestType::LatencyOnly => {
-            result.latency =
-                measure_http_latency(&client, &config.server_url, config.duration).await?;
+            result.latency = measure_http_latency(
+                &client,
+                &config.server_url,
+                config.duration,
+                config.warmup,
+            )
+            .await?;
         }
         TestType::Download => {
             for payload_size in &config.payload_sizes {
@@ -74,6 +115,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.chunk_size,
                         config.duration,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -90,6 +132,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.chunk_size,
                         config.duration,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -107,6 +150,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.chunk_size,
                         config.duration,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -119,6 +163,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.chunk_size,
                         config.duration,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -135,6 +180,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.chunk_size,
                         config.duration,
+                        config.warmup,
                     ),
                     run_upload_test(
                         &client,
@@ -143,6 +189,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.chunk_size,
                         config.duration,
+                        config.warmup,
                     )
                 );
 
@@ -198,6 +245,7 @@ async fn measure_http_latency(
     client: &Client,
     server_url: &str,
     duration: Duration,
+    warmup: Duration,
 ) -> Result<Option<LatencyResult>> {
     let url = format!("{server_url}/latency");
     let mut measurements = Vec::new();
@@ -213,6 +261,7 @@ async fn measure_http_latency(
 
     while start.elapsed() < duration {
         let request_start = Instant::now();
+        let in_warmup = start.elapsed() < warmup;
         match client.head(&url).send().await {
             Ok(_response) => {
                 let rtt = request_start.elapsed().as_secs_f64() * 1000.0;
@@ -220,20 +269,20 @@ async fn measure_http_latency(
                     rtt_ms: Some(rtt),
                     elapsed_time: start.elapsed(),
                 };
-                measurements.push(measurement.clone());
-
-                // Send to stats collector (non-blocking)
-                let _ = tx.send(measurement);
+                if !in_warmup {
+                    measurements.push(measurement.clone());
+                    let _ = tx.send(measurement);
+                }
             }
             Err(e) => {
                 let measurement = LatencyMeasurement {
                     rtt_ms: None,
                     elapsed_time: start.elapsed(),
                 };
-                measurements.push(measurement.clone());
-
-                // Send to stats collector (non-blocking)
-                let _ = tx.send(measurement);
+                if !in_warmup {
+                    measurements.push(measurement.clone());
+                    let _ = tx.send(measurement);
+                }
 
                 trace!("HTTP request error while measuring latency: {e}");
             }
@@ -268,6 +317,7 @@ async fn run_download_test(
     payload_size: usize,
     chunk_size: usize,
     duration: Duration,
+    warmup: Duration,
 ) -> Result<ThroughputResult> {
     println!(
         "Starting download test with {} payload size and {} parallel connections...",
@@ -296,12 +346,15 @@ async fn run_download_test(
             let mut local_measurements = Vec::new();
             while start_time.elapsed() < duration {
                 let download_start = Instant::now();
+                let in_warmup = start_time.elapsed() < warmup;
                 match download_chunk(&client, &server_url, i, payload_size, chunk_size).await {
                     Ok(bytes) => {
                         let measurement =
                             ThroughputMeasurement::new(bytes, download_start.elapsed());
-                        local_measurements.push(measurement.clone());
-                        let _ = tx.send(measurement);
+                        if !in_warmup {
+                            local_measurements.push(measurement.clone());
+                            let _ = tx.send(measurement);
+                        }
                     }
                     Err(e) => {
                         let measurements = ThroughputMeasurement::Failure {
@@ -309,8 +362,10 @@ async fn run_download_test(
                             duration: download_start.elapsed(),
                             retry_count: 0, // No retries in this case
                         };
-                        local_measurements.push(measurements.clone());
-                        let _ = tx.send(measurements);
+                        if !in_warmup {
+                            local_measurements.push(measurements.clone());
+                            let _ = tx.send(measurements);
+                        }
 
                         break;
                     }
@@ -349,7 +404,7 @@ async fn run_download_test(
 
     Ok(ThroughputResult {
         measurements,
-        total_duration: end_time.duration_since(start_time),
+        total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
 }
@@ -361,6 +416,7 @@ async fn run_upload_test(
     payload_size: usize,
     chunk_size: usize,
     duration: Duration,
+    warmup: Duration,
 ) -> Result<ThroughputResult> {
     println!(
         "Starting upload test with {} payload size and {} parallel connections...",
@@ -398,11 +454,14 @@ async fn run_upload_test(
             let mut local_measurements = Vec::new();
             while start_time.elapsed() < duration {
                 let upload_start = Instant::now();
+                let in_warmup = start_time.elapsed() < warmup;
                 match upload_chunk(&client, &server_url, payload_size, chunk_data.clone()).await {
                     Ok(bytes) => {
                         let measurement = ThroughputMeasurement::new(bytes, upload_start.elapsed());
-                        local_measurements.push(measurement.clone());
-                        let _ = tx.send(measurement);
+                        if !in_warmup {
+                            local_measurements.push(measurement.clone());
+                            let _ = tx.send(measurement);
+                        }
                     }
                     Err(e) => {
                         let measurement = ThroughputMeasurement::new_error(
@@ -410,8 +469,10 @@ async fn run_upload_test(
                             upload_start.elapsed(),
                             0,
                         );
-                        local_measurements.push(measurement.clone());
-                        let _ = tx.send(measurement);
+                        if !in_warmup {
+                            local_measurements.push(measurement.clone());
+                            let _ = tx.send(measurement);
+                        }
                     }
                 }
             }
@@ -448,7 +509,7 @@ async fn run_upload_test(
 
     Ok(ThroughputResult {
         measurements,
-        total_duration: end_time.duration_since(start_time),
+        total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
 }

@@ -99,7 +99,7 @@ speed-cli client --<mode> -s <server-ip> -e results.test
 
 When running server with HTTP, the following endpoints are available:
 
-- `GET /download?size=<total_size>?chunk=<chunk_size>` - Download test data
+- `GET /download?size=<total_size>&chunk_size=<chunk_size>` - Download test data
 - `POST /upload` - Upload test endpoint
 - `GET /latency` - Minimal latency test
 - `GET /info` - Server information

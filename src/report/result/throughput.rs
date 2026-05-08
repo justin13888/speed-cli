@@ -44,6 +44,32 @@ impl fmt::Display for ThroughputResult {
             )
             .magenta()
         )?;
+
+        // Per-sample throughput percentiles. These describe the spread of the
+        // individual transfer measurements, complementing the time-averaged
+        // mean above. Only emit them if we actually have successful samples.
+        let percentiles = [
+            ("Min Throughput", 0.0),
+            ("p50 Throughput", 50.0),
+            ("p90 Throughput", 90.0),
+            ("p95 Throughput", 95.0),
+            ("p99 Throughput", 99.0),
+            ("Max Throughput", 100.0),
+        ];
+        for (label, p) in percentiles {
+            if let Some(bps) = self.percentile_throughput_bps(p) {
+                writeln!(
+                    f,
+                    "  {}: {}",
+                    label.bright_green().bold(),
+                    format_size(
+                        bps as u64,
+                        DECIMAL.base_unit(BaseUnit::Bit).suffix("/s"),
+                    )
+                    .magenta()
+                )?;
+            }
+        }
         writeln!(
             f,
             "  {}: {}",
@@ -138,6 +164,52 @@ impl ThroughputResult {
         }
 
         (self.bytes_transferred() as f64) / self.total_duration.as_secs_f64()
+    }
+
+    /// Returns per-measurement throughput samples in bits per second, for
+    /// successful measurements only.
+    fn sample_bps_sorted(&self) -> Vec<f64> {
+        let mut samples: Vec<f64> = self
+            .measurements
+            .iter()
+            .filter_map(|m| match m {
+                ThroughputMeasurement::Success { .. } => Some(m.throughput_bps()),
+                ThroughputMeasurement::Failure { .. } => None,
+            })
+            .collect();
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        samples
+    }
+
+    /// Returns the n-th percentile of per-measurement throughput in bits per
+    /// second. Returns None if there are no successful samples or `n` is
+    /// outside [0, 100].
+    pub fn percentile_throughput_bps(&self, n: f64) -> Option<f64> {
+        if !(0.0..=100.0).contains(&n) {
+            return None;
+        }
+        let samples = self.sample_bps_sorted();
+        if samples.is_empty() {
+            return None;
+        }
+        if n == 0.0 {
+            return Some(samples[0]);
+        }
+        if n == 100.0 {
+            return Some(samples[samples.len() - 1]);
+        }
+        let index = ((n / 100.0) * (samples.len() - 1) as f64).round() as usize;
+        Some(samples[index])
+    }
+
+    /// Min per-measurement throughput in bits per second.
+    pub fn min_throughput_bps(&self) -> Option<f64> {
+        self.percentile_throughput_bps(0.0)
+    }
+
+    /// Max per-measurement throughput in bits per second.
+    pub fn max_throughput_bps(&self) -> Option<f64> {
+        self.percentile_throughput_bps(100.0)
     }
 
     /// Returns the connection success rate as a percentage (0.0 to 1.0)

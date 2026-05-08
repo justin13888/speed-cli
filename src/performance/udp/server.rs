@@ -309,7 +309,6 @@ impl StpServer {
                     } else {
                         // Fragment large payload into multiple packets
                         let mut remaining_bytes = download_payload_size;
-                        let mut _fragment_number = 0;
 
                         while remaining_bytes > 0 {
                             let fragment_size = std::cmp::min(remaining_bytes, MAX_UDP_PAYLOAD);
@@ -350,7 +349,6 @@ impl StpServer {
                             }
 
                             remaining_bytes -= fragment_size;
-                            _fragment_number += 1;
 
                             // Small delay between fragments
                             tokio::time::sleep(Duration::from_micros(50)).await;

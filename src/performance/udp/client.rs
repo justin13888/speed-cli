@@ -31,6 +31,12 @@ use crate::{
     },
 };
 
+fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Duration {
+    end.duration_since(start)
+        .saturating_sub(warmup)
+        .max(Duration::from_millis(1))
+}
+
 // TODO: Verify upload, download, latency modes all work correctly
 // TODO: Improve the STP implementation performance
 
@@ -138,11 +144,18 @@ impl StpClient {
             let (acked_packets, lost_packets) =
                 self.loss_recovery.on_ack_received(packet.header.latest_ack);
 
-            // Update statistics for acked packets
+            // Update statistics for acked packets.
+            //
+            // Karn's algorithm: skip RTT samples for retransmitted packets,
+            // since we can't tell whether the ACK is for the original or the
+            // retransmission, and including those samples biases the RTT
+            // estimate upward.
             for acked in &acked_packets {
                 self.bytes_acked += acked.size as u64;
                 self.packets_acked += 1;
-                self.rtt_samples.push(rtt);
+                if !acked.retransmitted {
+                    self.rtt_samples.push(rtt);
+                }
 
                 // Notify congestion control
                 self.congestion_control
@@ -213,9 +226,58 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
             .bold()
     );
 
+    // Pre-flight: send one PING and require a response within 1s. STP
+    // servers ACK any well-formed packet, so this is a cheap way to
+    // surface "server not running" / "blocked by firewall" before
+    // committing to the full test.
+    {
+        let probe = StpClient::new(&server_addr).await?;
+        let ping = StpPacket::new(1, 0, 0, Bytes::from("PING"));
+        probe.socket.send(&ping.encode()).await.map_err(|e| {
+            eyre::eyre!(
+                "UDP pre-flight send to {} failed: {}",
+                server_addr,
+                e
+            )
+        })?;
+        let mut buf = [0u8; 2048];
+        match timeout(Duration::from_secs(1), probe.socket.recv(&mut buf)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                return Err(eyre::eyre!(
+                    "UDP pre-flight recv from {} failed: {}",
+                    server_addr,
+                    e
+                ));
+            }
+            Err(_) => {
+                return Err(eyre::eyre!(
+                    "UDP pre-flight: no response from {} within 1s",
+                    server_addr
+                ));
+            }
+        }
+    }
+
     let start_time = Utc::now();
 
     let mut result = NetworkTestResult::new_udp();
+
+    // The UDP throughput tests use a single STP stream; multi-stream UDP
+    // would need a per-stream sender/receiver and aggregation, which is
+    // scoped for the Phase 3 UDP rewrite. Until then, warn loudly when the
+    // user asks for >1 streams instead of silently single-streaming.
+    if config.parallel_streams > 1 {
+        tracing::warn!(
+            "UDP test was asked for {} parallel streams, but the current STP \
+             implementation only supports 1; running a single stream. \
+             Multi-stream UDP is tracked in Phase 3 of the roadmap.",
+            config.parallel_streams
+        );
+    }
+
+    let duration = Duration::from_secs(config.duration);
+    let warmup = config.warmup;
 
     match config.test_type {
         TestType::LatencyOnly => {
@@ -230,7 +292,8 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         config.port,
                         config.parallel_streams,
                         *payload_size,
-                        Duration::from_secs(config.duration),
+                        duration,
+                        warmup,
                     )
                     .await?,
                 );
@@ -245,7 +308,8 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         config.port,
                         config.parallel_streams,
                         *payload_size,
-                        Duration::from_secs(config.duration),
+                        duration,
+                        warmup,
                     )
                     .await?,
                 );
@@ -261,7 +325,8 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         config.port,
                         config.parallel_streams,
                         *payload_size,
-                        Duration::from_secs(config.duration),
+                        duration,
+                        warmup,
                     )
                     .await?,
                 );
@@ -272,7 +337,8 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         config.port,
                         config.parallel_streams,
                         *payload_size,
-                        Duration::from_secs(config.duration),
+                        duration,
+                        warmup,
                     )
                     .await?,
                 );
@@ -287,14 +353,16 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         config.port,
                         config.parallel_streams,
                         *payload_size,
-                        Duration::from_secs(config.duration),
+                        duration,
+                        warmup,
                     ),
                     run_upload_test(
                         &config.server,
                         config.port,
                         config.parallel_streams,
                         *payload_size,
-                        Duration::from_secs(config.duration),
+                        duration,
+                        warmup,
                     )
                 );
 
@@ -307,10 +375,16 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     Ok((start_time, config, result).into())
 }
 
-/// Measure UDP latency using simple UDP packets
+/// Measure UDP latency using simple UDP packets.
+///
+/// One socket is reused across all probes; previously the latency loop
+/// re-bound and re-connected a fresh `StpClient` per iteration, so every
+/// reported "RTT" included `bind` + `connect` + `StpClient::new`
+/// allocation cost rather than just the network round trip.
 async fn measure_udp_latency(config: &UdpTestConfig) -> Result<Option<LatencyResult>> {
     let addr = format!("{}:{}", config.server, config.port);
     let duration = Duration::from_secs(config.duration);
+    let warmup = config.warmup;
     let mut measurements = Vec::new();
 
     println!("Measuring UDP latency for {duration:?}...");
@@ -318,27 +392,17 @@ async fn measure_udp_latency(config: &UdpTestConfig) -> Result<Option<LatencyRes
     // Create progress bar for latency measurement
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
 
+    // Set up the client once; the loop just sends ping packets on its socket.
+    let mut client = StpClient::new(&addr).await?;
+
     let start = Instant::now();
 
     // Set up instrumentation
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
+    let mut buffer = [0u8; 2048];
 
     while start.elapsed() < duration {
-        let connect_start = Instant::now();
-
-        // Create STP client for latency measurement
-        let mut client = match StpClient::new(&addr).await {
-            Ok(c) => c,
-            Err(_) => {
-                let measurement = LatencyMeasurement {
-                    rtt_ms: None,
-                    elapsed_time: start.elapsed(),
-                };
-                measurements.push(measurement.clone());
-                let _ = tx.send(measurement);
-                continue;
-            }
-        };
+        let in_warmup = start.elapsed() < warmup;
 
         // Send an STP ping packet
         let ping_packet = StpPacket::new(
@@ -348,59 +412,42 @@ async fn measure_udp_latency(config: &UdpTestConfig) -> Result<Option<LatencyRes
             Bytes::from("PING"),
         );
 
-        match client.socket.send(&ping_packet.encode()).await {
-            Ok(_) => {
-                // Try to receive a response (with timeout)
-                let mut buffer = [0u8; 2048];
-                match timeout(Duration::from_millis(1000), client.socket.recv(&mut buffer)).await {
-                    Ok(Ok(size)) => {
-                        if let Some(_response_packet) =
-                            StpPacket::decode(Bytes::copy_from_slice(&buffer[..size]))
-                        {
-                            let rtt = connect_start.elapsed().as_secs_f64() * 1000.0;
-                            let measurement = LatencyMeasurement {
-                                rtt_ms: Some(rtt),
-                                elapsed_time: start.elapsed(),
-                            };
-                            measurements.push(measurement.clone());
-
-                            // Send to stats collector (non-blocking)
-                            let _ = tx.send(measurement);
-                        } else {
-                            let measurement = LatencyMeasurement {
-                                rtt_ms: None,
-                                elapsed_time: start.elapsed(),
-                            };
-                            measurements.push(measurement.clone());
-
-                            // Send to stats collector (non-blocking)
-                            let _ = tx.send(measurement);
+        let probe_start = Instant::now();
+        let measurement = match client.socket.send(&ping_packet.encode()).await {
+            Ok(_) => match timeout(Duration::from_millis(1000), client.socket.recv(&mut buffer))
+                .await
+            {
+                Ok(Ok(size)) => {
+                    if StpPacket::decode(Bytes::copy_from_slice(&buffer[..size])).is_some() {
+                        let rtt = probe_start.elapsed().as_secs_f64() * 1000.0;
+                        LatencyMeasurement {
+                            rtt_ms: Some(rtt),
+                            elapsed_time: start.elapsed(),
                         }
-                    }
-                    _ => {
-                        let measurement = LatencyMeasurement {
+                    } else {
+                        LatencyMeasurement {
                             rtt_ms: None,
                             elapsed_time: start.elapsed(),
-                        };
-                        measurements.push(measurement.clone());
-
-                        // Send to stats collector (non-blocking)
-                        let _ = tx.send(measurement);
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                let measurement = LatencyMeasurement {
+                _ => LatencyMeasurement {
                     rtt_ms: None,
                     elapsed_time: start.elapsed(),
-                };
-                measurements.push(measurement.clone());
-
-                // Send to stats collector (non-blocking)
-                let _ = tx.send(measurement);
-
+                },
+            },
+            Err(e) => {
                 trace!("UDP send error while measuring latency: {e}");
+                LatencyMeasurement {
+                    rtt_ms: None,
+                    elapsed_time: start.elapsed(),
+                }
             }
+        };
+
+        if !in_warmup {
+            measurements.push(measurement.clone());
+            let _ = tx.send(measurement);
         }
 
         // Wait between packets to avoid overwhelming the server
@@ -431,6 +478,7 @@ async fn run_download_test(
     _parallel_connections: usize,
     payload_size: usize,
     duration: Duration,
+    warmup: Duration,
 ) -> Result<ThroughputResult> {
     println!(
         "Starting UDP download test with {} payload size...",
@@ -471,6 +519,7 @@ async fn run_download_test(
     let mut timeout_count = 0;
 
     while start_time.elapsed() < duration {
+        let in_warmup = start_time.elapsed() < warmup;
         // Try to receive data (non-blocking with short timeout)
         match timeout(
             Duration::from_millis(50),
@@ -499,8 +548,10 @@ async fn run_download_test(
                         packet.payload.len() as u64,
                         read_start.elapsed(),
                     );
-                    measurements.push(measurement.clone());
-                    let _ = tx.send(measurement);
+                    if !in_warmup {
+                        measurements.push(measurement.clone());
+                        let _ = tx.send(measurement);
+                    }
                 } else {
                     // Invalid packet received - log as error
                     let error_measurement = ThroughputMeasurement::new_error(
@@ -508,8 +559,10 @@ async fn run_download_test(
                         read_start.elapsed(),
                         0,
                     );
-                    measurements.push(error_measurement.clone());
-                    let _ = tx.send(error_measurement);
+                    if !in_warmup {
+                        measurements.push(error_measurement.clone());
+                        let _ = tx.send(error_measurement);
+                    }
                 }
             }
             Ok(Err(e)) => {
@@ -519,8 +572,10 @@ async fn run_download_test(
                     last_successful_receive.elapsed(),
                     0,
                 );
-                measurements.push(error_measurement.clone());
-                let _ = tx.send(error_measurement);
+                if !in_warmup {
+                    measurements.push(error_measurement.clone());
+                    let _ = tx.send(error_measurement);
+                }
                 break; // Exit on socket error
             }
             Err(_) => {
@@ -538,8 +593,10 @@ async fn run_download_test(
                         time_since_last_data,
                         timeout_count,
                     );
-                    measurements.push(error_measurement.clone());
-                    let _ = tx.send(error_measurement);
+                    if !in_warmup {
+                        measurements.push(error_measurement.clone());
+                        let _ = tx.send(error_measurement);
+                    }
 
                     // Reset timeout tracking
                     last_successful_receive = Instant::now();
@@ -565,7 +622,7 @@ async fn run_download_test(
 
     Ok(ThroughputResult {
         measurements,
-        total_duration: end_time.duration_since(start_time),
+        total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
 }
@@ -576,6 +633,7 @@ async fn run_upload_test(
     _parallel_connections: usize,
     payload_size: usize,
     duration: Duration,
+    warmup: Duration,
 ) -> Result<ThroughputResult> {
     println!(
         "Starting UDP upload test with {} payload size...",
@@ -603,6 +661,7 @@ async fn run_upload_test(
     let mut recv_buffer = vec![0u8; 2048];
 
     while start_time.elapsed() < duration {
+        let in_warmup = start_time.elapsed() < warmup;
         // Send data if congestion control allows
         let (bytes_sent, _, _, _, _sending_rate, _avg_rtt) = client.get_stats();
         let bytes_in_flight = bytes_sent - client.bytes_acked;
@@ -613,10 +672,10 @@ async fn run_upload_test(
                 Ok(_) => {
                     let measurement =
                         ThroughputMeasurement::new(payload.len() as u64, write_start.elapsed());
-                    measurements.push(measurement.clone());
-
-                    // Send to stats collector (non-blocking)
-                    let _ = tx.send(measurement);
+                    if !in_warmup {
+                        measurements.push(measurement.clone());
+                        let _ = tx.send(measurement);
+                    }
                 }
                 Err(e) => {
                     let measurement = ThroughputMeasurement::new_error(
@@ -624,8 +683,10 @@ async fn run_upload_test(
                         write_start.elapsed(),
                         0,
                     );
-                    measurements.push(measurement.clone());
-                    let _ = tx.send(measurement);
+                    if !in_warmup {
+                        measurements.push(measurement.clone());
+                        let _ = tx.send(measurement);
+                    }
                     break;
                 }
             }
@@ -657,7 +718,7 @@ async fn run_upload_test(
 
     Ok(ThroughputResult {
         measurements,
-        total_duration: end_time.duration_since(start_time),
+        total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
 }

@@ -19,6 +19,12 @@ pub enum Commands {
         #[arg(short, long, default_value = "10")]
         duration: u64,
 
+        /// Warmup window in seconds. Samples taken in this initial window are
+        /// discarded so the reported numbers reflect steady state. Counts
+        /// against `--duration`, not on top of it.
+        #[arg(long, default_value = "1")]
+        warmup: u64,
+
         /// Protocol mode (tcp, udp, http1, http2, h2c, http3)
         #[arg(short, long, value_enum)]
         #[clap(group = "protocol")]

@@ -42,11 +42,12 @@ async fn tcp_download_and_upload_roundtrip() -> Result<()> {
     let config = TcpTestConfig::new(
         "127.0.0.1".to_string(),
         Some(port),
-        1, // 1-second test
+        2, // 2-second test (1s warmup + 1s measurement after the override)
         1, // single connection
         TestType::Bidirectional,
         vec![8192usize], // single payload size
-    );
+    )
+    .with_warmup(Duration::from_millis(0));
 
     let report = run_tcp_client(config).await?;
 

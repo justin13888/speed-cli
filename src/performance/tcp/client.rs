@@ -23,6 +23,15 @@ use crate::{
     },
 };
 
+/// Effective measurement duration: total elapsed minus the warmup window,
+/// clamped so we never report a zero or negative duration that would blow up
+/// throughput calculations.
+fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Duration {
+    end.duration_since(start)
+        .saturating_sub(warmup)
+        .max(Duration::from_millis(1))
+}
+
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
 
@@ -32,6 +41,25 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
             .green()
             .bold()
     );
+
+    // Pre-flight: confirm we can reach the server before running the full
+    // test. Saves the user a 30-second timeout when the server is down.
+    match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&server_addr)).await {
+        Ok(Ok(stream)) => drop(stream),
+        Ok(Err(e)) => {
+            return Err(eyre::eyre!(
+                "TCP pre-flight connect to {} failed: {}",
+                server_addr,
+                e
+            ));
+        }
+        Err(_) => {
+            return Err(eyre::eyre!(
+                "TCP pre-flight connect to {} timed out after 5s",
+                server_addr
+            ));
+        }
+    }
 
     let start_time = Utc::now();
 
@@ -51,6 +79,8 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.parallel_connections,
                         *payload_size,
                         config.duration,
+                        config.read_buffer_size,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -66,6 +96,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.parallel_connections,
                         *payload_size,
                         config.duration,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -82,6 +113,8 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.parallel_connections,
                         *payload_size,
                         config.duration,
+                        config.read_buffer_size,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -93,6 +126,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.parallel_connections,
                         *payload_size,
                         config.duration,
+                        config.warmup,
                     )
                     .await?,
                 );
@@ -108,6 +142,8 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.parallel_connections,
                         *payload_size,
                         config.duration,
+                        config.read_buffer_size,
+                        config.warmup,
                     ),
                     run_upload_test(
                         &config.server,
@@ -115,6 +151,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.parallel_connections,
                         *payload_size,
                         config.duration,
+                        config.warmup,
                     )
                 );
 
@@ -131,6 +168,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
 async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyResult>> {
     let addr = format!("{}:{}", config.server, config.port);
     let duration = config.duration;
+    let warmup = config.warmup;
     let mut measurements = Vec::new();
 
     println!("Measuring TCP latency for {duration:?}...");
@@ -145,17 +183,21 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
 
     while start.elapsed() < duration {
         let connect_start = Instant::now();
+        let in_warmup = start.elapsed() < warmup;
         match TcpStream::connect(&addr).await {
             Ok(mut stream) => {
+                if let Err(e) = stream.set_nodelay(true) {
+                    tracing::debug!("TCP set_nodelay failed: {e}");
+                }
                 let rtt = connect_start.elapsed().as_secs_f64() * 1000.0;
                 let measurement = LatencyMeasurement {
                     rtt_ms: Some(rtt),
                     elapsed_time: start.elapsed(),
                 };
-                measurements.push(measurement.clone());
-
-                // Send to stats collector (non-blocking)
-                let _ = tx.send(measurement);
+                if !in_warmup {
+                    measurements.push(measurement.clone());
+                    let _ = tx.send(measurement);
+                }
 
                 // Close the connection cleanly
                 let _ = stream.shutdown().await;
@@ -165,10 +207,10 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
                     rtt_ms: None,
                     elapsed_time: start.elapsed(),
                 };
-                measurements.push(measurement.clone());
-
-                // Send to stats collector (non-blocking)
-                let _ = tx.send(measurement);
+                if !in_warmup {
+                    measurements.push(measurement.clone());
+                    let _ = tx.send(measurement);
+                }
 
                 trace!("TCP connection error while measuring latency: {e}");
             }
@@ -202,6 +244,8 @@ async fn run_download_test(
     parallel_connections: usize,
     payload_size: usize,
     duration: Duration,
+    read_buffer_size: usize,
+    warmup: Duration,
 ) -> Result<ThroughputResult> {
     println!(
         "Starting TCP download test with {} payload size and {} parallel connections...",
@@ -231,6 +275,9 @@ async fn run_download_test(
 
             match TcpStream::connect(&addr).await {
                 Ok(mut stream) => {
+                    if let Err(e) = stream.set_nodelay(true) {
+                        tracing::debug!("TCP set_nodelay failed on download conn {i}: {e}");
+                    }
                     // Send download command
                     if let Err(e) = stream.write_all(b"D").await {
                         eprintln!("Failed to send download command on connection {i}: {e}");
@@ -240,10 +287,11 @@ async fn run_download_test(
                     // Give the server a moment to process the command
                     tokio::time::sleep(Duration::from_millis(10)).await;
 
-                    let mut buffer = vec![0u8; payload_size.min(8192)]; // Use smaller buffer sizes to avoid overwhelming
+                    let mut buffer = vec![0u8; read_buffer_size];
 
                     while start_time.elapsed() < duration {
                         let read_start = Instant::now();
+                        let in_warmup = start_time.elapsed() < warmup;
                         match stream.read(&mut buffer).await {
                             Ok(0) => {
                                 // Server closed connection - this might be normal if server hit limits
@@ -253,8 +301,10 @@ async fn run_download_test(
                             Ok(n) => {
                                 let measurement =
                                     ThroughputMeasurement::new(n as u64, read_start.elapsed());
-                                local_measurements.push(measurement.clone());
-                                let _ = tx.send(measurement);
+                                if !in_warmup {
+                                    local_measurements.push(measurement.clone());
+                                    let _ = tx.send(measurement);
+                                }
                             }
                             Err(e) => {
                                 let measurement = ThroughputMeasurement::new_error(
@@ -262,8 +312,10 @@ async fn run_download_test(
                                     read_start.elapsed(),
                                     0,
                                 );
-                                local_measurements.push(measurement.clone());
-                                let _ = tx.send(measurement);
+                                if !in_warmup {
+                                    local_measurements.push(measurement.clone());
+                                    let _ = tx.send(measurement);
+                                }
                             }
                         }
                     }
@@ -305,7 +357,7 @@ async fn run_download_test(
 
     Ok(ThroughputResult {
         measurements,
-        total_duration: end_time.duration_since(start_time),
+        total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
 }
@@ -316,6 +368,7 @@ async fn run_upload_test(
     parallel_connections: usize,
     payload_size: usize,
     duration: Duration,
+    warmup: Duration,
 ) -> Result<ThroughputResult> {
     println!(
         "Starting TCP upload test with {} payload size and {} parallel connections...",
@@ -353,6 +406,9 @@ async fn run_upload_test(
 
             match TcpStream::connect(&addr).await {
                 Ok(mut stream) => {
+                    if let Err(e) = stream.set_nodelay(true) {
+                        tracing::debug!("TCP set_nodelay failed on upload conn {i}: {e}");
+                    }
                     // Send upload command
                     if let Err(e) = stream.write_all(b"U").await {
                         eprintln!("Failed to send upload command on connection {i}: {e}");
@@ -361,16 +417,17 @@ async fn run_upload_test(
 
                     while start_time.elapsed() < duration {
                         let write_start = Instant::now();
+                        let in_warmup = start_time.elapsed() < warmup;
                         match stream.write_all(&data).await {
                             Ok(_) => {
                                 let measurement = ThroughputMeasurement::new(
                                     data.len() as u64,
                                     write_start.elapsed(),
                                 );
-                                local_measurements.push(measurement.clone());
-
-                                // Send to stats collector (non-blocking)
-                                let _ = tx.send(measurement);
+                                if !in_warmup {
+                                    local_measurements.push(measurement.clone());
+                                    let _ = tx.send(measurement);
+                                }
                             }
                             Err(e) => {
                                 let measurement = ThroughputMeasurement::new_error(
@@ -380,8 +437,10 @@ async fn run_upload_test(
                                     write_start.elapsed(),
                                     0,
                                 );
-                                local_measurements.push(measurement.clone());
-                                let _ = tx.send(measurement);
+                                if !in_warmup {
+                                    local_measurements.push(measurement.clone());
+                                    let _ = tx.send(measurement);
+                                }
                                 break;
                             }
                         }
@@ -424,7 +483,7 @@ async fn run_upload_test(
 
     Ok(ThroughputResult {
         measurements,
-        total_duration: end_time.duration_since(start_time),
+        total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
 }

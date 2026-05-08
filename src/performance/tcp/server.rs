@@ -14,8 +14,6 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::utils::format::{format_bytes, format_throughput};
 
-// TODO: Try pushing this to 100gig connection
-
 #[derive(Debug, Clone)]
 pub struct TcpServerConfig {
     /// Maximum number of concurrent connections
@@ -564,12 +562,15 @@ impl ProductionTcpHandler {
         buffer: &mut [u8],
         shutdown_rx: &mut broadcast::Receiver<()>,
     ) -> Result<()> {
+        use rand::RngCore as _;
         use tokio::io::AsyncWriteExt;
 
         info!("Handling download request");
 
-        // Fill buffer with random data for download
-        buffer.fill(0x42); // Fill with a pattern for testing
+        // Fill buffer with random data so any path-compression middleboxes
+        // (some VPNs, modems) can't deflate the stream and inflate the
+        // reported throughput. Done once per connection - cheap.
+        rand::rng().fill_bytes(buffer);
 
         let mut total_sent = 0u64;
         let start_time = Instant::now();

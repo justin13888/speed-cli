@@ -852,7 +852,7 @@ impl ToHtml for LatencyResult {
                 )?;
             }
 
-            if let Some(jitter) = self.jitter() {
+            if let Some(jitter) = self.rtt_stddev() {
                 write!(
                     writer,
                     r#"<div style="display: flex; justify-content: space-between;">
@@ -961,7 +961,7 @@ impl ToHtml for LatencyResult {
                 ));
             }
 
-            if let Some(jitter) = self.jitter() {
+            if let Some(jitter) = self.rtt_stddev() {
                 stats_html.push_str(&format!(
                     r#"<div style="display: flex; justify-content: space-between;">
                         <strong>Jitter (Std Dev):</strong> 

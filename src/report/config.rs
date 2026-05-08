@@ -42,6 +42,20 @@ impl From<HttpTestConfig> for TestConfig {
     }
 }
 
+/// Default TCP client read buffer size (128 KB) - matches the server-side buffer
+/// and avoids the syscall amplification you get when sizing the buffer to a
+/// small payload.
+pub const DEFAULT_TCP_READ_BUFFER: usize = 131_072;
+
+/// Default warmup duration. Samples taken during the warmup are discarded so
+/// they don't contaminate the steady-state numbers with TCP slow-start, TLS
+/// handshake jitter, or connection-pool warmup.
+pub const DEFAULT_WARMUP: Duration = Duration::from_secs(1);
+
+fn default_warmup() -> Duration {
+    DEFAULT_WARMUP
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpTestConfig {
     pub server: String,
@@ -52,6 +66,18 @@ pub struct TcpTestConfig {
     pub test_type: TestType,
     /// Payload sizes to use for the test, in bytes. Note this doesn't make sense for TCP but included anyways.
     pub payload_sizes: IndexSet<usize>,
+    /// Size of the per-connection read buffer in bytes. A larger buffer means
+    /// fewer syscalls per second; the default (128 KB) matches the server.
+    #[serde(default = "default_tcp_read_buffer")]
+    pub read_buffer_size: usize,
+    /// Discard samples taken during this initial window. Counted against
+    /// `duration` (not added on top of it).
+    #[serde(default = "default_warmup")]
+    pub warmup: Duration,
+}
+
+fn default_tcp_read_buffer() -> usize {
+    DEFAULT_TCP_READ_BUFFER
 }
 
 impl TcpTestConfig {
@@ -78,7 +104,14 @@ impl TcpTestConfig {
             } else {
                 payload_sizes
             },
+            read_buffer_size: DEFAULT_TCP_READ_BUFFER,
+            warmup: DEFAULT_WARMUP,
         }
+    }
+
+    pub fn with_warmup(mut self, warmup: Duration) -> Self {
+        self.warmup = warmup;
+        self
     }
 }
 
@@ -92,6 +125,9 @@ pub struct UdpTestConfig {
     pub test_type: TestType,
     /// Payload sizes to use for the test, in bytes.
     pub payload_sizes: IndexSet<usize>,
+    /// Discard samples taken during this initial window.
+    #[serde(default = "default_warmup")]
+    pub warmup: Duration,
 }
 
 impl UdpTestConfig {
@@ -118,7 +154,13 @@ impl UdpTestConfig {
             } else {
                 payload_sizes
             },
+            warmup: DEFAULT_WARMUP,
         }
+    }
+
+    pub fn with_warmup(mut self, warmup: Duration) -> Self {
+        self.warmup = warmup;
+        self
     }
 }
 
@@ -136,6 +178,9 @@ pub struct HttpTestConfig {
     pub http_version: HttpVersion,
     /// Maximum chunk size for HTTP requests. This is effective only for HTTP/1.1 tests.
     pub chunk_size: usize,
+    /// Discard samples taken during this initial window.
+    #[serde(default = "default_warmup")]
+    pub warmup: Duration,
 }
 
 impl HttpTestConfig {
@@ -174,7 +219,13 @@ impl HttpTestConfig {
             payload_sizes,
             chunk_size: chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
             http_version,
+            warmup: DEFAULT_WARMUP,
         }
+    }
+
+    pub fn with_warmup(mut self, warmup: Duration) -> Self {
+        self.warmup = warmup;
+        self
     }
 }
 
