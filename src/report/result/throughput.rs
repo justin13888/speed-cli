@@ -10,10 +10,79 @@ use crate::report::{ConnectionError, ThroughputMeasurement};
 use std::collections::HashMap;
 use std::fmt;
 
+/// Per-segment / per-packet framing overhead used when extrapolating
+/// goodput measurements to wire-rate. These match common IPv4 settings:
+/// 20 B IP + 20 B TCP + 12 B TCP timestamp options = 52 B/segment, and
+/// 20 B IP + 8 B UDP = 28 B/packet. For IPv6 the IP header is 20 bytes
+/// larger; we keep IPv4 as the default since most measurement
+/// environments still use it.
+pub const WIRE_OVERHEAD_TCP_BYTES: usize = 52;
+pub const WIRE_OVERHEAD_UDP_BYTES: usize = 28;
+/// Standard Ethernet MTU. Used to estimate segment count from payload size.
+pub const STANDARD_MTU: usize = 1500;
+
+/// Choose how throughput is reported.
+///
+/// `Goodput` (the default) counts only application-layer payload bytes;
+/// this is the behavior speed-cli has always had and what most users mean
+/// when comparing protocols. `Wire` adds an estimate of per-segment /
+/// per-packet framing overhead (TCP/IP or UDP/IP), giving a number closer
+/// to what you would see on a NIC. The wire estimate is only as accurate
+/// as the assumed MTU and header sizes - documented above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThroughputAccounting {
+    Goodput,
+    Wire,
+}
+
+impl Default for ThroughputAccounting {
+    fn default() -> Self {
+        ThroughputAccounting::Goodput
+    }
+}
+
+/// Per-stream measurements for a single parallel connection / stream
+/// within a multi-stream throughput test.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamMeasurements {
+    /// Index of the stream within the test (0-based).
+    pub stream_id: usize,
+    /// Per-chunk measurements from this stream.
+    pub measurements: Vec<ThroughputMeasurement>,
+}
+
+impl StreamMeasurements {
+    pub fn bytes_transferred(&self) -> u64 {
+        self.measurements
+            .iter()
+            .map(|m| match m {
+                ThroughputMeasurement::Success { bytes, .. } => *bytes,
+                ThroughputMeasurement::Failure { .. } => 0,
+            })
+            .sum()
+    }
+
+    /// Average throughput for this stream over the given window, in
+    /// bits per second.
+    pub fn avg_throughput_bps(&self, window: Duration) -> f64 {
+        if window.is_zero() {
+            return 0.0;
+        }
+        (self.bytes_transferred() as f64 * 8.0) / window.as_secs_f64()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThroughputResult {
-    /// Throughput measurements
+    /// Aggregate measurements (flatten of all streams). Used for the
+    /// summary metrics and kept stable for older consumers.
     pub measurements: Vec<ThroughputMeasurement>,
+    /// Per-stream breakdown. Empty for tests that don't have a notion of
+    /// streams (e.g., today's UDP path or imported reports written
+    /// before per-stream data was tracked).
+    #[serde(default)]
+    pub streams: Vec<StreamMeasurements>,
     /// Total duration of the test
     pub total_duration: Duration,
 
@@ -131,6 +200,31 @@ impl fmt::Display for ThroughputResult {
                 .to_formatted_string(&Locale::en)
                 .white()
         )?;
+
+        // Per-stream breakdown, only when we have more than one stream.
+        // For single-stream tests the aggregate above is everything you need.
+        if self.streams.len() > 1 {
+            writeln!(
+                f,
+                "  {}:",
+                "Per-Stream".bright_green().bold()
+            )?;
+            for s in &self.streams {
+                let bps = s.avg_throughput_bps(self.total_duration);
+                writeln!(
+                    f,
+                    "    stream {:>3}: {} ({} chunks)",
+                    s.stream_id.to_string().yellow(),
+                    format_size(
+                        bps as u64,
+                        DECIMAL.base_unit(BaseUnit::Bit).suffix("/s")
+                    )
+                    .magenta(),
+                    s.measurements.len().to_formatted_string(&Locale::en).white()
+                )?;
+            }
+        }
+
         writeln!(
             f,
             "  {}: {}",
@@ -164,6 +258,37 @@ impl ThroughputResult {
         }
 
         (self.bytes_transferred() as f64) / self.total_duration.as_secs_f64()
+    }
+
+    /// Estimate wire-rate average throughput in bits per second by adding
+    /// per-segment / per-packet framing overhead to the goodput numbers.
+    ///
+    /// `overhead_per_segment` should be one of `WIRE_OVERHEAD_TCP_BYTES`
+    /// or `WIRE_OVERHEAD_UDP_BYTES` (for IPv4); pass `mtu = STANDARD_MTU`
+    /// unless you've measured otherwise.
+    pub fn avg_throughput_wire_bps(
+        &self,
+        overhead_per_segment: usize,
+        mtu: usize,
+    ) -> f64 {
+        if self.total_duration.is_zero() || mtu == 0 {
+            return 0.0;
+        }
+        let payload_per_segment = mtu.saturating_sub(overhead_per_segment).max(1) as u64;
+        let total_overhead: u64 = self
+            .measurements
+            .iter()
+            .filter_map(|m| match m {
+                ThroughputMeasurement::Success { bytes, .. } => Some(*bytes),
+                ThroughputMeasurement::Failure { .. } => None,
+            })
+            .map(|bytes| {
+                let segments = bytes.div_ceil(payload_per_segment);
+                segments * overhead_per_segment as u64
+            })
+            .sum();
+        let total_wire_bytes = self.bytes_transferred() + total_overhead;
+        (total_wire_bytes as f64 * 8.0) / self.total_duration.as_secs_f64()
     }
 
     /// Returns per-measurement throughput samples in bits per second, for

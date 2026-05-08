@@ -23,6 +23,7 @@ fn make_sample_report() -> TestReport {
     }
     let throughput = ThroughputResult {
         measurements,
+        streams: Vec::new(),
         total_duration: Duration::from_secs(1),
         timestamp: Utc::now(),
     };

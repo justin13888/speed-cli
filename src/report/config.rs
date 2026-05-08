@@ -6,6 +6,7 @@ use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::DEFAULT_CHUNK_SIZE;
+use crate::report::ThroughputAccounting;
 use crate::utils::format::format_bytes;
 use crate::{
     TestType,
@@ -15,6 +16,10 @@ use crate::{
     },
     performance::http::HttpVersion,
 };
+
+fn default_accounting() -> ThroughputAccounting {
+    ThroughputAccounting::Goodput
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -74,6 +79,9 @@ pub struct TcpTestConfig {
     /// `duration` (not added on top of it).
     #[serde(default = "default_warmup")]
     pub warmup: Duration,
+    /// Goodput vs wire-rate accounting.
+    #[serde(default = "default_accounting")]
+    pub accounting: ThroughputAccounting,
 }
 
 fn default_tcp_read_buffer() -> usize {
@@ -106,11 +114,17 @@ impl TcpTestConfig {
             },
             read_buffer_size: DEFAULT_TCP_READ_BUFFER,
             warmup: DEFAULT_WARMUP,
+            accounting: ThroughputAccounting::Goodput,
         }
     }
 
     pub fn with_warmup(mut self, warmup: Duration) -> Self {
         self.warmup = warmup;
+        self
+    }
+
+    pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
+        self.accounting = accounting;
         self
     }
 }
@@ -128,6 +142,9 @@ pub struct UdpTestConfig {
     /// Discard samples taken during this initial window.
     #[serde(default = "default_warmup")]
     pub warmup: Duration,
+    /// Goodput vs wire-rate accounting.
+    #[serde(default = "default_accounting")]
+    pub accounting: ThroughputAccounting,
 }
 
 impl UdpTestConfig {
@@ -155,11 +172,17 @@ impl UdpTestConfig {
                 payload_sizes
             },
             warmup: DEFAULT_WARMUP,
+            accounting: ThroughputAccounting::Goodput,
         }
     }
 
     pub fn with_warmup(mut self, warmup: Duration) -> Self {
         self.warmup = warmup;
+        self
+    }
+
+    pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
+        self.accounting = accounting;
         self
     }
 }
@@ -181,6 +204,9 @@ pub struct HttpTestConfig {
     /// Discard samples taken during this initial window.
     #[serde(default = "default_warmup")]
     pub warmup: Duration,
+    /// Goodput vs wire-rate accounting.
+    #[serde(default = "default_accounting")]
+    pub accounting: ThroughputAccounting,
 }
 
 impl HttpTestConfig {
@@ -220,11 +246,17 @@ impl HttpTestConfig {
             chunk_size: chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
             http_version,
             warmup: DEFAULT_WARMUP,
+            accounting: ThroughputAccounting::Goodput,
         }
     }
 
     pub fn with_warmup(mut self, warmup: Duration) -> Self {
         self.warmup = warmup;
+        self
+    }
+
+    pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
+        self.accounting = accounting;
         self
     }
 }

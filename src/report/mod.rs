@@ -13,8 +13,26 @@ pub use errors::*;
 pub use measurement::*;
 pub use result::*;
 
+/// Current report schema version. Bump when an incompatible structural
+/// change lands (renaming a field, removing a variant, changing
+/// semantics). Additive changes - new optional fields tagged with
+/// `#[serde(default)]` - do *not* require a bump.
+pub const REPORT_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    // Reports written before schema versioning was introduced are treated
+    // as schema 0; newer code should still be able to load them through
+    // the `#[serde(default)]` fallbacks on optional fields.
+    0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestReport {
+    /// Schema version. Distinct from `version` (the binary that wrote the
+    /// report). Old reports without this field deserialize as 0 and the
+    /// optional fields fall back to their defaults.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// Start time
     pub start_time: DateTime<Utc>,
     /// Test configuration
@@ -35,6 +53,7 @@ impl TestReport {
         timestamp: DateTime<Utc>,
     ) -> Self {
         Self {
+            schema_version: REPORT_SCHEMA_VERSION,
             start_time,
             config,
             result,
@@ -52,6 +71,7 @@ where
 {
     fn from((start_time, config, result, timestamp): (T, C, R, T)) -> Self {
         Self {
+            schema_version: REPORT_SCHEMA_VERSION,
             start_time: start_time.into(),
             config: config.into(),
             result: result.into(),

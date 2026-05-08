@@ -12,8 +12,8 @@ use tracing::trace;
 use crate::{
     TestType,
     report::{
-        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, TcpTestConfig,
-        TestReport, ThroughputMeasurement, ThroughputResult,
+        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, StreamMeasurements,
+        TcpTestConfig, TestReport, ThroughputMeasurement, ThroughputResult,
     },
     utils::{
         format::format_bytes,
@@ -30,6 +30,240 @@ fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Durat
     end.duration_since(start)
         .saturating_sub(warmup)
         .max(Duration::from_millis(1))
+}
+
+/// Run a full-duplex test on `parallel_connections` TCP connections,
+/// each simultaneously reading and writing for `duration`. Returns
+/// (download_result, upload_result) where each direction's stats come
+/// from the same set of connections (so they're directly comparable -
+/// asymmetric throughput here is the actual link asymmetry under load).
+#[allow(clippy::too_many_arguments)]
+async fn run_full_duplex_test(
+    server: &str,
+    port: u16,
+    parallel_connections: usize,
+    payload_size: usize,
+    duration: Duration,
+    read_buffer_size: usize,
+    warmup: Duration,
+) -> Result<(ThroughputResult, ThroughputResult)> {
+    println!(
+        "Starting TCP full-duplex test with {} payload size and {} parallel connections...",
+        format_bytes(payload_size).yellow(),
+        parallel_connections.to_string().yellow()
+    );
+
+    let dl_pb = create_progress_bar(ProgressBarType::Download, duration);
+    let ul_pb = create_progress_bar(ProgressBarType::Upload, duration);
+    let start_time = Instant::now();
+
+    let (dl_collector, dl_tx) =
+        ThroughputStatsCollector::new(dl_pb.clone(), start_time, duration);
+    let (ul_collector, ul_tx) =
+        ThroughputStatsCollector::new(ul_pb.clone(), start_time, duration);
+
+    let mut tasks: Vec<
+        tokio::task::JoinHandle<(Vec<ThroughputMeasurement>, Vec<ThroughputMeasurement>)>,
+    > = Vec::with_capacity(parallel_connections);
+
+    for i in 0..parallel_connections {
+        let server = server.to_string();
+        let dl_tx = dl_tx.clone();
+        let ul_tx = ul_tx.clone();
+
+        let task = tokio::spawn(async move {
+            let mut dl_local = Vec::new();
+            let mut ul_local = Vec::new();
+            let addr = format!("{server}:{port}");
+
+            let stream = match TcpStream::connect(&addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("TCP full-duplex connect error on conn {i}: {e}");
+                    return (dl_local, ul_local);
+                }
+            };
+            if let Err(e) = stream.set_nodelay(true) {
+                tracing::debug!("TCP set_nodelay failed on full-duplex conn {i}: {e}");
+            }
+            let (mut read_half, mut write_half) = stream.into_split();
+
+            // Send the F command to put the server into full-duplex mode.
+            if let Err(e) = write_half.write_all(b"F").await {
+                eprintln!("Failed to send F command on conn {i}: {e}");
+                return (dl_local, ul_local);
+            }
+
+            // Random upload data.
+            let upload_data = {
+                let mut data = vec![0u8; payload_size];
+                rng().fill_bytes(&mut data);
+                data
+            };
+
+            let mut read_buf = vec![0u8; read_buffer_size];
+
+            let read_fut = async {
+                while start_time.elapsed() < duration {
+                    let read_start = Instant::now();
+                    let in_warmup = start_time.elapsed() < warmup;
+                    match read_half.read(&mut read_buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let m = ThroughputMeasurement::new(n as u64, read_start.elapsed());
+                            if !in_warmup {
+                                dl_local.push(m.clone());
+                                let _ = dl_tx.send(m);
+                            }
+                        }
+                        Err(e) => {
+                            let m = ThroughputMeasurement::new_error(
+                                ConnectionError::Unknown(e.to_string()),
+                                read_start.elapsed(),
+                                0,
+                            );
+                            if !in_warmup {
+                                dl_local.push(m.clone());
+                                let _ = dl_tx.send(m);
+                            }
+                            break;
+                        }
+                    }
+                }
+            };
+
+            let write_fut = async {
+                while start_time.elapsed() < duration {
+                    let write_start = Instant::now();
+                    let in_warmup = start_time.elapsed() < warmup;
+                    match write_half.write_all(&upload_data).await {
+                        Ok(()) => {
+                            let m = ThroughputMeasurement::new(
+                                upload_data.len() as u64,
+                                write_start.elapsed(),
+                            );
+                            if !in_warmup {
+                                ul_local.push(m.clone());
+                                let _ = ul_tx.send(m);
+                            }
+                        }
+                        Err(e) => {
+                            let m = ThroughputMeasurement::new_error(
+                                ConnectionError::Unknown(format!(
+                                    "TCP full-duplex write error on conn {i}: {e}"
+                                )),
+                                write_start.elapsed(),
+                                0,
+                            );
+                            if !in_warmup {
+                                ul_local.push(m.clone());
+                                let _ = ul_tx.send(m);
+                            }
+                            break;
+                        }
+                    }
+                }
+            };
+
+            tokio::join!(read_fut, write_fut);
+            (dl_local, ul_local)
+        });
+
+        tasks.push(task);
+    }
+
+    let results = futures::future::join_all(tasks).await;
+    drop(dl_tx);
+    drop(ul_tx);
+    let _ = dl_collector
+        .finish(dl_pb, "Full-duplex download complete".to_string())
+        .await;
+    let _ = ul_collector
+        .finish(ul_pb, "Full-duplex upload complete".to_string())
+        .await;
+
+    let mut dl_streams = Vec::with_capacity(results.len());
+    let mut ul_streams = Vec::with_capacity(results.len());
+    let mut dl_flat = Vec::new();
+    let mut ul_flat = Vec::new();
+    for (idx, joined) in results.into_iter().enumerate() {
+        match joined {
+            Ok((dl, ul)) => {
+                dl_flat.extend(dl.iter().cloned());
+                ul_flat.extend(ul.iter().cloned());
+                dl_streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: dl,
+                });
+                ul_streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: ul,
+                });
+            }
+            Err(e) => {
+                tracing::error!("full-duplex task {idx} panicked or was cancelled: {e}");
+                dl_streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: Vec::new(),
+                });
+                ul_streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: Vec::new(),
+                });
+            }
+        }
+    }
+
+    let end_time = Instant::now();
+    let duration_eff = measurement_duration(start_time, end_time, warmup);
+    let timestamp = chrono::Utc::now();
+
+    Ok((
+        ThroughputResult {
+            measurements: dl_flat,
+            streams: dl_streams,
+            total_duration: duration_eff,
+            timestamp,
+        },
+        ThroughputResult {
+            measurements: ul_flat,
+            streams: ul_streams,
+            total_duration: duration_eff,
+            timestamp,
+        },
+    ))
+}
+
+/// Take the join_all results from a multi-stream throughput test and
+/// produce (per-stream measurements, flattened aggregate). Logs any task
+/// that panicked rather than failing the whole test.
+fn collect_streams(
+    results: Vec<Result<Vec<ThroughputMeasurement>, tokio::task::JoinError>>,
+    direction: &'static str,
+) -> (Vec<StreamMeasurements>, Vec<ThroughputMeasurement>) {
+    let mut streams = Vec::with_capacity(results.len());
+    let mut flat = Vec::new();
+    for (idx, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(task_measurements) => {
+                flat.extend(task_measurements.iter().cloned());
+                streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: task_measurements,
+                });
+            }
+            Err(e) => {
+                tracing::error!("{direction} task {idx} panicked or was cancelled: {e}");
+                // Still emit an empty stream entry so the per-stream rows
+                // are aligned with the connection indices.
+                streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: Vec::new(),
+                });
+            }
+        }
+    }
+    (streams, flat)
 }
 
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
@@ -63,7 +297,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
 
     let start_time = Utc::now();
 
-    let mut result = NetworkTestResult::new_tcp();
+    let mut result = NetworkTestResult::new_tcp().with_accounting(config.accounting);
 
     match config.test_type {
         TestType::LatencyOnly => {
@@ -157,6 +391,22 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
 
                 result.download.insert(*payload_size, download_result?);
                 result.upload.insert(*payload_size, upload_result?);
+            }
+        }
+        TestType::FullDuplex => {
+            for payload_size in &config.payload_sizes {
+                let (down, up) = run_full_duplex_test(
+                    &config.server,
+                    config.port,
+                    config.parallel_connections,
+                    *payload_size,
+                    config.duration,
+                    config.read_buffer_size,
+                    config.warmup,
+                )
+                .await?;
+                result.download.insert(*payload_size, down);
+                result.upload.insert(*payload_size, up);
             }
         }
     }
@@ -256,7 +506,6 @@ async fn run_download_test(
     // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Download, duration);
 
-    let mut measurements = Vec::new();
     let start_time = Instant::now();
 
     // Set up instrumentation
@@ -334,29 +583,20 @@ async fn run_download_test(
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
-    // Drop the sender to signal stats collector to finish
+    // Drop the sender so the live-progress collector can clean up.
     drop(tx);
-
-    for result in results {
-        match result {
-            Ok(task_measurements) => {
-                measurements.extend(task_measurements);
-            }
-            Err(e) => {
-                tracing::error!("Download task panicked or was cancelled: {e}");
-            }
-        }
-    }
-
-    // Wait for stats collector to complete and get measurements
-    measurements = stats_collector
+    let _ = stats_collector
         .finish(progress_bar, "Download complete".to_string())
         .await;
+
+    // Build per-stream + flattened aggregate from the per-task results.
+    let (streams, measurements) = collect_streams(results, "download");
 
     let end_time = Instant::now();
 
     Ok(ThroughputResult {
         measurements,
+        streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
@@ -379,7 +619,6 @@ async fn run_upload_test(
     // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
 
-    let mut measurements = Vec::new();
     let start_time = Instant::now();
 
     // Generate upload data
@@ -460,29 +699,19 @@ async fn run_upload_test(
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
-    // Drop the sender to signal stats collector to finish
+    // Drop the sender so the live-progress collector can clean up.
     drop(tx);
-
-    for result in results {
-        match result {
-            Ok(task_measurements) => {
-                measurements.extend(task_measurements);
-            }
-            Err(e) => {
-                tracing::error!("Upload task panicked or was cancelled: {e}");
-            }
-        }
-    }
-
-    // Wait for stats collector to complete and get measurements
-    measurements = stats_collector
+    let _ = stats_collector
         .finish(progress_bar, "Upload complete".to_string())
         .await;
+
+    let (streams, measurements) = collect_streams(results, "upload");
 
     let end_time = Instant::now();
 
     Ok(ThroughputResult {
         measurements,
+        streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })

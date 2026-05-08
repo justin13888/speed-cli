@@ -28,8 +28,10 @@ pub enum TestType {
     /// Bidirectional (both download and upload)
     #[default]
     Bidirectional,
-    /// Simultaneous download and upload
+    /// Simultaneous download and upload (separate connections, run in parallel)
     Simultaneous,
+    /// Full duplex on a single connection (TCP only)
+    FullDuplex,
     /// Latency only
     #[clap(alias = "latency")]
     LatencyOnly,
@@ -43,6 +45,7 @@ impl fmt::Display for TestType {
             TestType::Upload => write!(f, "upload"),
             TestType::Bidirectional => write!(f, "bidirectional"),
             TestType::Simultaneous => write!(f, "simultaneous"),
+            TestType::FullDuplex => write!(f, "full-duplex"),
             TestType::LatencyOnly => write!(f, "latency-only"),
         }
     }

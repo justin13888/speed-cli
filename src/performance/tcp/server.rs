@@ -1,6 +1,8 @@
 use colored::*;
 use eyre::{Context, Result};
 use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -28,6 +30,9 @@ pub struct TcpServerConfig {
     pub report_interval: Duration,
     /// Maximum bytes per connection before auto-disconnect
     pub max_bytes_per_connection: Option<u64>,
+    /// Maximum concurrent connections from a single source IP. `None`
+    /// disables the per-IP cap entirely.
+    pub max_connections_per_ip: Option<usize>,
 }
 
 impl Default for TcpServerConfig {
@@ -39,6 +44,7 @@ impl Default for TcpServerConfig {
             buffer_size: 131072, // 128KB buffer for better high-speed performance
             report_interval: Duration::from_secs(5),
             max_bytes_per_connection: Some(1_000_000_000_000), // 1TB limit for high-speed tests
+            max_connections_per_ip: Some(32),
         }
     }
 }
@@ -77,6 +83,31 @@ impl TcpServerMetrics {
     }
 }
 
+/// Per-source-IP connection counts. Decremented automatically by
+/// `PerIpGuard` on drop so we don't leak counts when handlers panic.
+type PerIpMap = Arc<Mutex<HashMap<IpAddr, usize>>>;
+
+/// RAII guard for per-IP connection counts.
+struct PerIpGuard {
+    map: PerIpMap,
+    ip: IpAddr,
+}
+
+impl Drop for PerIpGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.lock();
+        match m.get_mut(&self.ip) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+            }
+            Some(_) => {
+                m.remove(&self.ip);
+            }
+            None => {}
+        }
+    }
+}
+
 /// Production TCP server with proper resource management and monitoring
 pub struct TcpServer {
     config: TcpServerConfig,
@@ -84,6 +115,7 @@ pub struct TcpServer {
     connection_semaphore: Arc<Semaphore>,
     shutdown_tx: broadcast::Sender<()>,
     metrics: Arc<TcpServerMetrics>,
+    per_ip: PerIpMap,
 }
 
 impl TcpServer {
@@ -95,7 +127,26 @@ impl TcpServer {
             active_connections: Arc::new(AtomicUsize::new(0)),
             shutdown_tx,
             metrics: TcpServerMetrics::new(),
+            per_ip: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Try to admit one connection from `ip`. Returns Some(guard) on
+    /// success, None when the per-IP cap is exceeded.
+    fn try_admit_ip(&self, ip: IpAddr) -> Option<PerIpGuard> {
+        let cap = self.config.max_connections_per_ip;
+        let mut m = self.per_ip.lock();
+        let count = m.entry(ip).or_insert(0);
+        if let Some(limit) = cap
+            && *count >= limit
+        {
+            return None;
+        }
+        *count += 1;
+        Some(PerIpGuard {
+            map: self.per_ip.clone(),
+            ip,
+        })
     }
 
     pub fn get_shutdown_receiver(&self) -> broadcast::Receiver<()> {
@@ -154,7 +205,17 @@ impl TcpServer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((socket, peer_addr)) => {
-                            // Check if we can accept more connections
+                            // Check the per-IP cap first so a single noisy
+                            // peer can't burn all of `max_connections`.
+                            let Some(ip_guard) = self.try_admit_ip(peer_addr.ip()) else {
+                                warn!(
+                                    "Per-IP connection cap reached for {}, rejecting connection",
+                                    peer_addr.ip()
+                                );
+                                continue;
+                            };
+
+                            // Then the global concurrent-connections cap.
                             if let Ok(permit) = self.connection_semaphore.clone().try_acquire_owned() {
                                 let conn_id = connection_id.fetch_add(1, Ordering::Relaxed);
 
@@ -178,6 +239,7 @@ impl TcpServer {
                                         permit,
                                         shutdown_rx: self.get_shutdown_receiver(),
                                         metrics: self.metrics.clone(),
+                                        ip_guard,
                                     },
                                 );
 
@@ -188,7 +250,8 @@ impl TcpServer {
                                 });
                             } else {
                                 warn!("Connection limit reached, rejecting connection from {}", peer_addr);
-                                // Socket is dropped, connection is rejected
+                                // ip_guard drops here, releasing the per-IP slot
+                                drop(ip_guard);
                             }
                         }
                         Err(e) => {
@@ -281,6 +344,11 @@ impl TcpServerBuilder {
         self
     }
 
+    pub fn max_connections_per_ip(mut self, max: Option<usize>) -> Self {
+        self.config.max_connections_per_ip = max;
+        self
+    }
+
     pub fn build(self) -> TcpServer {
         TcpServer::new(self.config)
     }
@@ -298,6 +366,7 @@ struct TcpHandlerContext {
     pub permit: tokio::sync::OwnedSemaphorePermit,
     pub shutdown_rx: broadcast::Receiver<()>,
     pub metrics: Arc<TcpServerMetrics>,
+    pub ip_guard: PerIpGuard,
 }
 
 /// Production-grade TCP connection handler with comprehensive monitoring and safety features
@@ -308,6 +377,7 @@ struct ProductionTcpHandler {
     config: TcpServerConfig,
     active_connections: Arc<AtomicUsize>,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    _ip_guard: PerIpGuard,
     shutdown_rx: broadcast::Receiver<()>,
     stats: ConnectionStats,
     metrics: Arc<TcpServerMetrics>,
@@ -378,6 +448,7 @@ impl ProductionTcpHandler {
             config,
             active_connections: context.active_connections,
             _permit: context.permit,
+            _ip_guard: context.ip_guard,
             shutdown_rx: context.shutdown_rx,
             stats: ConnectionStats::new(),
             metrics: context.metrics,
@@ -443,6 +514,20 @@ impl ProductionTcpHandler {
                 let status = if res.is_ok() { "completed" } else { "failed" };
                 info!(
                     "Download connection {} {}: {} sent in {:.2}s ({})",
+                    self.connection_id,
+                    status,
+                    format_bytes(total_bytes).yellow(),
+                    duration.as_secs_f64(),
+                    format_throughput(throughput_mbps).green()
+                );
+                res
+            }
+            b'F' => {
+                let res = self.handle_full_duplex(&mut shutdown_rx).await;
+                let (total_bytes, duration, throughput_mbps) = self.stats.get_summary();
+                let status = if res.is_ok() { "completed" } else { "failed" };
+                info!(
+                    "Full-duplex connection {} {}: {} read in {:.2}s ({} aggregate)",
                     self.connection_id,
                     status,
                     format_bytes(total_bytes).yellow(),
@@ -631,6 +716,77 @@ impl ProductionTcpHandler {
                     // For downloads, we don't want to timeout as quickly since we're actively sending
                     // This is just a safety check
                     debug!("Download progress check - {} sent so far", format_bytes(total_sent));
+                }
+            }
+        }
+    }
+
+    /// Handle a full-duplex test: read and write concurrently on the same
+    /// stream until either side hits its byte limit, the peer closes, or
+    /// shutdown is signaled.
+    async fn handle_full_duplex(
+        &mut self,
+        shutdown_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
+        use rand::RngCore as _;
+        use tokio::io::AsyncWriteExt;
+
+        info!("Handling full-duplex request");
+
+        let (mut read_half, mut write_half) = self.socket.split();
+        let mut read_buf = vec![0u8; self.config.buffer_size];
+        let mut write_buf = vec![0u8; self.config.buffer_size];
+        rand::rng().fill_bytes(&mut write_buf);
+
+        let mut total_sent: u64 = 0;
+        let read_timeout = self.config.read_timeout;
+        let max_bytes = self.config.max_bytes_per_connection;
+
+        loop {
+            tokio::select! {
+                read_result = timeout(read_timeout, read_half.read(&mut read_buf)) => {
+                    match read_result {
+                        Ok(Ok(0)) => {
+                            info!("Full-duplex: peer closed read half");
+                            break Ok(());
+                        }
+                        Ok(Ok(n)) => {
+                            self.stats.add_bytes(n as u64);
+                            self.metrics.total_bytes_received.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                        Ok(Err(e)) => {
+                            error!("Full-duplex read error: {}", e);
+                            self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
+                            break Err(e.into());
+                        }
+                        Err(_) => {
+                            warn!("Full-duplex read timeout after {:?}", read_timeout);
+                            break Err(eyre::eyre!("Read timeout"));
+                        }
+                    }
+                }
+                write_result = write_half.write_all(&write_buf) => {
+                    match write_result {
+                        Ok(()) => {
+                            let n = write_buf.len() as u64;
+                            total_sent += n;
+                            self.metrics.total_bytes_sent.fetch_add(n, Ordering::Relaxed);
+                            if let Some(limit) = max_bytes
+                                && total_sent >= limit {
+                                    info!("Full-duplex: write side hit byte limit");
+                                    break Ok(());
+                                }
+                        }
+                        Err(e) => {
+                            error!("Full-duplex write error: {}", e);
+                            self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
+                            break Err(e.into());
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Full-duplex: shutdown signal");
+                    break Ok(());
                 }
             }
         }

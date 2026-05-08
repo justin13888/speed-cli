@@ -1051,6 +1051,7 @@ impl ToHtml for TestType {
             TestType::Upload => "upload".to_string(),
             TestType::Bidirectional => "bidirectional".to_string(),
             TestType::Simultaneous => "simultaneous".to_string(),
+            TestType::FullDuplex => "full-duplex".to_string(),
             TestType::LatencyOnly => "latency-only".to_string(),
         }
     }

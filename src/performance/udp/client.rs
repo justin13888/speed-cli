@@ -261,7 +261,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
 
     let start_time = Utc::now();
 
-    let mut result = NetworkTestResult::new_udp();
+    let mut result = NetworkTestResult::new_udp().with_accounting(config.accounting);
 
     // The UDP throughput tests use a single STP stream; multi-stream UDP
     // would need a per-stream sender/receiver and aggregation, which is
@@ -369,6 +369,11 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                 result.download.insert(*payload_size, download_result?);
                 result.upload.insert(*payload_size, upload_result?);
             }
+        }
+        TestType::FullDuplex => {
+            return Err(eyre::eyre!(
+                "FullDuplex test type is TCP-only. Use --type=simultaneous for UDP."
+            ));
         }
     }
 
@@ -620,8 +625,14 @@ async fn run_download_test(
 
     let end_time = Instant::now();
 
+    let streams = vec![crate::report::StreamMeasurements {
+        stream_id: 0,
+        measurements: measurements.clone(),
+    }];
+
     Ok(ThroughputResult {
         measurements,
+        streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
@@ -716,8 +727,14 @@ async fn run_upload_test(
 
     let end_time = Instant::now();
 
+    let streams = vec![crate::report::StreamMeasurements {
+        stream_id: 0,
+        measurements: measurements.clone(),
+    }];
+
     Ok(ThroughputResult {
         measurements,
+        streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })

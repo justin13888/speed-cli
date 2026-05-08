@@ -1,7 +1,13 @@
 use std::{net::IpAddr, path::PathBuf};
 
 use crate::{ClientMode, TestType};
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AccountingArg {
+    Goodput,
+    Wire,
+}
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
@@ -80,6 +86,12 @@ pub enum Commands {
         /// Maximum chunk size. Effective only for HTTP/1.1 tests.
         #[arg(long)]
         chunk_size: Option<usize>,
+
+        /// How throughput is reported: `goodput` (payload bytes only,
+        /// default) or `wire` (adds an estimate of TCP/IP or UDP/IP
+        /// framing overhead).
+        #[arg(long, value_enum, default_value_t = AccountingArg::Goodput)]
+        accounting: AccountingArg,
     },
 
     /// Run as server

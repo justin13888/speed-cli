@@ -19,7 +19,7 @@ use crate::{
     performance::http::HttpVersion,
     report::{
         ConnectionError, HttpTestConfig, LatencyMeasurement, LatencyResult, NetworkTestResult,
-        TestReport, ThroughputMeasurement, ThroughputResult,
+        StreamMeasurements, TestReport, ThroughputMeasurement, ThroughputResult,
     },
     utils::{
         format::format_bytes,
@@ -33,6 +33,33 @@ fn measurement_duration(start: Instant, end: Instant, warmup: Duration) -> Durat
     end.duration_since(start)
         .saturating_sub(warmup)
         .max(Duration::from_millis(1))
+}
+
+fn collect_streams(
+    results: Vec<Result<Vec<ThroughputMeasurement>, tokio::task::JoinError>>,
+    direction: &'static str,
+) -> (Vec<StreamMeasurements>, Vec<ThroughputMeasurement>) {
+    let mut streams = Vec::with_capacity(results.len());
+    let mut flat = Vec::new();
+    for (idx, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(task_measurements) => {
+                flat.extend(task_measurements.iter().cloned());
+                streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: task_measurements,
+                });
+            }
+            Err(e) => {
+                tracing::error!("HTTP {direction} task {idx} panicked or was cancelled: {e}");
+                streams.push(StreamMeasurements {
+                    stream_id: idx,
+                    measurements: Vec::new(),
+                });
+            }
+        }
+    }
+    (streams, flat)
 }
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
@@ -59,7 +86,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     let start_time = Utc::now();
 
-    let mut result = NetworkTestResult::new_http();
+    let mut result = NetworkTestResult::new_http().with_accounting(config.accounting);
 
     // Create HTTP client based on version preference
     let client = create_http_client(&config.http_version).await?;
@@ -197,6 +224,12 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                 result.upload.insert(*payload_size, upload_result?);
             }
         }
+        TestType::FullDuplex => {
+            return Err(eyre::eyre!(
+                "FullDuplex test type is TCP-only; HTTP is request/response. \
+                 Use --type=simultaneous for parallel up/down on HTTP."
+            ));
+        }
     }
 
     Ok((start_time, config, result).into())
@@ -328,7 +361,6 @@ async fn run_download_test(
     // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Download, duration);
 
-    let mut measurements = Vec::new();
     let start_time = Instant::now();
 
     // Set up instrumentation
@@ -381,29 +413,18 @@ async fn run_download_test(
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
-    // Drop the sender to signal stats collector to finish
     drop(tx);
-
-    for result in results {
-        match result {
-            Ok(task_measurements) => {
-                measurements.extend(task_measurements);
-            }
-            Err(e) => {
-                tracing::error!("HTTP download task panicked or was cancelled: {e}");
-            }
-        }
-    }
-
-    // Wait for stats collector to complete and get measurements
-    measurements = stats_collector
+    let _ = stats_collector
         .finish(progress_bar, "Download complete".to_string())
         .await;
+
+    let (streams, measurements) = collect_streams(results, "download");
 
     let end_time = Instant::now();
 
     Ok(ThroughputResult {
         measurements,
+        streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })
@@ -427,7 +448,6 @@ async fn run_upload_test(
     // Create progress bar
     let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
 
-    let mut measurements = Vec::new();
     let start_time = Instant::now();
 
     // Generate random upload data at the size of chunk_size
@@ -486,29 +506,18 @@ async fn run_upload_test(
     // Wait for all tasks to complete concurrently
     let results = futures::future::join_all(tasks).await;
 
-    // Drop the sender to signal stats collector to finish
     drop(tx);
-
-    for result in results {
-        match result {
-            Ok(task_measurements) => {
-                measurements.extend(task_measurements);
-            }
-            Err(e) => {
-                tracing::error!("HTTP upload task panicked or was cancelled: {e}");
-            }
-        }
-    }
-
-    // Wait for stats collector to complete and get measurements
-    measurements = stats_collector
+    let _ = stats_collector
         .finish(progress_bar, "Upload complete".to_string())
         .await;
+
+    let (streams, measurements) = collect_streams(results, "upload");
 
     let end_time = Instant::now();
 
     Ok(ThroughputResult {
         measurements,
+        streams,
         total_duration: measurement_duration(start_time, end_time, warmup),
         timestamp: chrono::Utc::now(),
     })

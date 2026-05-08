@@ -85,8 +85,13 @@ async fn main() -> Result<()> {
             test_type,
             test_sizes,
             chunk_size,
+            accounting,
         } => {
             let warmup = std::time::Duration::from_secs(warmup);
+            let accounting = match accounting {
+                cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
+                cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
+            };
             // Assert that exactly one specific protocol is enabled (no more, no less)
             // Count enabled protocols
             let protocols = [mode.is_some(), tcp, udp, http1, http2, h2c, http3];
@@ -138,7 +143,8 @@ async fn main() -> Result<()> {
                         test_type,
                         test_sizes,
                     )
-                    .with_warmup(warmup);
+                    .with_warmup(warmup)
+                    .with_accounting(accounting);
 
                     run_tcp_client(config).await?
                 }
@@ -151,7 +157,8 @@ async fn main() -> Result<()> {
                         test_type,
                         test_sizes,
                     )
-                    .with_warmup(warmup);
+                    .with_warmup(warmup)
+                    .with_accounting(accounting);
 
                     run_udp_client(config).await?
                 }
@@ -175,7 +182,8 @@ async fn main() -> Result<()> {
                         chunk_size,
                         http_version,
                     )
-                    .with_warmup(warmup);
+                    .with_warmup(warmup)
+                    .with_accounting(accounting);
 
                     run_http_test(config).await?
                 }
