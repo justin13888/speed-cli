@@ -20,9 +20,22 @@ use crate::performance::quic::client::run_quic_client;
 use crate::performance::tcp::client::run_tcp_client;
 use crate::performance::udp::client::run_udp_client;
 use crate::report::{
-    HttpTestConfig, QuicTestConfig, SuiteReport, TcpTestConfig, ThroughputAccounting,
+    HttpTestConfig, PhaseParams, QuicTestConfig, SuiteReport, TcpTestConfig, ThroughputAccounting,
     UdpTestConfig,
 };
+
+/// Shared I/O unit for the suite: the TCP/QUIC per-operation throughput
+/// payload *and* the HTTP chunk size. Unifying these is what makes the
+/// per-protocol rows comparable.
+const SUITE_IO_SIZE: usize = 64 * 1024;
+/// Total HTTP request body. Larger than [`SUITE_IO_SIZE`] so HTTP phases
+/// are not dominated by per-request setup cost; streamed in
+/// `SUITE_IO_SIZE`-sized chunks.
+const SUITE_HTTP_PAYLOAD: usize = 8 * 1024 * 1024;
+/// UDP datagram size. An intrinsic exception to [`SUITE_IO_SIZE`]: it
+/// must stay below the path MTU to avoid IP fragmentation, which would
+/// make the UDP test measure something qualitatively different.
+const SUITE_UDP_DATAGRAM: usize = 1200;
 
 /// User-facing knobs for the suite.
 #[derive(Debug, Clone)]
@@ -38,6 +51,10 @@ pub struct SuiteConfig {
     pub connections: usize,
     /// Target rate for the UDP throughput phase, in Mbps. 0 = saturate.
     pub udp_target_rate_mbps: u64,
+    /// Shared I/O unit: TCP/QUIC throughput payload and HTTP chunk size.
+    pub io_size: usize,
+    /// Total HTTP request body size, streamed in `io_size` chunks.
+    pub http_payload: usize,
     pub accounting: ThroughputAccounting,
     /// When false, TLS phases (HTTP/2-TLS, HTTP/3) are force-skipped
     /// even if the server advertises them.
@@ -53,6 +70,8 @@ impl SuiteConfig {
             warmup: Duration::from_secs(1),
             connections: 4,
             udp_target_rate_mbps: 100,
+            io_size: SUITE_IO_SIZE,
+            http_payload: SUITE_HTTP_PAYLOAD,
             accounting: ThroughputAccounting::Goodput,
             include_tls: true,
         }
@@ -66,44 +85,76 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
     let handshake = perform_handshake(&cfg.server, cfg.control_port).await?;
     let mut suite = SuiteReport::new(cfg.server.clone());
 
-    let dur = cfg.phase_duration.as_secs();
-
     // ── TCP ─────────────────────────────────────────────────────────
     if handshake.manifest.listener(TestTransport::TcpRaw).is_some() {
-        run_phase(&mut suite, "tcp/latency", run_tcp_phase(&handshake, &cfg, TestType::LatencyOnly, dur)).await;
-        run_phase(&mut suite, "tcp/bidirectional", run_tcp_phase(&handshake, &cfg, TestType::Bidirectional, dur)).await;
-        run_phase(&mut suite, "tcp/full-duplex", run_tcp_phase(&handshake, &cfg, TestType::FullDuplex, dur)).await;
+        for tt in [
+            TestType::LatencyOnly,
+            TestType::Bidirectional,
+            TestType::FullDuplex,
+        ] {
+            let params = tcp_quic_params(&cfg, tt);
+            let label = format!("tcp/{}", phase_suffix(tt));
+            run_phase(
+                &mut suite,
+                &label,
+                params.clone(),
+                run_tcp_phase(&handshake, &cfg, params),
+            )
+            .await;
+        }
     } else {
         suite.skip("tcp/*", "TCP listener not advertised by server");
     }
 
     // ── UDP ─────────────────────────────────────────────────────────
+    // No full-duplex row: UDP has no single-socket bidirectional mode.
     if handshake.manifest.listener(TestTransport::UdpBlaster).is_some() {
-        run_phase(&mut suite, "udp/latency", run_udp_phase(&handshake, &cfg, TestType::LatencyOnly, dur)).await;
-        run_phase(&mut suite, "udp/bidirectional", run_udp_phase(&handshake, &cfg, TestType::Bidirectional, dur)).await;
+        for tt in [TestType::LatencyOnly, TestType::Bidirectional] {
+            let params = udp_params(&cfg, tt);
+            let label = format!("udp/{}", phase_suffix(tt));
+            run_phase(
+                &mut suite,
+                &label,
+                params.clone(),
+                run_udp_phase(&handshake, &cfg, params),
+            )
+            .await;
+        }
     } else {
         suite.skip("udp/*", "UDP listener not advertised by server");
     }
 
     // ── Raw QUIC ────────────────────────────────────────────────────
     if handshake.manifest.listener(TestTransport::QuicRaw).is_some() {
-        run_phase(&mut suite, "quic/latency", run_quic_phase(&handshake, &cfg, TestType::LatencyOnly, dur)).await;
-        run_phase(&mut suite, "quic/bidirectional", run_quic_phase(&handshake, &cfg, TestType::Bidirectional, dur)).await;
-        run_phase(&mut suite, "quic/full-duplex", run_quic_phase(&handshake, &cfg, TestType::FullDuplex, dur)).await;
+        for tt in [
+            TestType::LatencyOnly,
+            TestType::Bidirectional,
+            TestType::FullDuplex,
+        ] {
+            let params = tcp_quic_params(&cfg, tt);
+            let label = format!("quic/{}", phase_suffix(tt));
+            run_phase(
+                &mut suite,
+                &label,
+                params.clone(),
+                run_quic_phase(&handshake, &cfg, params),
+            )
+            .await;
+        }
     } else {
         suite.skip("quic/*", "raw-QUIC listener not advertised by server");
     }
 
     // ── HTTP/1.1 ────────────────────────────────────────────────────
     if handshake.manifest.listener(TestTransport::Http1).is_some() {
-        run_phase(&mut suite, "http1/bidirectional", run_http_phase(&handshake, &cfg, HttpVersion::HTTP1, TestTransport::Http1, dur)).await;
+        run_http_set(&mut suite, &handshake, &cfg, "http1", HttpVersion::HTTP1, TestTransport::Http1).await;
     } else {
         suite.skip("http1/*", "HTTP/1.1 listener not advertised by server");
     }
 
     // ── h2c ─────────────────────────────────────────────────────────
     if handshake.manifest.listener(TestTransport::H2c).is_some() {
-        run_phase(&mut suite, "h2c/bidirectional", run_http_phase(&handshake, &cfg, HttpVersion::H2C, TestTransport::H2c, dur)).await;
+        run_http_set(&mut suite, &handshake, &cfg, "h2c", HttpVersion::H2C, TestTransport::H2c).await;
     } else {
         suite.skip("h2c/*", "h2c listener not advertised by server");
     }
@@ -112,7 +163,7 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
     if !cfg.include_tls {
         suite.skip("http2/*", "TLS phases skipped (--no-tls)");
     } else if handshake.manifest.listener(TestTransport::Http2Tls).is_some() {
-        run_phase(&mut suite, "http2/bidirectional", run_http_phase(&handshake, &cfg, HttpVersion::HTTP2, TestTransport::Http2Tls, dur)).await;
+        run_http_set(&mut suite, &handshake, &cfg, "http2", HttpVersion::HTTP2, TestTransport::Http2Tls).await;
     } else {
         suite.skip("http2/*", "HTTP/2-TLS listener not advertised by server");
     }
@@ -121,7 +172,7 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
     if !cfg.include_tls {
         suite.skip("http3/*", "TLS phases skipped (--no-tls)");
     } else if handshake.manifest.listener(TestTransport::Http3).is_some() {
-        run_phase(&mut suite, "http3/bidirectional", run_http_phase(&handshake, &cfg, HttpVersion::HTTP3, TestTransport::Http3, dur)).await;
+        run_http_set(&mut suite, &handshake, &cfg, "http3", HttpVersion::HTTP3, TestTransport::Http3).await;
     } else {
         suite.skip("http3/*", "HTTP/3 listener not advertised by server");
     }
@@ -130,7 +181,78 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
     Ok(suite)
 }
 
-async fn run_phase<F>(suite: &mut SuiteReport, label: &'static str, fut: F)
+/// Phase-label suffix for a test type. Kept stable and protocol-agnostic
+/// so the suite matrix lines up row-for-row: the HTTP `*/full-duplex`
+/// rows run [`TestType::Simultaneous`] but still report under the
+/// `full-duplex` suffix.
+fn phase_suffix(tt: TestType) -> &'static str {
+    match tt {
+        TestType::LatencyOnly => "latency",
+        TestType::Bidirectional => "bidirectional",
+        TestType::FullDuplex | TestType::Simultaneous => "full-duplex",
+        TestType::Download => "download",
+        TestType::Upload => "upload",
+    }
+}
+
+/// Effective parameters for a TCP or raw-QUIC phase. Both share the
+/// suite I/O size and the same connection convention (1 for latency).
+fn tcp_quic_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
+    let is_latency = matches!(test_type, TestType::LatencyOnly);
+    PhaseParams {
+        payload_size: (!is_latency).then_some(cfg.io_size),
+        io_unit: cfg.io_size,
+        connections: if is_latency { 1 } else { cfg.connections },
+        duration: cfg.phase_duration,
+        test_type,
+        deviations: Vec::new(),
+    }
+}
+
+/// Effective parameters for a UDP phase. UDP cannot match the shared
+/// I/O size (datagrams must stay MTU-safe) and is single-stream, so
+/// both facts are recorded as intrinsic deviations.
+fn udp_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
+    let is_latency = matches!(test_type, TestType::LatencyOnly);
+    PhaseParams {
+        payload_size: (!is_latency).then_some(SUITE_UDP_DATAGRAM),
+        io_unit: SUITE_UDP_DATAGRAM,
+        connections: 1,
+        duration: cfg.phase_duration,
+        test_type,
+        deviations: vec![
+            "UDP datagram kept MTU-safe (1200 B); cannot match the 64 KB TCP/QUIC I/O unit"
+                .to_string(),
+            "UDP blaster is single-stream; the suite --connections value does not apply"
+                .to_string(),
+        ],
+    }
+}
+
+/// Effective parameters for an HTTP phase of any version. The HTTP
+/// chunk size is the suite I/O unit; the bulk request body is the
+/// larger `http_payload`.
+fn http_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
+    let is_latency = matches!(test_type, TestType::LatencyOnly);
+    let mut deviations = Vec::new();
+    if matches!(test_type, TestType::Simultaneous) {
+        deviations.push(
+            "HTTP is request/response; the full-duplex row runs Simultaneous \
+             (parallel up/down streams) as the closest analog"
+                .to_string(),
+        );
+    }
+    PhaseParams {
+        payload_size: (!is_latency).then_some(cfg.http_payload),
+        io_unit: cfg.io_size,
+        connections: if is_latency { 1 } else { cfg.connections },
+        duration: cfg.phase_duration,
+        test_type,
+        deviations,
+    }
+}
+
+async fn run_phase<F>(suite: &mut SuiteReport, label: &str, params: PhaseParams, fut: F)
 where
     F: std::future::Future<Output = Result<crate::report::TestReport>>,
 {
@@ -139,7 +261,7 @@ where
         format!("\n── Suite phase: {label} ──").bright_magenta().bold()
     );
     match fut.await {
-        Ok(report) => suite.record(label, report),
+        Ok(report) => suite.record(label, params, report),
         Err(e) => {
             tracing::warn!(phase = label, error = %e, "suite phase failed; continuing");
             suite.skip(label, e.to_string());
@@ -147,68 +269,91 @@ where
     }
 }
 
+/// Run the full HTTP matrix (latency / bidirectional / full-duplex) for
+/// one HTTP version against one advertised listener.
+async fn run_http_set(
+    suite: &mut SuiteReport,
+    handshake: &Handshake,
+    cfg: &SuiteConfig,
+    proto: &str,
+    version: HttpVersion,
+    transport: TestTransport,
+) {
+    for tt in [
+        TestType::LatencyOnly,
+        TestType::Bidirectional,
+        TestType::Simultaneous,
+    ] {
+        let params = http_params(cfg, tt);
+        let label = format!("{proto}/{}", phase_suffix(tt));
+        run_phase(
+            suite,
+            &label,
+            params.clone(),
+            run_http_phase(handshake, cfg, version, transport, params),
+        )
+        .await;
+    }
+}
+
 async fn run_tcp_phase(
     handshake: &Handshake,
     cfg: &SuiteConfig,
-    test_type: TestType,
-    duration: u64,
+    params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
     let (host, port) = handshake.endpoint(TestTransport::TcpRaw)?;
-    let payload_sizes: Vec<usize> = if matches!(test_type, TestType::LatencyOnly) {
-        Vec::new()
-    } else {
-        vec![65536]
-    };
-    let connections = if matches!(test_type, TestType::LatencyOnly) {
-        1
-    } else {
-        cfg.connections
-    };
-    let conf = TcpTestConfig::new(host, Some(port), duration, connections, test_type, payload_sizes)
-        .with_warmup(cfg.warmup)
-        .with_accounting(cfg.accounting);
+    let payload_sizes: Vec<usize> = params.payload_size.into_iter().collect();
+    let conf = TcpTestConfig::new(
+        host,
+        Some(port),
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
+        payload_sizes,
+    )
+    .with_warmup(cfg.warmup)
+    .with_accounting(cfg.accounting);
     run_tcp_client(conf).await
 }
 
 async fn run_udp_phase(
     handshake: &Handshake,
     cfg: &SuiteConfig,
-    test_type: TestType,
-    duration: u64,
+    params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
     let (host, port) = handshake.endpoint(TestTransport::UdpBlaster)?;
-    let payload_sizes: Vec<usize> = if matches!(test_type, TestType::LatencyOnly) {
-        Vec::new()
-    } else {
-        vec![1200]
-    };
-    let conf = UdpTestConfig::new(host, Some(port), duration, 1, test_type, payload_sizes)
-        .with_warmup(cfg.warmup)
-        .with_accounting(cfg.accounting)
-        .with_target_rate_bps(cfg.udp_target_rate_mbps.saturating_mul(1_000_000));
+    let payload_sizes: Vec<usize> = params.payload_size.into_iter().collect();
+    let conf = UdpTestConfig::new(
+        host,
+        Some(port),
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
+        payload_sizes,
+    )
+    .with_warmup(cfg.warmup)
+    .with_accounting(cfg.accounting)
+    .with_target_rate_bps(cfg.udp_target_rate_mbps.saturating_mul(1_000_000));
     run_udp_client(conf).await
 }
 
 async fn run_quic_phase(
     handshake: &Handshake,
     cfg: &SuiteConfig,
-    test_type: TestType,
-    duration: u64,
+    params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
     let (host, port) = handshake.endpoint(TestTransport::QuicRaw)?;
-    let payload_sizes: Vec<usize> = if matches!(test_type, TestType::LatencyOnly) {
-        Vec::new()
-    } else {
-        vec![65536]
-    };
-    let connections = if matches!(test_type, TestType::LatencyOnly) {
-        1
-    } else {
-        cfg.connections
-    };
-    let conf = QuicTestConfig::new(host, Some(port), duration, connections, test_type, payload_sizes)
-        .with_warmup(cfg.warmup)
-        .with_accounting(cfg.accounting);
+    let payload_sizes: Vec<usize> = params.payload_size.into_iter().collect();
+    let conf = QuicTestConfig::new(
+        host,
+        Some(port),
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
+        payload_sizes,
+    )
+    .with_warmup(cfg.warmup)
+    .with_accounting(cfg.accounting);
     run_quic_client(conf).await
 }
 
@@ -217,20 +362,22 @@ async fn run_http_phase(
     cfg: &SuiteConfig,
     version: HttpVersion,
     transport: TestTransport,
-    duration: u64,
+    params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
     let (host, port) = handshake.endpoint(transport)?;
-    // Smaller payload than the standalone HTTP test so the suite finishes
-    // in minutes; 8 MB is large enough not to be setup-dominated.
-    let payload_sizes: Vec<usize> = vec![8 * 1024 * 1024];
+    // For latency phases `payload_size` is `None`; `HttpTestConfig::new`
+    // backfills DEFAULT_HTTP_PAYLOAD_SIZES on an empty set, so pass the
+    // I/O unit explicitly to keep the recorded config honest. The HTTP
+    // chunk size is unified to the suite I/O unit.
+    let payload_sizes: Vec<usize> = vec![params.payload_size.unwrap_or(cfg.io_size)];
     let conf = HttpTestConfig::new(
         host,
         Some(port),
-        duration,
-        cfg.connections,
-        TestType::Bidirectional,
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
         payload_sizes,
-        Some(1024 * 1024),
+        Some(cfg.io_size),
         version,
     )
     .with_warmup(cfg.warmup)

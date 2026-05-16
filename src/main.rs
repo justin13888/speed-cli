@@ -478,7 +478,6 @@ async fn main() -> Result<()> {
             export,
         } => {
             let cfg = SuiteConfig {
-                server,
                 control_port,
                 phase_duration: std::time::Duration::from_secs(duration),
                 warmup: std::time::Duration::from_secs(warmup),
@@ -489,6 +488,8 @@ async fn main() -> Result<()> {
                     cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
                 },
                 include_tls: !no_tls,
+                // `server` plus the shared I/O-size defaults come from `new`.
+                ..SuiteConfig::new(server)
             };
 
             if let Some(export) = &export {
