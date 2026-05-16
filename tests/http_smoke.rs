@@ -1,8 +1,9 @@
-//! End-to-end smoke test for the HTTP server + client path (HTTP/1.1 only).
+//! End-to-end smoke test for the HTTP server + client paths.
 //!
-//! Boots the plaintext HTTP server on an ephemeral port, runs a 1-second
-//! download + upload via the public client API, asserts non-zero throughput,
-//! and verifies graceful shutdown.
+//! Boots the strict single-protocol cleartext listeners on ephemeral
+//! ports, runs short download + upload tests via the public client API,
+//! and verifies that a client speaking the wrong protocol fails loudly
+//! against a strict listener.
 
 use std::time::Duration;
 
@@ -10,64 +11,118 @@ use eyre::Result;
 use speed_cli::TestType;
 use speed_cli::performance::http::HttpVersion;
 use speed_cli::performance::http::client::run_http_test;
-use speed_cli::performance::http::server::{HttpServerConfig, run_http_server};
+use speed_cli::performance::http::server::{HttpServerConfig, run_h2c_server, run_http1_server};
 use speed_cli::report::{HttpTestConfig, NetworkProtocol, TestResult};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-async fn pick_port() -> Result<u16> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    Ok(listener.local_addr()?.port())
+fn server_config() -> HttpServerConfig {
+    HttpServerConfig {
+        enable_cors: true,
+        max_upload_size: 8 * 1024 * 1024,
+    }
+}
+
+fn client_config(port: u16, version: HttpVersion) -> HttpTestConfig {
+    HttpTestConfig::new(
+        "127.0.0.1".to_string(),
+        Some(port),
+        2,
+        1,
+        TestType::Bidirectional,
+        vec![64 * 1024usize],
+        Some(16 * 1024),
+        version,
+    )
+    .with_warmup(Duration::from_millis(0))
 }
 
 #[tokio::test]
 async fn http1_download_and_upload_roundtrip() -> Result<()> {
-    let port = pick_port().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
     let cancel = CancellationToken::new();
 
     let server_cancel = cancel.clone();
-    let server_handle = tokio::spawn(async move {
-        run_http_server(
-            HttpServerConfig {
-                bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
-                enable_cors: true,
-                max_upload_size: 8 * 1024 * 1024,
-            },
-            server_cancel,
-        )
-        .await
-    });
+    let server_handle =
+        tokio::spawn(
+            async move { run_http1_server(listener, server_config(), server_cancel).await },
+        );
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let config = HttpTestConfig::new(
-        "127.0.0.1".to_string(),
-        Some(port),
-        2, // 2-second test
-        1, // single connection
-        TestType::Bidirectional,
-        vec![64 * 1024usize], // 64 KB payload
-        Some(16 * 1024),      // 16 KB chunk
-        HttpVersion::HTTP1,
-    )
-    .with_warmup(Duration::from_millis(0));
-
-    let report = run_http_test(config).await?;
-
+    let report = run_http_test(client_config(port, HttpVersion::HTTP1)).await?;
     let result = match &report.result {
         TestResult::Network(net) => {
             assert!(matches!(net.protocol, NetworkProtocol::Http));
             net
         }
-        _ => panic!("expected NetworkTestResult, got Simple"),
+        _ => panic!("expected NetworkTestResult"),
     };
-    let download = result.download.values().next().expect("download result");
-    let upload = result.upload.values().next().expect("upload result");
-    assert!(download.bytes_transferred() > 0, "download bytes must be > 0");
-    assert!(upload.bytes_transferred() > 0, "upload bytes must be > 0");
+    assert!(
+        result.download.values().next().unwrap().bytes_transferred() > 0,
+        "download bytes must be > 0"
+    );
+    assert!(
+        result.upload.values().next().unwrap().bytes_transferred() > 0,
+        "upload bytes must be > 0"
+    );
 
     cancel.cancel();
-    let join_res = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
-    assert!(join_res.is_ok(), "HTTP server did not shut down within 5s");
+    let join = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+    assert!(join.is_ok(), "HTTP/1.1 server did not shut down within 5s");
+    Ok(())
+}
 
+#[tokio::test]
+async fn h2c_download_and_upload_roundtrip() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let cancel = CancellationToken::new();
+
+    let server_cancel = cancel.clone();
+    let server_handle =
+        tokio::spawn(async move { run_h2c_server(listener, server_config(), server_cancel).await });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let report = run_http_test(client_config(port, HttpVersion::H2C)).await?;
+    let result = match &report.result {
+        TestResult::Network(net) => net,
+        _ => panic!("expected NetworkTestResult"),
+    };
+    assert!(
+        result.download.values().next().unwrap().bytes_transferred() > 0,
+        "download bytes must be > 0"
+    );
+
+    cancel.cancel();
+    let join = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+    assert!(join.is_ok(), "h2c server did not shut down within 5s");
+    Ok(())
+}
+
+/// Strict separation: an HTTP/1.1 client must NOT be silently served by
+/// the h2c listener — the test must fail loudly.
+#[tokio::test]
+async fn http1_client_against_h2c_listener_fails() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let cancel = CancellationToken::new();
+
+    let server_cancel = cancel.clone();
+    let server_handle =
+        tokio::spawn(async move { run_h2c_server(listener, server_config(), server_cancel).await });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let result = run_http_test(client_config(port, HttpVersion::HTTP1)).await;
+    assert!(
+        result.is_err(),
+        "HTTP/1.1 client should fail against the h2c-only listener, got Ok"
+    );
+
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
     Ok(())
 }

@@ -2,40 +2,47 @@ use colored::*;
 use eyre::Result;
 use std::fs;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use clap::Parser;
 use cli::{Cli, Commands};
-use performance::http::server::{HttpServerConfig, run_http_server};
 use performance::suite::{SuiteConfig, run_suite};
 use performance::tcp::client::run_tcp_client;
 use performance::udp::client::run_udp_client;
 
 pub use utils::types::*;
 
-use crate::constants::{
-    DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT, MAX_HTTP_UPLOAD_SIZE,
+use crate::constants::MAX_HTTP_UPLOAD_SIZE;
+use crate::control::{
+    ControlServerConfig, EnabledProtocols, PortOverrides, ServerManifest, ServerRuntime,
+    TestTransport, bind_all, perform_handshake, run_control_server,
 };
-use crate::performance::http::server::{HttpsServerConfig, TlsConfig, run_https_server};
-use crate::performance::http::{HttpVersion, client::run_http_test};
-use crate::performance::tcp::server::run_tcp_server;
-use crate::performance::udp::server::run_udp_server;
-use crate::report::{HttpTestConfig, TcpTestConfig, TestReport, UdpTestConfig};
+use crate::performance::http::HttpVersion;
+use crate::performance::http::client::run_http_test;
+use crate::performance::quic::client::run_quic_client;
+use crate::report::{
+    DEFAULT_TCP_READ_BUFFER, HttpTestConfig, QuicTestConfig, TcpTestConfig, TestReport,
+    UdpTestConfig,
+};
 use crate::utils::export::{export_report, export_report_html};
 use crate::utils::file::can_write;
 use crate::utils::import::import_report_cbor;
 use crate::utils::progress::with_progress_counter;
+use crate::utils::tls::TlsMaterial;
 
 mod cli;
 mod constants;
+mod control;
 mod performance;
 mod renderer;
 mod report;
 mod utils;
 
 /// Creates an optimized Tokio runtime for network performance testing
+#[allow(dead_code)]
 fn create_optimized_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(num_cpus::get())
@@ -63,20 +70,19 @@ async fn main() -> Result<()> {
         .with(fmt_layer)
         .init();
 
-    // Start parsing
     let cli = Cli::parse();
-
     trace!("Parsed CLI arguments: {:#?}", cli);
 
     match cli.command {
         Commands::Client {
             server,
-            port,
+            control_port,
             duration,
             warmup,
             mode,
             tcp,
             udp,
+            quic,
             http1,
             http2,
             h2c,
@@ -95,37 +101,37 @@ async fn main() -> Result<()> {
                 cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
             };
             let target_rate_bps: u64 = target_rate_mbps.saturating_mul(1_000_000);
-            // Assert that exactly one specific protocol is enabled (no more, no less)
-            // Count enabled protocols
-            let protocols = [mode.is_some(), tcp, udp, http1, http2, h2c, http3];
-            let protocol_count = protocols.iter().filter(|&&x| x).count();
-            if protocol_count != 1 {
+
+            // Exactly one protocol must be selected.
+            let protocols = [mode.is_some(), tcp, udp, quic, http1, http2, h2c, http3];
+            if protocols.iter().filter(|&&x| x).count() != 1 {
                 return Err(eyre::eyre!(
-                    "Exactly one protocol must be specified. Use --tcp, --udp, --http1, --http2, --h2c, or --http3."
+                    "Exactly one protocol must be specified. Use --tcp, --udp, --quic, --http1, --http2, --h2c, or --http3."
                 ));
             }
-
             let mode: ClientMode = mode.unwrap_or_else(|| {
                 if tcp {
                     ClientMode::TCP
                 } else if udp {
                     ClientMode::UDP
+                } else if quic {
+                    ClientMode::QUIC
                 } else if http1 {
                     ClientMode::HTTP1
                 } else if http2 {
                     ClientMode::HTTP2
                 } else if h2c {
                     ClientMode::H2C
-                } else if http3 {
-                    ClientMode::HTTP3
                 } else {
-                    unreachable!()
+                    ClientMode::HTTP3
                 }
             });
 
-            // Verify export file path is writable
+            // Verify export file path is writable.
             if let Some(export) = &export {
-                if let Some(parent) = export.parent() {
+                if let Some(parent) = export.parent()
+                    && !parent.as_os_str().is_empty()
+                {
                     fs::create_dir_all(parent)?;
                 }
                 if !can_write(export)? {
@@ -136,38 +142,44 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // Control handshake: discover ports + verify compatibility.
+            let handshake = perform_handshake(&server, control_port).await?;
+
+            let transport = match mode {
+                ClientMode::TCP => TestTransport::TcpRaw,
+                ClientMode::UDP => TestTransport::UdpBlaster,
+                ClientMode::QUIC => TestTransport::QuicRaw,
+                ClientMode::HTTP1 => TestTransport::Http1,
+                ClientMode::H2C => TestTransport::H2c,
+                ClientMode::HTTP2 => TestTransport::Http2Tls,
+                ClientMode::HTTP3 => TestTransport::Http3,
+            };
+            let (host, port) = handshake.endpoint(transport)?;
+
             let report: TestReport = match mode {
                 ClientMode::TCP => {
-                    let config = TcpTestConfig::new(
-                        server,
-                        port,
-                        duration,
-                        connections,
-                        test_type,
-                        test_sizes,
-                    )
-                    .with_warmup(warmup)
-                    .with_accounting(accounting);
-
+                    let config =
+                        TcpTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
+                            .with_warmup(warmup)
+                            .with_accounting(accounting);
                     run_tcp_client(config).await?
                 }
                 ClientMode::UDP => {
-                    let config = UdpTestConfig::new(
-                        server,
-                        port,
-                        duration,
-                        connections,
-                        test_type,
-                        test_sizes,
-                    )
-                    .with_warmup(warmup)
-                    .with_accounting(accounting)
-                    .with_target_rate_bps(target_rate_bps);
-
+                    let config =
+                        UdpTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
+                            .with_warmup(warmup)
+                            .with_accounting(accounting)
+                            .with_target_rate_bps(target_rate_bps);
                     run_udp_client(config).await?
                 }
+                ClientMode::QUIC => {
+                    let config =
+                        QuicTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
+                            .with_warmup(warmup)
+                            .with_accounting(accounting);
+                    run_quic_client(config).await?
+                }
                 ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
-                    // For HTTP modes, we need to determine the HTTP version
                     let http_version = match mode {
                         ClientMode::HTTP1 => HttpVersion::HTTP1,
                         ClientMode::HTTP2 => HttpVersion::HTTP2,
@@ -175,10 +187,9 @@ async fn main() -> Result<()> {
                         ClientMode::HTTP3 => HttpVersion::HTTP3,
                         _ => unreachable!(),
                     };
-
                     let config = HttpTestConfig::new(
-                        server,
-                        port,
+                        host,
+                        Some(port),
                         duration,
                         connections,
                         test_type,
@@ -188,7 +199,6 @@ async fn main() -> Result<()> {
                     )
                     .with_warmup(warmup)
                     .with_accounting(accounting);
-
                     run_http_test(config).await?
                 }
             };
@@ -196,7 +206,6 @@ async fn main() -> Result<()> {
             println!("{}", "Client test completed.".green().bold());
             println!("{report:#}");
 
-            // If export file is specified, write results
             if let Some(export) = &export {
                 match with_progress_counter(
                     "Exporting test results",
@@ -217,23 +226,37 @@ async fn main() -> Result<()> {
             all,
             tcp,
             udp,
+            quic,
             http,
             https,
+            http3,
             bind,
+            control_port,
             tcp_port,
             udp_port,
-            http_port,
+            http1_port,
+            h2c_port,
             https_port,
+            http3_port,
+            quic_port,
             cert,
             key,
         } => {
-            let enable_tcp = tcp || all;
-            let enable_udp = udp || all;
-            let enable_http = http || all;
-            let enable_https = https || all;
-
-            // Assert that at least one server mode is enabled
-            if !enable_tcp && !enable_udp && !enable_http && !enable_https {
+            let enabled = EnabledProtocols {
+                tcp: tcp || all,
+                udp: udp || all,
+                http: http || all,
+                https: https || all,
+                http3: http3 || all,
+                quic: quic || all,
+            };
+            if !enabled.tcp
+                && !enabled.udp
+                && !enabled.http
+                && !enabled.https
+                && !enabled.http3
+                && !enabled.quic
+            {
                 return Err(eyre::eyre!(
                     "At least one server mode must be enabled. Use --all to enable all modes."
                 ));
@@ -241,84 +264,80 @@ async fn main() -> Result<()> {
 
             println!("{}", "Starting server mode...".blue().bold());
 
-            // One cancel token shared by every listener; flipped by the signal
-            // handler below so each server can drain in its own way.
-            let cancel = CancellationToken::new();
-
-            let mut handles: Vec<(&str, tokio::task::JoinHandle<_>)> = vec![];
-
-            // Setup TCP
-            if enable_tcp {
-                let tcp_addr = SocketAddr::new(bind, tcp_port.unwrap_or(DEFAULT_TCP_PORT));
-                handles.push(("TCP", tokio::spawn(run_tcp_server(tcp_addr, cancel.clone()))));
-            }
-
-            // Setup UDP
-            if enable_udp {
-                let udp_addr = SocketAddr::new(bind, udp_port.unwrap_or(DEFAULT_UDP_PORT));
-                handles.push(("UDP", tokio::spawn(run_udp_server(udp_addr, cancel.clone()))));
-            }
-
-            // Setup HTTP server modes (i.e. HTTP/1.1 without TLS, h2c)
-            if enable_http {
-                let http_addr = SocketAddr::new(bind, http_port.unwrap_or(DEFAULT_HTTP_PORT));
-
-                handles.push((
-                    "HTTP",
-                    tokio::spawn(run_http_server(
-                        HttpServerConfig {
-                            bind_addr: http_addr,
-                            enable_cors: true,
-                            max_upload_size: MAX_HTTP_UPLOAD_SIZE,
-                        },
-                        cancel.clone(),
-                    )),
-                ));
-            }
-
-            // Setup HTTPS server modes (i.e. HTTP/2, HTTP/3)
-            if enable_https {
-                let https_addr = SocketAddr::new(bind, https_port.unwrap_or(DEFAULT_HTTPS_PORT));
-
-                // Require either both are defined or neither
-                let tls_config: Option<TlsConfig> = match (cert, key) {
-                    (Some(cert), Some(key)) => {
-                        if !cert.exists() || !key.exists() {
-                            return Err(eyre::eyre!(
-                                "Certificate and key files must exist: {} and {}",
-                                cert.display(),
-                                key.display()
-                            ));
-                        }
-
-                        Some(TlsConfig {
-                            cert_path: cert,
-                            key_path: key,
-                        })
-                    }
-                    (None, None) => None,
-                    _ => {
+            // Resolve TLS material once; shared by HTTPS, HTTP/3, raw QUIC.
+            let tls = match (cert, key) {
+                (Some(cert), Some(key)) => {
+                    if !cert.exists() || !key.exists() {
                         return Err(eyre::eyre!(
-                            "Both --cert and --key must be specified for HTTPS server"
+                            "Certificate and key files must exist: {} and {}",
+                            cert.display(),
+                            key.display()
                         ));
                     }
-                };
+                    TlsMaterial::from_pem_files(&cert, &key)?
+                }
+                (None, None) => TlsMaterial::self_signed()?,
+                _ => {
+                    return Err(eyre::eyre!(
+                        "Both --cert and --key must be specified together"
+                    ));
+                }
+            };
 
-                handles.push((
-                    "HTTPS",
-                    tokio::spawn(run_https_server(
-                        HttpsServerConfig {
-                            bind_addr: https_addr,
-                            enable_cors: true,
-                            max_upload_size: MAX_HTTP_UPLOAD_SIZE,
-                            tls_config,
-                        },
-                        cancel.clone(),
-                    )),
-                ));
+            let cancel = CancellationToken::new();
+            let rt = ServerRuntime {
+                bind,
+                enable_cors: true,
+                max_upload_size: MAX_HTTP_UPLOAD_SIZE,
+                buffer_size: DEFAULT_TCP_READ_BUFFER,
+                tls,
+            };
+            let overrides = PortOverrides {
+                tcp: tcp_port,
+                udp: udp_port,
+                http1: http1_port,
+                h2c: h2c_port,
+                https: https_port,
+                http3: http3_port,
+                quic: quic_port,
+            };
+
+            // Bind every test listener up front so the manifest carries
+            // the real (often ephemeral) ports.
+            let bound = bind_all(&rt, enabled, overrides).await?;
+            let manifest = Arc::new(ServerManifest::new(bound.entries.clone()));
+
+            println!(
+                "{}",
+                format!("Control endpoint: http://{bind}:{control_port}/manifest")
+                    .green()
+                    .bold()
+            );
+            for entry in &manifest.listeners {
+                println!(
+                    "  {:<7} -> {}:{}",
+                    entry.transport.label().bright_white().bold(),
+                    bind,
+                    entry.port.to_string().yellow()
+                );
             }
 
-            // Signal handler: SIGINT (Ctrl+C) on all platforms, SIGTERM on Unix.
+            let mut handles = bound.spawn(&rt, &cancel);
+
+            // Control endpoint last, once the manifest is final.
+            let control_addr = SocketAddr::new(bind, control_port);
+            handles.push((
+                "Control",
+                tokio::spawn(run_control_server(
+                    ControlServerConfig {
+                        bind_addr: control_addr,
+                        manifest,
+                    },
+                    cancel.clone(),
+                )),
+            ));
+
+            // Signal handler: SIGINT (all platforms), SIGTERM on Unix.
             let cancel_for_signal = cancel.clone();
             tokio::spawn(async move {
                 #[cfg(unix)]
@@ -355,11 +374,10 @@ async fn main() -> Result<()> {
                 cancel_for_signal.cancel();
             });
 
-            // Log servers to be startup
             println!(
                 "{}",
                 format!(
-                    "Starting servers: {}",
+                    "Started servers: {}",
                     handles
                         .iter()
                         .map(|(name, _)| *name)
@@ -370,7 +388,6 @@ async fn main() -> Result<()> {
                 .bold()
             );
 
-            // Wait for all server tasks to complete
             let results = futures::future::join_all(
                 handles
                     .into_iter()
@@ -395,7 +412,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::Report { file, export_html } => {
-            // Validate file exists and is readable
             if !file.exists() {
                 return Err(eyre::eyre!(
                     "Report file does not exist: {}",
@@ -452,9 +468,7 @@ async fn main() -> Result<()> {
 
         Commands::Suite {
             server,
-            tcp_udp_port,
-            http_port,
-            https_port,
+            control_port,
             duration,
             warmup,
             connections,
@@ -465,9 +479,7 @@ async fn main() -> Result<()> {
         } => {
             let cfg = SuiteConfig {
                 server,
-                tcp_udp_port,
-                http_port,
-                https_port,
+                control_port,
                 phase_duration: std::time::Duration::from_secs(duration),
                 warmup: std::time::Duration::from_secs(warmup),
                 connections,
@@ -479,7 +491,6 @@ async fn main() -> Result<()> {
                 include_tls: !no_tls,
             };
 
-            // Validate export path early.
             if let Some(export) = &export {
                 if let Some(parent) = export.parent()
                     && !parent.as_os_str().is_empty()

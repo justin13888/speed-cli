@@ -32,6 +32,17 @@ use crate::{
 
 const SERVER_ID_HEADER: &str = "x-speed-cli-server-id";
 
+/// reqwest routes a request to its HTTP/3 transport only when the
+/// request's version is explicitly `HTTP_3` — `http3_prior_knowledge()`
+/// alone is not enough. Apply that version for the HTTP/3 mode.
+fn apply_version(rb: reqwest::RequestBuilder, version: HttpVersion) -> reqwest::RequestBuilder {
+    if matches!(version, HttpVersion::HTTP3) {
+        rb.version(reqwest::Version::HTTP_3)
+    } else {
+        rb
+    }
+}
+
 fn parse_server_identity(resp: &reqwest::Response) -> Option<PeerIdentity> {
     let value = resp.headers().get(SERVER_ID_HEADER)?.to_str().ok()?;
     let bytes = decode_base64_urlsafe(value)?;
@@ -108,7 +119,12 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     let info_url = format!("{}/info", config.server_url);
     let mut server_identity: Option<PeerIdentity> = None;
     let preflight_remote =
-        match tokio::time::timeout(Duration::from_secs(5), client.get(&info_url).send()).await {
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            apply_version(client.get(&info_url), config.http_version).send(),
+        )
+        .await
+        {
             Ok(Ok(resp)) if resp.status().is_success() => {
                 tracing::debug!("Server pre-flight check passed: {}", info_url);
                 server_identity = parse_server_identity(&resp);
@@ -143,6 +159,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                 &config.server_url,
                 config.duration,
                 config.warmup,
+                config.http_version,
             )
             .await?;
         }
@@ -158,6 +175,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         config.chunk_size,
                         config.duration,
                         config.warmup,
+                        config.http_version,
                     )
                     .await?,
                 );
@@ -175,6 +193,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         config.chunk_size,
                         config.duration,
                         config.warmup,
+                        config.http_version,
                     )
                     .await?,
                 );
@@ -192,6 +211,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         config.chunk_size,
                         config.duration,
                         config.warmup,
+                        config.http_version,
                     )
                     .await?,
                 );
@@ -205,6 +225,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         config.chunk_size,
                         config.duration,
                         config.warmup,
+                        config.http_version,
                     )
                     .await?,
                 );
@@ -221,6 +242,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         config.chunk_size,
                         config.duration,
                         config.warmup,
+                        config.http_version,
                     ),
                     run_upload_test(
                         &client,
@@ -230,6 +252,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                         config.chunk_size,
                         config.duration,
                         config.warmup,
+                        config.http_version,
                     )
                 );
 
@@ -289,6 +312,7 @@ async fn measure_http_latency(
     server_url: &str,
     duration: Duration,
     warmup: Duration,
+    version: HttpVersion,
 ) -> Result<Option<LatencyResult>> {
     let url = format!("{server_url}/latency");
     let mut measurements = Vec::new();
@@ -303,7 +327,7 @@ async fn measure_http_latency(
         let request_start = Instant::now();
         let t_start_us = offset_us(start, request_start);
         let in_warmup = start.elapsed() < warmup;
-        match client.head(&url).send().await {
+        match apply_version(client.head(&url), version).send().await {
             Ok(_response) => {
                 let rtt_us = request_start.elapsed().as_micros() as u64;
                 let measurement = LatencyMeasurement::success(t_start_us, rtt_us);
@@ -341,6 +365,7 @@ async fn measure_http_latency(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_download_test(
     client: &Client,
     server_url: &str,
@@ -349,6 +374,7 @@ async fn run_download_test(
     chunk_size: usize,
     duration: Duration,
     warmup: Duration,
+    version: HttpVersion,
 ) -> Result<ThroughputResult> {
     eprintln!(
         "Starting download test with {} payload size and {} parallel connections...",
@@ -374,7 +400,9 @@ async fn run_download_test(
                 let download_start = Instant::now();
                 let t_start_us = offset_us(start_time, download_start);
                 let is_warmup = start_time.elapsed() < warmup;
-                match download_chunk(&client, &server_url, i, payload_size, chunk_size).await {
+                match download_chunk(&client, &server_url, i, payload_size, chunk_size, version)
+                    .await
+                {
                     Ok(bytes) => {
                         let duration_us = download_start.elapsed().as_micros() as u64;
                         let s = Sample::success(t_start_us, duration_us, bytes, is_warmup);
@@ -422,6 +450,7 @@ async fn run_download_test(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_upload_test(
     client: &Client,
     server_url: &str,
@@ -430,6 +459,7 @@ async fn run_upload_test(
     chunk_size: usize,
     duration: Duration,
     warmup: Duration,
+    version: HttpVersion,
 ) -> Result<ThroughputResult> {
     eprintln!(
         "Starting upload test with {} payload size and {} parallel connections...",
@@ -464,7 +494,9 @@ async fn run_upload_test(
                 let upload_start = Instant::now();
                 let t_start_us = offset_us(start_time, upload_start);
                 let is_warmup = start_time.elapsed() < warmup;
-                match upload_chunk(&client, &server_url, payload_size, chunk_data.clone()).await {
+                match upload_chunk(&client, &server_url, payload_size, chunk_data.clone(), version)
+                    .await
+                {
                     Ok(bytes) => {
                         let duration_us = upload_start.elapsed().as_micros() as u64;
                         let s = Sample::success(t_start_us, duration_us, bytes, is_warmup);
@@ -517,13 +549,16 @@ async fn download_chunk(
     id: usize,
     payload_size: usize,
     chunk_size: usize,
+    version: HttpVersion,
 ) -> Result<u64> {
-    let response = client
-        .get(format!(
+    let response = apply_version(
+        client.get(format!(
             "{server_url}/download?size={payload_size}&chunk_size={chunk_size}&id={id}"
-        ))
-        .send()
-        .await?;
+        )),
+        version,
+    )
+    .send()
+    .await?;
     let mut total_bytes = 0u64;
 
     let mut stream = response.bytes_stream();
@@ -551,6 +586,7 @@ async fn upload_chunk(
     server_url: &str,
     payload_size: usize,
     chunk_data: Vec<u8>,
+    version: HttpVersion,
 ) -> Result<u64> {
     let chunk_size = chunk_data.len();
     if chunk_size == 0 || payload_size == 0 {
@@ -571,8 +607,7 @@ async fn upload_chunk(
         Ok::<_, std::io::Error>(bytes)
     }));
 
-    let response = client
-        .post(format!("{server_url}/upload"))
+    let response = apply_version(client.post(format!("{server_url}/upload")), version)
         .header("Content-Type", "application/octet-stream")
         .header("Content-Length", payload_size.to_string())
         .body(reqwest::Body::wrap_stream(stream))
