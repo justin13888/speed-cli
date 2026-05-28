@@ -7,13 +7,15 @@ pub enum ClientMode {
     TCP,
     /// UDP
     UDP,
+    /// Raw QUIC stream throughput
+    QUIC,
     /// HTTP/1.1 without TLS
     HTTP1,
     /// h2c (HTTP/2 Cleartext)
     H2C,
     /// HTTP/2 with TLS
     HTTP2,
-    /// HTTP/3 (QUIC)
+    /// HTTP/3 (over QUIC)
     HTTP3,
 }
 

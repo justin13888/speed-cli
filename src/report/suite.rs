@@ -3,13 +3,16 @@
 //! and the renderer can treat it as a peer of `TestReport`.
 
 use std::fmt::{self, Display, Formatter};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use colored::*;
 use serde::{Deserialize, Serialize};
 
+use crate::TestType;
 use crate::report::{REPORT_SCHEMA_VERSION, TestReport};
 use crate::utils::env::Environment;
+use crate::utils::format::format_bytes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuiteReport {
@@ -32,7 +35,38 @@ pub struct SuiteReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamedReport {
     pub label: String,
+    /// Effective parameters this phase ran with. Recorded explicitly so
+    /// the suite report can show, at a glance, what differs between
+    /// phases and why — see [`PhaseParams`].
+    pub params: PhaseParams,
     pub report: TestReport,
+}
+
+/// The parameters a single suite phase actually ran with. The suite
+/// normalises these across protocols so results are comparable; any
+/// genuine, intrinsic difference is captured in [`PhaseParams::deviations`]
+/// rather than left implicit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseParams {
+    /// Bulk payload per operation/request, in bytes. `None` for latency
+    /// phases, which carry no bulk payload.
+    pub payload_size: Option<usize>,
+    /// I/O unit in bytes: the TCP/QUIC per-operation payload, the HTTP
+    /// chunk size, or the UDP datagram size. Unified across protocols
+    /// except where a protocol is intrinsically constrained.
+    pub io_unit: usize,
+    /// Parallel connections / streams.
+    pub connections: usize,
+    /// Wall-clock duration of the phase.
+    pub duration: Duration,
+    /// The test type actually executed. May differ from the phase label
+    /// (the `*/full-duplex` HTTP rows run [`TestType::Simultaneous`],
+    /// since HTTP cannot do true full-duplex).
+    pub test_type: TestType,
+    /// Intrinsic deviations from the suite baseline, e.g. UDP being
+    /// single-stream. Empty when the phase matches the baseline exactly.
+    #[serde(default)]
+    pub deviations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,9 +90,15 @@ impl SuiteReport {
         }
     }
 
-    pub fn record(&mut self, label: impl Into<String>, report: TestReport) {
+    pub fn record(
+        &mut self,
+        label: impl Into<String>,
+        params: PhaseParams,
+        report: TestReport,
+    ) {
         self.reports.push(NamedReport {
             label: label.into(),
+            params,
             report,
         });
     }
@@ -72,6 +112,29 @@ impl SuiteReport {
 
     pub fn finalize(&mut self) {
         self.end_time = Utc::now();
+    }
+}
+
+impl Display for PhaseParams {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let payload = match self.payload_size {
+            Some(n) => format_bytes(n),
+            None => "n/a".to_string(),
+        };
+        writeln!(
+            f,
+            "  {}: payload={}  io-unit={}  connections={}  duration={}s  type={}",
+            "params".bright_white().bold(),
+            payload.yellow(),
+            format_bytes(self.io_unit).yellow(),
+            self.connections.to_string().yellow(),
+            self.duration.as_secs().to_string().yellow(),
+            self.test_type.to_string().yellow(),
+        )?;
+        for note in &self.deviations {
+            writeln!(f, "  {} {}", "note:".bright_yellow().bold(), note.yellow())?;
+        }
+        Ok(())
     }
 }
 
@@ -126,6 +189,7 @@ impl Display for SuiteReport {
                 "{}",
                 format!("── Phase: {} ──", nr.label).bright_magenta().bold()
             )?;
+            write!(f, "{}", nr.params)?;
             write!(f, "{}", nr.report)?;
             writeln!(f)?;
         }

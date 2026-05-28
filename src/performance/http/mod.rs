@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod client;
+pub mod h3_server;
+pub mod payload;
 pub mod server;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

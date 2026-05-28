@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod constants;
+pub mod control;
 pub mod performance;
 pub mod renderer;
 pub mod report;

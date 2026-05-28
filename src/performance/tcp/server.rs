@@ -190,7 +190,14 @@ impl TcpServer {
         let listener = TcpListener::bind(&addr)
             .await
             .wrap_err("Failed to bind TCP listener")?;
+        self.run_on(listener).await
+    }
 
+    /// Run the accept loop on a listener that is already bound. Used by
+    /// the ephemeral-port server startup path, which binds every
+    /// listener up front so the control manifest can advertise the real
+    /// ports.
+    pub async fn run_on(&self, listener: TcpListener) -> Result<()> {
         let local_addr = listener
             .local_addr()
             .wrap_err("Failed to get local address")?;
@@ -298,6 +305,22 @@ pub async fn run_tcp_server(
     });
 
     let result = server.run(addr).await;
+    shutdown_task.abort();
+    result
+}
+
+/// Like [`run_tcp_server`] but drives a listener that is already bound
+/// (the ephemeral-port startup path).
+pub async fn run_tcp_server_on(listener: TcpListener, cancel: CancellationToken) -> Result<()> {
+    let server = Arc::new(TcpServerBuilder::new().build());
+    let server_for_shutdown = server.clone();
+    let shutdown_task = tokio::spawn(async move {
+        cancel.cancelled().await;
+        if let Err(e) = server_for_shutdown.shutdown().await {
+            error!("TCP server shutdown error: {}", e);
+        }
+    });
+    let result = server.run_on(listener).await;
     shutdown_task.abort();
     result
 }

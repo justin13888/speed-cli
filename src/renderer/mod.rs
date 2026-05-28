@@ -329,6 +329,7 @@ impl ToHtml for TestConfig {
             TestConfig::Tcp(config) => config.write_html(writer),
             TestConfig::Udp(config) => config.write_html(writer),
             TestConfig::Http(config) => config.write_html(writer),
+            TestConfig::Quic(config) => config.write_html(writer),
         }
     }
 
@@ -337,7 +338,43 @@ impl ToHtml for TestConfig {
             TestConfig::Tcp(config) => config.to_html(),
             TestConfig::Udp(config) => config.to_html(),
             TestConfig::Http(config) => config.to_html(),
+            TestConfig::Quic(config) => config.to_html(),
         }
+    }
+}
+
+// Implementation for QuicTestConfig
+impl ToHtml for QuicTestConfig {
+    fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        write!(writer, "{}", self.to_html())
+    }
+
+    fn to_html(&self) -> String {
+        let payload_sizes = self
+            .payload_sizes
+            .iter()
+            .map(|s| format_bytes_usize(*s))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            r#"<h3 style="color: #28a745; margin-top: 0;">QUIC Configuration</h3>
+            <div style="display: grid; gap: 10px;">
+                <div><strong>Protocol:</strong> <span style="color: #28a745;">QUIC</span></div>
+                <div><strong>Server:</strong> <span style="color: #007acc;">{}</span></div>
+                <div><strong>Port:</strong> <span style="color: #fd7e14;">{}</span></div>
+                <div><strong>Duration:</strong> <span style="color: #6f42c1;">{}s</span></div>
+                <div><strong>Parallel Streams:</strong> <span style="color: #28a745;">{}</span></div>
+                <div><strong>Test Type:</strong> <span style="color: #fd7e14;">{}</span></div>
+                <div><strong>Payload Sizes:</strong> <span style="color: #6c757d;">[{}]</span></div>
+            </div>"#,
+            self.server,
+            self.port,
+            self.duration.as_secs(),
+            self.parallel_connections,
+            self.test_type.to_html(),
+            payload_sizes
+        )
     }
 }
 
@@ -619,6 +656,7 @@ impl ToHtml for NetworkTestResult {
             crate::report::NetworkProtocol::Http => "",
             crate::report::NetworkProtocol::Tcp => "TCP ",
             crate::report::NetworkProtocol::Udp => "UDP ",
+            crate::report::NetworkProtocol::Quic => "QUIC ",
         };
 
         // Latency results
@@ -689,6 +727,7 @@ impl ToHtml for NetworkTestResult {
             crate::report::NetworkProtocol::Http => "",
             crate::report::NetworkProtocol::Tcp => "TCP ",
             crate::report::NetworkProtocol::Udp => "UDP ",
+            crate::report::NetworkProtocol::Quic => "QUIC ",
         };
 
         // Latency results

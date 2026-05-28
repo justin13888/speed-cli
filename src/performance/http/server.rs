@@ -7,24 +7,26 @@ use axum::{
     routing::{get, post},
 };
 use axum_server::tls_rustls::RustlsConfig;
-use bytes::Bytes;
-use eyre::Result;
+use eyre::{Context as _, Result};
 use futures::StreamExt as _;
-use futures::stream;
+use hyper::server::conn::{http1, http2};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use serde::Deserialize;
-use std::sync::LazyLock as SyncLazy;
+use std::sync::Once;
 use std::time::Duration;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, sync::Once};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::report::PeerIdentity;
 
-const SERVER_ID_HEADER: &str = "x-speed-cli-server-id";
+pub const SERVER_ID_HEADER: &str = "x-speed-cli-server-id";
 
-fn server_identity_header_value() -> HeaderValue {
+pub fn server_identity_header_value() -> HeaderValue {
     // Encode the local PeerIdentity as base64-CBOR once at startup.
     // Header values are ASCII-safe; base64 (URL-safe, no padding) keeps
     // the wire compact and avoids escaping concerns. Falls back to an
@@ -104,24 +106,7 @@ pub fn decode_base64_urlsafe(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-use crate::utils::tls::get_self_signed_cert;
-
 use crate::constants::DEFAULT_CHUNK_SIZE;
-
-/// Static buffer for download operations to avoid allocations.
-///
-/// Filled with random bytes once at process start so compressing middleboxes
-/// (some VPNs, modems) can't deflate the stream and produce inflated
-/// throughput numbers. 1 MB is small enough to generate quickly on first
-/// access (~ms) but large enough that the per-chunk repeat path
-/// downstream rarely runs more than a handful of iterations even for
-/// hundred-MB payloads.
-static RAND_BUFFER: SyncLazy<Arc<Bytes>> = SyncLazy::new(|| {
-    use rand::RngCore as _;
-    let mut buf = vec![0u8; 1024 * 1024]; // 1 MB
-    rand::rng().fill_bytes(&mut buf);
-    Arc::new(Bytes::from(buf))
-});
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
@@ -133,67 +118,139 @@ fn ensure_crypto_provider() {
 
 #[derive(Debug, Clone)]
 pub struct HttpServerConfig {
-    /// Bind address
-    pub bind_addr: SocketAddr,
     /// Enable cors. Usually should be true.
     pub enable_cors: bool,
     /// Max upload size in bytes
     pub max_upload_size: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct HttpsServerConfig {
-    /// Bind address
-    pub bind_addr: SocketAddr,
-    /// Enable cors. Usually should be true.
-    pub enable_cors: bool,
-    /// Max upload size in bytes
-    pub max_upload_size: usize,
-
-    /// TLS config
-    /// If not provided, a self-signed certificate will be generated
-    pub tls_config: Option<TlsConfig>,
+/// Which cleartext HTTP protocol a listener speaks. Each protocol gets
+/// its own listener and is served *strictly* — a client that speaks the
+/// wrong protocol fails its connection handshake loudly instead of
+/// being silently negotiated onto the other protocol (which is what
+/// `axum::serve`'s auto-detection would do, hiding measurement bugs).
+#[derive(Debug, Clone, Copy)]
+enum CleartextProto {
+    /// HTTP/1.1 only.
+    Http1,
+    /// HTTP/2 cleartext (h2c), prior-knowledge only.
+    H2c,
 }
 
-#[derive(Debug, Clone)]
-pub struct TlsConfig {
-    /// Path to the TLS certificate (PEM format)
-    pub cert_path: PathBuf,
-    /// Path to the TLS private key (PEM format)
-    pub key_path: PathBuf,
-}
+/// Serve the test router over a single cleartext HTTP protocol on a
+/// pre-bound listener, gracefully draining when `cancel` fires.
+async fn run_cleartext(
+    listener: TcpListener,
+    config: HttpServerConfig,
+    cancel: CancellationToken,
+    proto: CleartextProto,
+) -> Result<()> {
+    let router = create_router(config.enable_cors, config.max_upload_size);
+    let graceful = GracefulShutdown::new();
 
-/// Runs the HTTP server, gracefully shutting down when `cancel` fires.
-pub async fn run_http_server(config: HttpServerConfig, cancel: CancellationToken) -> Result<()> {
-    let app = create_router(config.enable_cors, config.max_upload_size);
+    tracing::info!(
+        "{:?} server listening on {}",
+        proto,
+        listener.local_addr()?
+    );
 
-    tracing::info!("HTTP server listening on {}", config.bind_addr);
-    let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, _peer) = match accept {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::error!("{proto:?} accept error: {e}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let _ = stream.set_nodelay(true);
+                let io = TokioIo::new(stream);
+                let svc = TowerToHyperService::new(router.clone());
+                match proto {
+                    CleartextProto::Http1 => {
+                        let conn = http1::Builder::new().serve_connection(io, svc);
+                        let watched = graceful.watch(conn);
+                        tokio::spawn(async move {
+                            if let Err(e) = watched.await {
+                                tracing::debug!("HTTP/1.1 connection error: {e}");
+                            }
+                        });
+                    }
+                    CleartextProto::H2c => {
+                        let conn = http2::Builder::new(TokioExecutor::new())
+                            .serve_connection(io, svc);
+                        let watched = graceful.watch(conn);
+                        tokio::spawn(async move {
+                            if let Err(e) = watched.await {
+                                tracing::debug!("h2c connection error: {e}");
+                            }
+                        });
+                    }
+                }
+            }
+            _ = cancel.cancelled() => {
+                tracing::info!("{proto:?} server received shutdown signal, draining...");
+                break;
+            }
+        }
+    }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            cancel.cancelled().await;
-            tracing::info!("HTTP server received shutdown signal, draining...");
-        })
-        .await?;
-
+    tokio::select! {
+        _ = graceful.shutdown() => {}
+        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+            tracing::warn!("{proto:?} server: graceful drain timed out");
+        }
+    }
     Ok(())
 }
 
-/// Runs the HTTPS server, gracefully shutting down when `cancel` fires.
-pub async fn run_https_server(config: HttpsServerConfig, cancel: CancellationToken) -> Result<()> {
+/// Runs the HTTP/1.1-only server on a pre-bound listener. An h2c
+/// prior-knowledge client's preface is not valid HTTP/1.1, so it fails
+/// loudly here rather than being silently served h2c.
+pub async fn run_http1_server(
+    listener: TcpListener,
+    config: HttpServerConfig,
+    cancel: CancellationToken,
+) -> Result<()> {
+    run_cleartext(listener, config, cancel, CleartextProto::Http1).await
+}
+
+/// Runs the h2c-only (HTTP/2 cleartext, prior-knowledge) server on a
+/// pre-bound listener. An HTTP/1.1 client does not send the HTTP/2
+/// connection preface, so it fails loudly here rather than being
+/// silently served HTTP/1.1.
+pub async fn run_h2c_server(
+    listener: TcpListener,
+    config: HttpServerConfig,
+    cancel: CancellationToken,
+) -> Result<()> {
+    run_cleartext(listener, config, cancel, CleartextProto::H2c).await
+}
+
+/// Runs the HTTPS (HTTP/2 over TLS) server on a pre-bound listener,
+/// gracefully shutting down when `cancel` fires. ALPN restricts the
+/// listener to HTTP/2, so it is already strict.
+pub async fn run_https_server(
+    listener: std::net::TcpListener,
+    tls_config: RustlsConfig,
+    enable_cors: bool,
+    max_upload_size: usize,
+    cancel: CancellationToken,
+) -> Result<()> {
     // Ensure crypto provider is initialized before using TLS
     ensure_crypto_provider();
 
-    let app = create_router(config.enable_cors, config.max_upload_size);
-    let tls_config = match config.tls_config {
-        Some(tls_config) => {
-            RustlsConfig::from_pem_file(tls_config.cert_path, tls_config.key_path).await?
-        }
-        None => get_self_signed_cert().await?,
-    };
+    let app = create_router(enable_cors, max_upload_size);
 
-    tracing::info!("HTTPS server listening on {}", config.bind_addr);
+    listener
+        .set_nonblocking(true)
+        .wrap_err("Failed to set HTTPS listener non-blocking")?;
+    tracing::info!(
+        "HTTPS server listening on {}",
+        listener.local_addr()?
+    );
 
     let handle = axum_server::Handle::new();
     let handle_for_shutdown = handle.clone();
@@ -203,7 +260,7 @@ pub async fn run_https_server(config: HttpsServerConfig, cancel: CancellationTok
         handle_for_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 
-    let result = axum_server::bind_rustls(config.bind_addr, tls_config)
+    let result = axum_server::from_tcp_rustls(listener, tls_config)
         .handle(handle)
         .serve(app.into_make_service())
         .await;
@@ -251,36 +308,10 @@ fn default_chunk_size() -> usize {
 }
 
 async fn download_handler(Query(query): Query<DownloadQuery>) -> impl IntoResponse {
-    // Use the static buffer to avoid allocations
-    let total_size = query.size;
-    let chunk_size = query.chunk_size;
-    let chunks = total_size.div_ceil(chunk_size); // Round up division
-
-    let buffer_ref = Arc::clone(&RAND_BUFFER);
-
-    let stream = stream::iter(0..chunks).enumerate().map(move |(i, _)| {
-        let bytes_sent = i * chunk_size;
-        let remaining_bytes = total_size.saturating_sub(bytes_sent);
-        let current_chunk_size = chunk_size.min(remaining_bytes);
-
-        // If the chunk size is larger than our buffer, we need to repeat the buffer
-        if current_chunk_size <= buffer_ref.len() {
-            let bytes = buffer_ref.clone().slice(0..current_chunk_size);
-            Ok::<_, std::io::Error>(bytes)
-        } else {
-            // Create a larger chunk by repeating the buffer
-            let mut chunk_data = Vec::with_capacity(current_chunk_size);
-            let mut bytes_written = 0;
-            while bytes_written < current_chunk_size {
-                let bytes_to_copy = (current_chunk_size - bytes_written).min(buffer_ref.len());
-                chunk_data.extend_from_slice(&buffer_ref[0..bytes_to_copy]);
-                bytes_written += bytes_to_copy;
-            }
-            Ok::<_, std::io::Error>(Bytes::from(chunk_data))
-        }
-    });
-
-    let body = Body::from_stream(stream);
+    let body = Body::from_stream(crate::performance::http::payload::download_stream(
+        query.size,
+        query.chunk_size,
+    ));
 
     match Response::builder()
         .status(StatusCode::OK)

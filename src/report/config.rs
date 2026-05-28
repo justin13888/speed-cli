@@ -27,11 +27,18 @@ pub enum TestConfig {
     Tcp(TcpTestConfig),
     Udp(UdpTestConfig),
     Http(HttpTestConfig),
+    Quic(QuicTestConfig),
 }
 
 impl From<TcpTestConfig> for TestConfig {
     fn from(config: TcpTestConfig) -> Self {
         TestConfig::Tcp(config)
+    }
+}
+
+impl From<QuicTestConfig> for TestConfig {
+    fn from(config: QuicTestConfig) -> Self {
+        TestConfig::Quic(config)
     }
 }
 
@@ -104,6 +111,68 @@ impl TcpTestConfig {
         Self {
             server,
             port: port.unwrap_or(DEFAULT_TCP_PORT), // Default TCP port
+            duration: Duration::from_secs(duration),
+            parallel_connections: parallel_connections.max(1),
+            test_type,
+            payload_sizes: if payload_sizes.is_empty() {
+                IndexSet::from_iter(DEFAULT_TCP_PAYLOAD_SIZES.iter().copied())
+            } else {
+                payload_sizes
+            },
+            read_buffer_size: DEFAULT_TCP_READ_BUFFER,
+            warmup: DEFAULT_WARMUP,
+            accounting: ThroughputAccounting::Goodput,
+        }
+    }
+
+    pub fn with_warmup(mut self, warmup: Duration) -> Self {
+        self.warmup = warmup;
+        self
+    }
+
+    pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
+        self.accounting = accounting;
+        self
+    }
+}
+
+/// Raw-QUIC stream test configuration. Mirrors [`TcpTestConfig`] — the
+/// raw-QUIC test is the QUIC analog of the raw-TCP test, with the same
+/// `'U'`/`'D'`/`'F'`/`'P'`/`'H'` command shape over QUIC bidirectional
+/// streams.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuicTestConfig {
+    pub server: String,
+    pub port: u16,
+    pub duration: Duration,
+    /// Number of parallel QUIC bidirectional streams.
+    pub parallel_connections: usize,
+    pub test_type: TestType,
+    pub payload_sizes: IndexSet<usize>,
+    #[serde(default = "default_tcp_read_buffer")]
+    pub read_buffer_size: usize,
+    #[serde(default = "default_warmup")]
+    pub warmup: Duration,
+    #[serde(default = "default_accounting")]
+    pub accounting: ThroughputAccounting,
+}
+
+impl QuicTestConfig {
+    pub fn new<T>(
+        server: String,
+        port: Option<u16>,
+        duration: u64,
+        parallel_connections: usize,
+        test_type: TestType,
+        payload_sizes: T,
+    ) -> Self
+    where
+        T: IntoIterator<Item = usize>,
+    {
+        let payload_sizes: IndexSet<usize> = payload_sizes.into_iter().collect();
+        Self {
+            server,
+            port: port.unwrap_or(DEFAULT_TCP_PORT),
             duration: Duration::from_secs(duration),
             parallel_connections: parallel_connections.max(1),
             test_type,
@@ -280,7 +349,57 @@ impl Display for TestConfig {
             TestConfig::Tcp(config) => write!(f, "{config}"),
             TestConfig::Udp(config) => write!(f, "{config}"),
             TestConfig::Http(config) => write!(f, "{config}"),
+            TestConfig::Quic(config) => write!(f, "{config}"),
         }
+    }
+}
+
+impl Display for QuicTestConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "  {}: {}",
+            "Protocol".bright_blue().bold(),
+            "QUIC".green()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Server".bright_blue().bold(),
+            self.server.cyan()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Port".bright_blue().bold(),
+            self.port.to_string().yellow()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Duration".bright_blue().bold(),
+            format!("{}s", self.duration.as_secs()).magenta()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Parallel Streams".bright_blue().bold(),
+            self.parallel_connections.to_string().green()
+        )?;
+
+        let sizes: Vec<String> = self
+            .payload_sizes
+            .iter()
+            .map(|s| format_bytes(*s))
+            .collect();
+        writeln!(
+            f,
+            "  {}: [{}]",
+            "Payload Sizes".bright_blue().bold(),
+            sizes.join(", ").white()
+        )?;
+
+        Ok(())
     }
 }
 

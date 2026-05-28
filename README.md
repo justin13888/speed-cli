@@ -10,7 +10,7 @@ It's difficult to have one tool that tests your network conditions between two d
 
 ## Features
 
-- **Multi-protocol support**: TCP, UDP, HTTP/1.1, HTTP/2, HTTP/3
+- **Multi-protocol support**: TCP, UDP, raw QUIC, HTTP/1.1, HTTP/2, h2c, HTTP/3
 - **High-performance**: Built with Rust, optimized for high throughput and efficient resource usage
 - **Comprehensive metrics**: Throughput, latency, jitter, packet loss, DNS performance
 - **Exporting**: CBOR for re-importable data; HTML for self-contained rendered reports
@@ -35,35 +35,36 @@ The binary name is `speed-cli`. Note, for the HTTPS server, you may provide your
 
 Note: If you're using HTTPS server, ensure you have `cert.pem` and `key.pem` files in the current directory or specify them with `--cert` and `--key` flags.
 
+The server publishes a single JSON **control endpoint** (default port
+`9000`). Every enabled protocol binds its own OS-assigned ephemeral
+port; clients discover those ports — and verify wire-protocol
+compatibility — by handshaking against the control port. The control
+port is the only port you normally choose.
+
 ```sh
-# Start server on default port
-speed-cli server --all # All protocols (TCP, UDP, HTTP, HTTPS)
-speed-cli server --tcp # TCP on default port 5201
-speed-cli server --udp # UDP on default port 5201
-speed-cli server --http # HTTP on default port 8080
-speed-cli server --https # HTTPS on default port 8443
+# Start server (control endpoint on 9000; every test listener ephemeral)
+speed-cli server --all                       # TCP, UDP, QUIC, HTTP/1.1, h2c, HTTP/2, HTTP/3
+speed-cli server --tcp --udp                 # selected protocols only
+speed-cli server --all --control-port 9100   # pick a different control port
+speed-cli server --all -b 192.168.1.100      # bind a specific interface
 
-# Run server with specific port and interface
-speed-cli server --http -p 8080 -b 192.168.1.100
+# Run a single-protocol client test (only --server + --control-port needed)
+speed-cli client --tcp   -s <server-ip>      # raw TCP
+speed-cli client --udp   -s <server-ip>      # UDP blaster
+speed-cli client --quic  -s <server-ip>      # raw QUIC streams
+speed-cli client --http1 -s <server-ip>      # HTTP/1.1
+speed-cli client --http2 -s <server-ip>      # HTTP/2 (TLS)
+speed-cli client --h2c   -s <server-ip>      # HTTP/2 cleartext
+speed-cli client --http3 -s <server-ip>      # HTTP/3 (over QUIC)
 
-# Run client test (with defaults)
-speed-cli client --tcp -s <server-ip> # TCP test
-speed-cli client --udp -s <server-ip> # UDP test
-speed-cli client --http1 -s <server-ip> # HTTP/1.1 test
-speed-cli client --http2 -s <server-ip> # HTTP/2 test
-speed-cli client --h2c -s <server-ip> # HTTP/2 cleartext test
-speed-cli client --http3 -s <server-ip> # HTTP/3 test
+# Longer test, more connections, export to CBOR
+speed-cli client --http1 -s 192.168.1.100 -d 60 -c 4 -e results.cbor
 
-# Run HTTP client test against specific server for 60 seconds
-speed-cli client --http -p 8080 -h 192.168.1.100 -d 60
+# Run the full multi-protocol suite (drives every advertised protocol)
+speed-cli suite -s <server-ip>
+speed-cli suite -s <server-ip> --control-port 9100 -e suite.cbor
 
-# Run HTTP client test with 8 concurrent connections, and export results to CBOR
-speed-cli client --http -p 8080 -h 192.168.1.100 -c 4 -e results.cbor
-
-# Run TCP client test against specific server
-speed-cli client --tcp -p 5201 -h 192.168.1.100
-
-# Print previously saved result
+# Print a previously saved result
 speed-cli report -f results.cbor
 ```
 
@@ -116,7 +117,7 @@ The UDP test uses a small, iperf3-u-style "blaster" protocol: a fixed-rate sende
 
 - [ ] OCI Container images using all popular base images (necessary for representative performance testing)
 - [ ] Kubernetes support (for server)
-- [ ] QUIC support (HTTP/3)
+- [x] QUIC support (HTTP/3 and raw QUIC streams)
 - [ ] gRPC support?
 - [ ] Rich HTML report generation
 - [ ] Support for more niche protocols (e.g. SFTP, SMB)

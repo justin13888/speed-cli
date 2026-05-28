@@ -62,6 +62,12 @@ impl BlasterServer {
         })
     }
 
+    /// The address this server's UDP socket is bound to. Useful when
+    /// the server bound an OS-assigned ephemeral port.
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        Ok(self.socket.local_addr()?)
+    }
+
     pub async fn run(&self, cancel: CancellationToken) -> Result<()> {
         info!(
             "UDP blaster server listening on {}",

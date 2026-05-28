@@ -1,5 +1,6 @@
 use std::{net::IpAddr, path::PathBuf};
 
+use crate::constants::DEFAULT_CONTROL_PORT;
 use crate::{ClientMode, TestType};
 use clap::{Subcommand, ValueEnum};
 
@@ -13,13 +14,15 @@ pub enum AccountingArg {
 pub enum Commands {
     /// Run as client
     Client {
-        /// Server hostname or IP address (e.g., 182.168.1.1, google.com). Defaults to 127.0.0.1
+        /// Server hostname or IP address (e.g., 192.168.1.1, google.com).
         #[arg(short, long, default_value = "127.0.0.1")]
         server: String,
 
-        /// Server port. If not specified, defaults to 5201 for TCP/UDP and 8080 for HTTP.
-        #[arg(short, long)]
-        port: Option<u16>,
+        /// Control endpoint port. The client performs a handshake against
+        /// this port to discover every per-protocol test listener and to
+        /// verify wire-protocol compatibility before testing.
+        #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
+        control_port: u16,
 
         /// Test duration in seconds
         #[arg(short, long, default_value = "10")]
@@ -31,7 +34,7 @@ pub enum Commands {
         #[arg(long, default_value = "1")]
         warmup: u64,
 
-        /// Protocol mode (tcp, udp, http1, http2, h2c, http3)
+        /// Protocol mode (tcp, udp, quic, http1, http2, h2c, http3)
         #[arg(short, long, value_enum)]
         #[clap(group = "protocol")]
         mode: Option<ClientMode>,
@@ -45,6 +48,11 @@ pub enum Commands {
         #[arg(long)]
         #[clap(group = "protocol")]
         udp: bool,
+
+        /// Use raw QUIC stream throughput
+        #[arg(long)]
+        #[clap(group = "protocol")]
+        quic: bool,
 
         /// Use HTTP/1.1 without TLS
         #[arg(long)]
@@ -61,8 +69,8 @@ pub enum Commands {
         #[clap(group = "protocol")]
         h2c: bool,
 
-        /// Use HTTP/3 (QUIC)
-        #[arg(long, alias = "quic")]
+        /// Use HTTP/3 (over QUIC)
+        #[arg(long)]
         #[clap(group = "protocol")]
         http3: bool,
 
@@ -96,19 +104,21 @@ pub enum Commands {
         accounting: AccountingArg,
 
         /// Target send rate for UDP tests in megabits per second. 0
-        /// (the default) means "saturate". Above ~100 Mbps the
-        /// blaster's `tokio::time::sleep` pacing starts bunching
-        /// packets; for those rates either accept the bursting or
-        /// shape via `tc`.
+        /// (the default) means "saturate".
         #[arg(long, default_value = "0")]
         target_rate_mbps: u64,
     },
 
-    /// Run as server
+    /// Run as server.
+    ///
+    /// The server publishes a single JSON control endpoint on
+    /// `--control-port`. Every enabled test protocol binds its own
+    /// distinct (OS-assigned ephemeral) port and is advertised through
+    /// that endpoint; clients only ever need the control port.
     Server {
         /// Enable all server modes
         #[arg(short, long, action = clap::ArgAction::SetTrue)]
-        #[clap(conflicts_with_all = ["tcp", "udp", "http", "https"])]
+        #[clap(conflicts_with_all = ["tcp", "udp", "http", "https", "http3", "quic"])]
         all: bool,
 
         /// Enable TCP server mode
@@ -119,41 +129,56 @@ pub enum Commands {
         #[arg(long)]
         udp: bool,
 
-        /// Enable unencrypted HTTP server modes (i.e. HTTP/1.1 without TLS, h2c)
+        /// Enable raw QUIC server mode
+        #[arg(long)]
+        quic: bool,
+
+        /// Enable unencrypted HTTP server modes (HTTP/1.1 and h2c, on
+        /// separate ports each)
         #[arg(long, alias = "http1")]
         http: bool,
 
-        /// Enable HTTPS server modes (i.e. HTTP/2, HTTP/3)
+        /// Enable HTTPS server mode (HTTP/2 over TLS)
         #[arg(long)]
         https: bool,
+
+        /// Enable HTTP/3 server mode (over QUIC)
+        #[arg(long)]
+        http3: bool,
 
         /// Bind to specific interface. Defaults to 0.0.0.0
         #[arg(short, long, default_value = "0.0.0.0")]
         bind: IpAddr,
 
-        /// Listen port for TCP server
+        /// Control / handshake endpoint port. The one port a user
+        /// normally picks; everything else is auto-assigned.
+        #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
+        control_port: u16,
+
+        /// Fixed-port overrides (default: OS-assigned ephemeral). Kept
+        /// for port-forwarded / firewalled deployments.
         #[arg(long)]
         tcp_port: Option<u16>,
-
-        /// Listen port for UDP server  
         #[arg(long)]
         udp_port: Option<u16>,
-
-        /// Listen port for HTTP server
         #[arg(long)]
-        http_port: Option<u16>,
-
-        /// Listen port for HTTPS server
+        http1_port: Option<u16>,
+        #[arg(long)]
+        h2c_port: Option<u16>,
         #[arg(long)]
         https_port: Option<u16>,
+        #[arg(long)]
+        http3_port: Option<u16>,
+        #[arg(long)]
+        quic_port: Option<u16>,
 
-        /// TLS certificate file path (*.pem).
-        /// If not specified, defaults to `cert.pem` in the current directory.
+        /// TLS certificate file path (*.pem). Shared by the HTTPS,
+        /// HTTP/3 and raw-QUIC listeners. A self-signed certificate is
+        /// generated if omitted.
         #[arg(long)]
         cert: Option<PathBuf>,
 
         /// TLS private key file path (*.pem).
-        /// If not specified, defaults to `key.pem` in the current directory.
         #[arg(long)]
         key: Option<PathBuf>,
     },
@@ -169,29 +194,21 @@ pub enum Commands {
         export_html: Option<PathBuf>,
     },
 
-    /// Run the comprehensive end-to-end suite against a server. Drives
-    /// every protocol speed-cli supports (TCP, UDP, HTTP/1, h2c,
-    /// HTTP/2-TLS) and produces one combined report. HTTP/3 is skipped
-    /// because the bundled server does not yet implement it.
+    /// Run the comprehensive end-to-end suite against a server. Performs
+    /// the control handshake, then drives every protocol the server
+    /// advertises — TCP, UDP, raw QUIC, HTTP/1.1, h2c, HTTP/2-TLS and
+    /// HTTP/3 — producing one combined report.
     Suite {
         /// Server hostname or IP. Defaults to 127.0.0.1.
         #[arg(short, long, default_value = "127.0.0.1")]
         server: String,
 
-        /// TCP/UDP port (servers expose both on the same port).
-        #[arg(long, default_value = "5201")]
-        tcp_udp_port: u16,
+        /// Control endpoint port. The suite handshakes here to discover
+        /// every test listener.
+        #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
+        control_port: u16,
 
-        /// HTTP (cleartext) port.
-        #[arg(long, default_value = "8080")]
-        http_port: u16,
-
-        /// HTTPS port.
-        #[arg(long, default_value = "8443")]
-        https_port: u16,
-
-        /// Duration *per phase* in seconds. Total wall-clock is roughly
-        /// this × (number of phases) (~7 phases by default).
+        /// Duration *per phase* in seconds.
         #[arg(short, long, default_value = "8")]
         duration: u64,
 
@@ -207,8 +224,8 @@ pub enum Commands {
         #[arg(long, default_value = "100")]
         udp_target_rate_mbps: u64,
 
-        /// Skip TLS phases (HTTPS/HTTP-2). Useful when the server
-        /// wasn't started with `--https`.
+        /// Skip TLS phases (HTTP/2-TLS, HTTP/3) even if the server
+        /// advertises them.
         #[arg(long)]
         no_tls: bool,
 

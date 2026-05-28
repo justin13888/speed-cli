@@ -1,53 +1,63 @@
-//! Comprehensive end-to-end suite. Runs each protocol the tool
-//! supports against the same server, stitches the per-protocol
-//! [`TestReport`]s into a single [`SuiteReport`], and prints / exports
-//! a unified result. The shape is deliberately opinionated - one
-//! command produces one report covering every protocol - because
-//! that's the workflow that the CLI's "test between two arbitrary
-//! machines" mission asks for.
+//! Comprehensive end-to-end suite. Performs the control handshake,
+//! then runs every protocol the server advertises against it, stitches
+//! the per-protocol [`TestReport`]s into a single [`SuiteReport`], and
+//! prints / exports a unified result.
+//!
+//! Because the suite is handshake-driven, the manifest *is* the
+//! availability map: a phase runs if and only if the server advertised
+//! that transport. There is no separate port-probing step.
 
 use std::time::Duration;
 
 use colored::Colorize as _;
 use eyre::Result;
-use tokio::net::{TcpStream, UdpSocket};
-use tokio::time::timeout;
 
 use crate::TestType;
+use crate::control::{Handshake, TestTransport, perform_handshake};
 use crate::performance::http::HttpVersion;
 use crate::performance::http::client::run_http_test;
+use crate::performance::quic::client::run_quic_client;
 use crate::performance::tcp::client::run_tcp_client;
 use crate::performance::udp::client::run_udp_client;
 use crate::report::{
-    HttpTestConfig, SuiteReport, TcpTestConfig, ThroughputAccounting, UdpTestConfig,
+    HttpTestConfig, PhaseParams, QuicTestConfig, SuiteReport, TcpTestConfig, ThroughputAccounting,
+    UdpTestConfig,
 };
 
-/// User-facing knobs for the suite. Defaults are calibrated to take
-/// a couple of minutes total against a healthy LAN; users testing on a
-/// flaky link should bump `phase_duration` so percentiles stabilize.
+/// Shared I/O unit for the suite: the TCP/QUIC per-operation throughput
+/// payload *and* the HTTP chunk size. Unifying these is what makes the
+/// per-protocol rows comparable.
+const SUITE_IO_SIZE: usize = 64 * 1024;
+/// Total HTTP request body. Larger than [`SUITE_IO_SIZE`] so HTTP phases
+/// are not dominated by per-request setup cost; streamed in
+/// `SUITE_IO_SIZE`-sized chunks.
+const SUITE_HTTP_PAYLOAD: usize = 8 * 1024 * 1024;
+/// UDP datagram size. An intrinsic exception to [`SUITE_IO_SIZE`]: it
+/// must stay below the path MTU to avoid IP fragmentation, which would
+/// make the UDP test measure something qualitatively different.
+const SUITE_UDP_DATAGRAM: usize = 1200;
+
+/// User-facing knobs for the suite.
 #[derive(Debug, Clone)]
 pub struct SuiteConfig {
     pub server: String,
-    /// TCP/UDP port (defaults to 5201).
-    pub tcp_udp_port: u16,
-    /// HTTP (cleartext) port (defaults to 8080).
-    pub http_port: u16,
-    /// HTTPS port (defaults to 8443).
-    pub https_port: u16,
-    /// Wall-clock per phase. Bigger = more samples, longer total run.
+    /// Control endpoint port — the only port the user supplies.
+    pub control_port: u16,
+    /// Wall-clock per phase.
     pub phase_duration: Duration,
-    /// Warmup window inside each phase (counts against phase_duration).
+    /// Warmup window inside each phase (counts against `phase_duration`).
     pub warmup: Duration,
-    /// Parallel TCP connections / HTTP streams. UDP runs single-stream
-    /// today (multi-stream UDP is on the roadmap).
+    /// Parallel TCP connections / HTTP streams / QUIC streams.
     pub connections: usize,
-    /// Target rate for the UDP throughput phase, in Mbps. 0 = saturate
-    /// (note: pacing above ~100 Mbps is approximate; see UDP docs).
+    /// Target rate for the UDP throughput phase, in Mbps. 0 = saturate.
     pub udp_target_rate_mbps: u64,
+    /// Shared I/O unit: TCP/QUIC throughput payload and HTTP chunk size.
+    pub io_size: usize,
+    /// Total HTTP request body size, streamed in `io_size` chunks.
+    pub http_payload: usize,
     pub accounting: ThroughputAccounting,
-    /// HTTPS phase needs TLS but we always trust self-signed; this
-    /// flag merely suppresses the HTTPS phase entirely if the user
-    /// knows the server has no TLS certificate available.
+    /// When false, TLS phases (HTTP/2-TLS, HTTP/3) are force-skipped
+    /// even if the server advertises them.
     pub include_tls: bool,
 }
 
@@ -55,169 +65,194 @@ impl SuiteConfig {
     pub fn new(server: String) -> Self {
         Self {
             server,
-            tcp_udp_port: 5201,
-            http_port: 8080,
-            https_port: 8443,
+            control_port: crate::constants::DEFAULT_CONTROL_PORT,
             phase_duration: Duration::from_secs(8),
             warmup: Duration::from_secs(1),
             connections: 4,
             udp_target_rate_mbps: 100,
+            io_size: SUITE_IO_SIZE,
+            http_payload: SUITE_HTTP_PAYLOAD,
             accounting: ThroughputAccounting::Goodput,
             include_tls: true,
         }
     }
 }
 
-/// Drive the whole suite. On a per-phase failure (server unreachable,
-/// pre-flight rejected, etc.) we record the reason and continue so
-/// the user still gets numbers from the protocols that worked.
+/// Drive the whole suite. The handshake runs first: a protocol-version
+/// mismatch aborts the entire suite immediately (no point running
+/// phases against an incompatible server).
 pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
+    let handshake = perform_handshake(&cfg.server, cfg.control_port).await?;
     let mut suite = SuiteReport::new(cfg.server.clone());
 
-    // Probe each listener up front so we can report which phases will
-    // be skipped *before* the user waits through their durations.
-    let availability = probe_listeners(&cfg).await;
-    eprintln!(
-        "{}",
-        format!(
-            "Suite probe: tcp={} udp={} http={} https={}",
-            ok(availability.tcp),
-            ok(availability.udp),
-            ok(availability.http),
-            ok(availability.https),
-        )
-        .bright_white()
-        .bold()
-    );
-
-    let dur_secs = cfg.phase_duration.as_secs();
-
     // ── TCP ─────────────────────────────────────────────────────────
-    if availability.tcp {
-        run_phase(&mut suite, "tcp/latency", run_tcp_phase(&cfg, TestType::LatencyOnly, dur_secs)).await;
-        run_phase(&mut suite, "tcp/bidirectional", run_tcp_phase(&cfg, TestType::Bidirectional, dur_secs)).await;
-        run_phase(&mut suite, "tcp/full-duplex", run_tcp_phase(&cfg, TestType::FullDuplex, dur_secs)).await;
+    if handshake.manifest.listener(TestTransport::TcpRaw).is_some() {
+        for tt in [
+            TestType::LatencyOnly,
+            TestType::Bidirectional,
+            TestType::FullDuplex,
+        ] {
+            let params = tcp_quic_params(&cfg, tt);
+            let label = format!("tcp/{}", phase_suffix(tt));
+            run_phase(
+                &mut suite,
+                &label,
+                params.clone(),
+                run_tcp_phase(&handshake, &cfg, params),
+            )
+            .await;
+        }
     } else {
-        suite.skip("tcp/*", "TCP listener not reachable");
+        suite.skip("tcp/*", "TCP listener not advertised by server");
     }
 
     // ── UDP ─────────────────────────────────────────────────────────
-    if availability.udp {
-        run_phase(&mut suite, "udp/latency", run_udp_phase(&cfg, TestType::LatencyOnly, dur_secs)).await;
-        run_phase(&mut suite, "udp/bidirectional", run_udp_phase(&cfg, TestType::Bidirectional, dur_secs)).await;
+    // No full-duplex row: UDP has no single-socket bidirectional mode.
+    if handshake.manifest.listener(TestTransport::UdpBlaster).is_some() {
+        for tt in [TestType::LatencyOnly, TestType::Bidirectional] {
+            let params = udp_params(&cfg, tt);
+            let label = format!("udp/{}", phase_suffix(tt));
+            run_phase(
+                &mut suite,
+                &label,
+                params.clone(),
+                run_udp_phase(&handshake, &cfg, params),
+            )
+            .await;
+        }
     } else {
-        suite.skip("udp/*", "UDP listener not reachable");
+        suite.skip("udp/*", "UDP listener not advertised by server");
     }
 
-    // ── HTTP/1.1 + h2c (cleartext) ──────────────────────────────────
-    if availability.http {
-        run_phase(
-            &mut suite,
-            "http1/bidirectional",
-            run_http_phase(&cfg, HttpVersion::HTTP1, cfg.http_port, dur_secs),
-        )
-        .await;
-        run_phase(
-            &mut suite,
-            "h2c/bidirectional",
-            run_http_phase(&cfg, HttpVersion::H2C, cfg.http_port, dur_secs),
-        )
-        .await;
+    // ── Raw QUIC ────────────────────────────────────────────────────
+    if handshake.manifest.listener(TestTransport::QuicRaw).is_some() {
+        for tt in [
+            TestType::LatencyOnly,
+            TestType::Bidirectional,
+            TestType::FullDuplex,
+        ] {
+            let params = tcp_quic_params(&cfg, tt);
+            let label = format!("quic/{}", phase_suffix(tt));
+            run_phase(
+                &mut suite,
+                &label,
+                params.clone(),
+                run_quic_phase(&handshake, &cfg, params),
+            )
+            .await;
+        }
     } else {
-        suite.skip("http1/*", "HTTP listener not reachable");
-        suite.skip("h2c/*", "HTTP listener not reachable");
+        suite.skip("quic/*", "raw-QUIC listener not advertised by server");
     }
 
-    // ── HTTPS (HTTP/2) ──────────────────────────────────────────────
-    if cfg.include_tls && availability.https {
-        run_phase(
-            &mut suite,
-            "http2/bidirectional",
-            run_http_phase(&cfg, HttpVersion::HTTP2, cfg.https_port, dur_secs),
-        )
-        .await;
-    } else if cfg.include_tls {
-        suite.skip("http2/*", "HTTPS listener not reachable");
+    // ── HTTP/1.1 ────────────────────────────────────────────────────
+    if handshake.manifest.listener(TestTransport::Http1).is_some() {
+        run_http_set(&mut suite, &handshake, &cfg, "http1", HttpVersion::HTTP1, TestTransport::Http1).await;
+    } else {
+        suite.skip("http1/*", "HTTP/1.1 listener not advertised by server");
     }
 
-    // HTTP/3 server is not yet implemented in this binary's `server`
-    // command. The client supports it, so users can target an external
-    // h3 server; we don't run it here automatically since we can't
-    // probe it without a full TLS+QUIC handshake.
-    suite.skip(
-        "http3/*",
-        "HTTP/3 server is not implemented in speed-cli yet (roadmap)",
-    );
+    // ── h2c ─────────────────────────────────────────────────────────
+    if handshake.manifest.listener(TestTransport::H2c).is_some() {
+        run_http_set(&mut suite, &handshake, &cfg, "h2c", HttpVersion::H2C, TestTransport::H2c).await;
+    } else {
+        suite.skip("h2c/*", "h2c listener not advertised by server");
+    }
+
+    // ── HTTP/2 over TLS ─────────────────────────────────────────────
+    if !cfg.include_tls {
+        suite.skip("http2/*", "TLS phases skipped (--no-tls)");
+    } else if handshake.manifest.listener(TestTransport::Http2Tls).is_some() {
+        run_http_set(&mut suite, &handshake, &cfg, "http2", HttpVersion::HTTP2, TestTransport::Http2Tls).await;
+    } else {
+        suite.skip("http2/*", "HTTP/2-TLS listener not advertised by server");
+    }
+
+    // ── HTTP/3 ──────────────────────────────────────────────────────
+    if !cfg.include_tls {
+        suite.skip("http3/*", "TLS phases skipped (--no-tls)");
+    } else if handshake.manifest.listener(TestTransport::Http3).is_some() {
+        run_http_set(&mut suite, &handshake, &cfg, "http3", HttpVersion::HTTP3, TestTransport::Http3).await;
+    } else {
+        suite.skip("http3/*", "HTTP/3 listener not advertised by server");
+    }
 
     suite.finalize();
     Ok(suite)
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct Availability {
-    tcp: bool,
-    udp: bool,
-    http: bool,
-    https: bool,
-}
-
-fn ok(b: bool) -> &'static str {
-    if b { "✓" } else { "✗" }
-}
-
-async fn probe_listeners(cfg: &SuiteConfig) -> Availability {
-    let mut a = Availability::default();
-    let probe_to = Duration::from_secs(2);
-
-    a.tcp = matches!(
-        timeout(
-            probe_to,
-            TcpStream::connect(format!("{}:{}", cfg.server, cfg.tcp_udp_port)),
-        )
-        .await,
-        Ok(Ok(_))
-    );
-
-    // For UDP we send a tiny PING and wait briefly for any response.
-    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await
-        && sock
-            .connect(format!("{}:{}", cfg.server, cfg.tcp_udp_port))
-            .await
-            .is_ok()
-    {
-        use crate::performance::udp::protocol::{BlasterPacket, now_us};
-        let p = BlasterPacket::Ping {
-            send_ts_us: now_us(),
-        };
-        if sock.send(&p.encode_to_vec(None)).await.is_ok() {
-            let mut buf = [0u8; 256];
-            a.udp = matches!(timeout(probe_to, sock.recv(&mut buf)).await, Ok(Ok(_)));
-        }
+/// Phase-label suffix for a test type. Kept stable and protocol-agnostic
+/// so the suite matrix lines up row-for-row: the HTTP `*/full-duplex`
+/// rows run [`TestType::Simultaneous`] but still report under the
+/// `full-duplex` suffix.
+fn phase_suffix(tt: TestType) -> &'static str {
+    match tt {
+        TestType::LatencyOnly => "latency",
+        TestType::Bidirectional => "bidirectional",
+        TestType::FullDuplex | TestType::Simultaneous => "full-duplex",
+        TestType::Download => "download",
+        TestType::Upload => "upload",
     }
-
-    // HTTP / HTTPS: just see if the TCP port accepts. The deeper
-    // protocol pre-flight is done by the per-phase runner.
-    a.http = matches!(
-        timeout(
-            probe_to,
-            TcpStream::connect(format!("{}:{}", cfg.server, cfg.http_port)),
-        )
-        .await,
-        Ok(Ok(_))
-    );
-    a.https = matches!(
-        timeout(
-            probe_to,
-            TcpStream::connect(format!("{}:{}", cfg.server, cfg.https_port)),
-        )
-        .await,
-        Ok(Ok(_))
-    );
-
-    a
 }
 
-async fn run_phase<F>(suite: &mut SuiteReport, label: &'static str, fut: F)
+/// Effective parameters for a TCP or raw-QUIC phase. Both share the
+/// suite I/O size and the same connection convention (1 for latency).
+fn tcp_quic_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
+    let is_latency = matches!(test_type, TestType::LatencyOnly);
+    PhaseParams {
+        payload_size: (!is_latency).then_some(cfg.io_size),
+        io_unit: cfg.io_size,
+        connections: if is_latency { 1 } else { cfg.connections },
+        duration: cfg.phase_duration,
+        test_type,
+        deviations: Vec::new(),
+    }
+}
+
+/// Effective parameters for a UDP phase. UDP cannot match the shared
+/// I/O size (datagrams must stay MTU-safe) and is single-stream, so
+/// both facts are recorded as intrinsic deviations.
+fn udp_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
+    let is_latency = matches!(test_type, TestType::LatencyOnly);
+    PhaseParams {
+        payload_size: (!is_latency).then_some(SUITE_UDP_DATAGRAM),
+        io_unit: SUITE_UDP_DATAGRAM,
+        connections: 1,
+        duration: cfg.phase_duration,
+        test_type,
+        deviations: vec![
+            "UDP datagram kept MTU-safe (1200 B); cannot match the 64 KB TCP/QUIC I/O unit"
+                .to_string(),
+            "UDP blaster is single-stream; the suite --connections value does not apply"
+                .to_string(),
+        ],
+    }
+}
+
+/// Effective parameters for an HTTP phase of any version. The HTTP
+/// chunk size is the suite I/O unit; the bulk request body is the
+/// larger `http_payload`.
+fn http_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
+    let is_latency = matches!(test_type, TestType::LatencyOnly);
+    let mut deviations = Vec::new();
+    if matches!(test_type, TestType::Simultaneous) {
+        deviations.push(
+            "HTTP is request/response; the full-duplex row runs Simultaneous \
+             (parallel up/down streams) as the closest analog"
+                .to_string(),
+        );
+    }
+    PhaseParams {
+        payload_size: (!is_latency).then_some(cfg.http_payload),
+        io_unit: cfg.io_size,
+        connections: if is_latency { 1 } else { cfg.connections },
+        duration: cfg.phase_duration,
+        test_type,
+        deviations,
+    }
+}
+
+async fn run_phase<F>(suite: &mut SuiteReport, label: &str, params: PhaseParams, fut: F)
 where
     F: std::future::Future<Output = Result<crate::report::TestReport>>,
 {
@@ -226,7 +261,7 @@ where
         format!("\n── Suite phase: {label} ──").bright_magenta().bold()
     );
     match fut.await {
-        Ok(report) => suite.record(label, report),
+        Ok(report) => suite.record(label, params, report),
         Err(e) => {
             tracing::warn!(phase = label, error = %e, "suite phase failed; continuing");
             suite.skip(label, e.to_string());
@@ -234,27 +269,46 @@ where
     }
 }
 
-async fn run_tcp_phase(
+/// Run the full HTTP matrix (latency / bidirectional / full-duplex) for
+/// one HTTP version against one advertised listener.
+async fn run_http_set(
+    suite: &mut SuiteReport,
+    handshake: &Handshake,
     cfg: &SuiteConfig,
-    test_type: TestType,
-    duration: u64,
+    proto: &str,
+    version: HttpVersion,
+    transport: TestTransport,
+) {
+    for tt in [
+        TestType::LatencyOnly,
+        TestType::Bidirectional,
+        TestType::Simultaneous,
+    ] {
+        let params = http_params(cfg, tt);
+        let label = format!("{proto}/{}", phase_suffix(tt));
+        run_phase(
+            suite,
+            &label,
+            params.clone(),
+            run_http_phase(handshake, cfg, version, transport, params),
+        )
+        .await;
+    }
+}
+
+async fn run_tcp_phase(
+    handshake: &Handshake,
+    cfg: &SuiteConfig,
+    params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
-    let payload_sizes: Vec<usize> = if matches!(test_type, TestType::LatencyOnly) {
-        Vec::new() // unused
-    } else {
-        vec![65536]
-    };
-    let connections = if matches!(test_type, TestType::LatencyOnly) {
-        1
-    } else {
-        cfg.connections
-    };
+    let (host, port) = handshake.endpoint(TestTransport::TcpRaw)?;
+    let payload_sizes: Vec<usize> = params.payload_size.into_iter().collect();
     let conf = TcpTestConfig::new(
-        cfg.server.clone(),
-        Some(cfg.tcp_udp_port),
-        duration,
-        connections,
-        test_type,
+        host,
+        Some(port),
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
         payload_sizes,
     )
     .with_warmup(cfg.warmup)
@@ -263,21 +317,18 @@ async fn run_tcp_phase(
 }
 
 async fn run_udp_phase(
+    handshake: &Handshake,
     cfg: &SuiteConfig,
-    test_type: TestType,
-    duration: u64,
+    params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
-    let payload_sizes: Vec<usize> = if matches!(test_type, TestType::LatencyOnly) {
-        Vec::new()
-    } else {
-        vec![1200]
-    };
+    let (host, port) = handshake.endpoint(TestTransport::UdpBlaster)?;
+    let payload_sizes: Vec<usize> = params.payload_size.into_iter().collect();
     let conf = UdpTestConfig::new(
-        cfg.server.clone(),
-        Some(cfg.tcp_udp_port),
-        duration,
-        1,
-        test_type,
+        host,
+        Some(port),
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
         payload_sizes,
     )
     .with_warmup(cfg.warmup)
@@ -286,25 +337,47 @@ async fn run_udp_phase(
     run_udp_client(conf).await
 }
 
+async fn run_quic_phase(
+    handshake: &Handshake,
+    cfg: &SuiteConfig,
+    params: PhaseParams,
+) -> Result<crate::report::TestReport> {
+    let (host, port) = handshake.endpoint(TestTransport::QuicRaw)?;
+    let payload_sizes: Vec<usize> = params.payload_size.into_iter().collect();
+    let conf = QuicTestConfig::new(
+        host,
+        Some(port),
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
+        payload_sizes,
+    )
+    .with_warmup(cfg.warmup)
+    .with_accounting(cfg.accounting);
+    run_quic_client(conf).await
+}
+
 async fn run_http_phase(
+    handshake: &Handshake,
     cfg: &SuiteConfig,
     version: HttpVersion,
-    port: u16,
-    duration: u64,
+    transport: TestTransport,
+    params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
-    // Smaller payload than the standalone HTTP test - we want this
-    // suite to finish in minutes, not hours. 8 MB is large enough that
-    // the test isn't dominated by request setup but small enough to
-    // complete within the phase duration on a 100 Mbps link.
-    let payload_sizes: Vec<usize> = vec![8 * 1024 * 1024];
+    let (host, port) = handshake.endpoint(transport)?;
+    // For latency phases `payload_size` is `None`; `HttpTestConfig::new`
+    // backfills DEFAULT_HTTP_PAYLOAD_SIZES on an empty set, so pass the
+    // I/O unit explicitly to keep the recorded config honest. The HTTP
+    // chunk size is unified to the suite I/O unit.
+    let payload_sizes: Vec<usize> = vec![params.payload_size.unwrap_or(cfg.io_size)];
     let conf = HttpTestConfig::new(
-        cfg.server.clone(),
+        host,
         Some(port),
-        duration,
-        cfg.connections,
-        TestType::Bidirectional,
+        params.duration.as_secs(),
+        params.connections,
+        params.test_type,
         payload_sizes,
-        Some(1024 * 1024),
+        Some(cfg.io_size),
         version,
     )
     .with_warmup(cfg.warmup)

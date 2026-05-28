@@ -37,6 +37,8 @@ pub enum NetworkProtocol {
     Http,
     Tcp,
     Udp,
+    /// Raw QUIC stream throughput (the QUIC analog of `Tcp`).
+    Quic,
 }
 
 impl NetworkTestResult {
@@ -70,6 +72,16 @@ impl NetworkTestResult {
         }
     }
 
+    pub fn new_quic() -> Self {
+        Self {
+            latency: None,
+            download: IndexMap::new(),
+            upload: IndexMap::new(),
+            protocol: NetworkProtocol::Quic,
+            accounting: ThroughputAccounting::Goodput,
+        }
+    }
+
     pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
         self.accounting = accounting;
         self
@@ -79,7 +91,7 @@ impl NetworkTestResult {
     pub fn wire_overhead_per_segment(&self) -> usize {
         match self.protocol {
             NetworkProtocol::Tcp | NetworkProtocol::Http => WIRE_OVERHEAD_TCP_BYTES,
-            NetworkProtocol::Udp => WIRE_OVERHEAD_UDP_BYTES,
+            NetworkProtocol::Udp | NetworkProtocol::Quic => WIRE_OVERHEAD_UDP_BYTES,
         }
     }
 
@@ -112,6 +124,7 @@ impl Display for NetworkTestResult {
             NetworkProtocol::Http => "HTTP ",
             NetworkProtocol::Tcp => "TCP ",
             NetworkProtocol::Udp => "UDP ",
+            NetworkProtocol::Quic => "QUIC ",
         };
 
         // Display latency if available

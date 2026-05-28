@@ -26,7 +26,7 @@ pub use suite::*;
 ///
 /// All `*_us` fields in the schema are `u64` microseconds offset from
 /// `TestReport.start_time` unless documented otherwise.
-pub const REPORT_SCHEMA_VERSION: u32 = 3;
+pub const REPORT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestReport {

@@ -1,3 +1,19 @@
+/// Wire-compatibility version for the control handshake and every
+/// per-protocol test framing. Bump on ANY incompatible change to a test
+/// protocol or the manifest shape. Distinct from `CARGO_PKG_VERSION`
+/// (binary semver) and `REPORT_SCHEMA_VERSION` (report serialization).
+/// The client requires an exact match against the server's value and
+/// aborts before running any test otherwise.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Default port for the control / handshake endpoint — the one port a
+/// user normally picks. Every other listener binds an OS-assigned
+/// ephemeral port and is discovered via the control manifest.
+pub const DEFAULT_CONTROL_PORT: u16 = 9000;
+
+/// Legacy per-protocol default ports. Used only as fallbacks when an
+/// explicit `--<proto>-port` override is supplied; the normal path
+/// binds ephemeral ports (`:0`) and advertises them in the manifest.
 pub const DEFAULT_TCP_PORT: u16 = 5201;
 pub const DEFAULT_UDP_PORT: u16 = 5201;
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
