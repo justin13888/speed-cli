@@ -1,3 +1,4 @@
+pub mod engine;
 pub mod handshake;
 pub mod http;
 pub mod quic;

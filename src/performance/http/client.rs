@@ -16,18 +16,17 @@ use tracing::trace;
 
 use crate::{
     TestType,
+    performance::engine::{
+        LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+        measurement_duration_us, offset_us,
+    },
     performance::http::HttpVersion,
     performance::http::server::decode_base64_urlsafe,
     report::{
         ConnectionError, HttpTestConfig, LatencyMeasurement, LatencyResult, NetworkTestResult,
         PeerIdentity, Sample, StreamSamples, TestReport, ThroughputResult,
     },
-    utils::{
-        format::format_bytes,
-        instrumentation::{
-            LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        },
-    },
+    utils::format::format_bytes,
 };
 
 const SERVER_ID_HEADER: &str = "x-speed-cli-server-id";
@@ -47,18 +46,6 @@ fn parse_server_identity(resp: &reqwest::Response) -> Option<PeerIdentity> {
     let value = resp.headers().get(SERVER_ID_HEADER)?.to_str().ok()?;
     let bytes = decode_base64_urlsafe(value)?;
     ciborium::from_reader::<PeerIdentity, _>(bytes.as_slice()).ok()
-}
-
-fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
-    end.duration_since(start)
-        .saturating_sub(warmup)
-        .max(Duration::from_millis(1))
-        .as_micros() as u64
-}
-
-#[inline]
-fn offset_us(start: Instant, now: Instant) -> u64 {
-    now.duration_since(start).as_micros() as u64
 }
 
 fn collect_streams(

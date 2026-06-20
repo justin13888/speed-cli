@@ -21,14 +21,15 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::TestType;
+use crate::performance::engine::{
+    LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+    measurement_duration_us, offset_us,
+};
 use crate::performance::handshake::client_hello_io;
 use crate::performance::quic::QUIC_RAW_ALPN;
 use crate::report::{
     ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
     QuicTestConfig, Sample, StreamSamples, TestReport, ThroughputResult,
-};
-use crate::utils::instrumentation::{
-    LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
 };
 
 /// Certificate verifier that accepts any server certificate. This
@@ -81,18 +82,6 @@ impl ServerCertVerifier for AcceptAnyServerCert {
             SignatureScheme::RSA_PKCS1_SHA512,
         ]
     }
-}
-
-#[inline]
-fn offset_us(start: Instant, now: Instant) -> u64 {
-    now.duration_since(start).as_micros() as u64
-}
-
-fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
-    end.duration_since(start)
-        .saturating_sub(warmup)
-        .max(Duration::from_millis(1))
-        .as_micros() as u64
 }
 
 fn client_config() -> Result<ClientConfig> {

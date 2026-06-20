@@ -56,6 +56,7 @@ fn create_optimized_runtime() -> tokio::runtime::Runtime {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     utils::logging::init(cli.verbose, cli.quiet, cli.color);
+    performance::engine::progress::set_enabled(!cli.quiet);
     trace!("Parsed CLI arguments: {cli:#?}");
 
     match cli.command {

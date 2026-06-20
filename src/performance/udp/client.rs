@@ -27,30 +27,17 @@ use tracing::{debug, trace};
 use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
 use crate::{
     TestType,
+    performance::engine::{
+        LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+        measurement_duration_us, offset_us,
+    },
     report::{
         ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
         Sample, StreamSamples, TestReport, ThroughputResult, UdpRunStats, UdpStatsSide,
         UdpTestConfig,
     },
-    utils::{
-        format::format_bytes,
-        instrumentation::{
-            LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        },
-    },
+    utils::format::format_bytes,
 };
-
-fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
-    end.duration_since(start)
-        .saturating_sub(warmup)
-        .max(Duration::from_millis(1))
-        .as_micros() as u64
-}
-
-#[inline]
-fn offset_us(start: Instant, now: Instant) -> u64 {
-    now.duration_since(start).as_micros() as u64
-}
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
