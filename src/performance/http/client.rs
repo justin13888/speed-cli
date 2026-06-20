@@ -104,7 +104,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     let client = create_http_client(&config.http_version).await?;
 
     let info_url = format!("{}/info", config.server_url);
-    let mut server_identity: Option<PeerIdentity> = None;
+    let server_identity: Option<PeerIdentity>;
     let preflight_remote = match tokio::time::timeout(
         Duration::from_secs(5),
         apply_version(client.get(&info_url), config.http_version).send(),

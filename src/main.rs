@@ -7,38 +7,28 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 
 use clap::Parser;
-use cli::{Cli, Commands};
-use performance::suite::{SuiteConfig, run_suite};
-use performance::tcp::client::run_tcp_client;
-use performance::udp::client::run_udp_client;
-
-pub use utils::types::*;
-
-use crate::constants::MAX_HTTP_UPLOAD_SIZE;
-use crate::control::{
+use speed_cli::ClientMode;
+use speed_cli::cli::{Cli, Commands};
+use speed_cli::constants::MAX_HTTP_UPLOAD_SIZE;
+use speed_cli::control::{
     ControlServerConfig, EnabledProtocols, PortOverrides, ServerManifest, ServerRuntime,
     TestTransport, bind_all, perform_handshake, run_control_server,
 };
-use crate::performance::http::HttpVersion;
-use crate::performance::http::client::run_http_test;
-use crate::performance::quic::client::run_quic_client;
-use crate::report::{
+use speed_cli::performance::http::HttpVersion;
+use speed_cli::performance::http::client::run_http_test;
+use speed_cli::performance::quic::client::run_quic_client;
+use speed_cli::performance::suite::{SuiteConfig, run_suite};
+use speed_cli::performance::tcp::client::run_tcp_client;
+use speed_cli::performance::udp::client::run_udp_client;
+use speed_cli::report::{
     DEFAULT_TCP_READ_BUFFER, HttpTestConfig, QuicTestConfig, TcpTestConfig, TestReport,
     UdpTestConfig,
 };
-use crate::utils::export::{export_report, export_report_html};
-use crate::utils::file::can_write;
-use crate::utils::import::import_report_cbor;
-use crate::utils::progress::with_progress_counter;
-use crate::utils::tls::TlsMaterial;
-
-mod cli;
-mod constants;
-mod control;
-mod performance;
-mod renderer;
-mod report;
-mod utils;
+use speed_cli::utils::export::{export_report, export_report_html};
+use speed_cli::utils::file::can_write;
+use speed_cli::utils::import::import_report_cbor;
+use speed_cli::utils::progress::with_progress_counter;
+use speed_cli::utils::tls::TlsMaterial;
 
 /// Creates an optimized Tokio runtime for network performance testing
 #[allow(dead_code)]
@@ -55,8 +45,8 @@ fn create_optimized_runtime() -> tokio::runtime::Runtime {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    utils::logging::init(cli.verbose, cli.quiet, cli.color);
-    performance::engine::progress::set_enabled(!cli.quiet);
+    speed_cli::utils::logging::init(cli.verbose, cli.quiet, cli.color);
+    speed_cli::performance::engine::progress::set_enabled(!cli.quiet);
     trace!("Parsed CLI arguments: {cli:#?}");
 
     match cli.command {
@@ -88,8 +78,12 @@ async fn main() -> Result<()> {
             }
             let warmup = std::time::Duration::from_secs(warmup);
             let accounting = match accounting {
-                cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
-                cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
+                speed_cli::cli::AccountingArg::Goodput => {
+                    speed_cli::report::ThroughputAccounting::Goodput
+                }
+                speed_cli::cli::AccountingArg::Wire => {
+                    speed_cli::report::ThroughputAccounting::Wire
+                }
             };
             let target_rate_bps: u64 = target_rate_mbps.saturating_mul(1_000_000);
 
@@ -500,8 +494,12 @@ async fn main() -> Result<()> {
                 connections,
                 udp_target_rate_mbps,
                 accounting: match accounting {
-                    cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
-                    cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
+                    speed_cli::cli::AccountingArg::Goodput => {
+                        speed_cli::report::ThroughputAccounting::Goodput
+                    }
+                    speed_cli::cli::AccountingArg::Wire => {
+                        speed_cli::report::ThroughputAccounting::Wire
+                    }
                 },
                 include_tls: !no_tls,
                 // `server` plus the shared I/O-size defaults come from `new`.

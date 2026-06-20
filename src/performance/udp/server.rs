@@ -36,6 +36,9 @@ const EVICTION_INTERVAL: Duration = Duration::from_secs(30);
 /// react to subsequent packets after the START handshake.
 #[derive(Debug)]
 struct Session {
+    /// Recorded at START; not yet branched on, but kept as session state for
+    /// diagnostics and future per-mode packet routing.
+    #[allow(dead_code)]
     mode: Mode,
     last_seen: Instant,
     /// Receiver-side stats - meaningful for Upload sessions; we

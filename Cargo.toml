@@ -18,16 +18,10 @@ reqwest = { version = "0.12.22", features = [
 ] }
 hyper = { version = "1.0", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
-http-body-util = "0.1"
 rustls = { version = "0.23.29", features = ["aws-lc-rs"] }
-tokio-rustls = "0.26"
-url = "2.5"
-statistical = "1.0.0"
-trust-dns-resolver = "0.23"
 rand = "0.9"
 futures = "0.3"
 bytes = "1.5"
-urlencoding = "2.1"
 tracing = { version = "0.1.41", features = ["release_max_level_debug"] }
 eyre = "0.6.12"
 thiserror = "2.0.12"
@@ -35,7 +29,6 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 num-format = "0.4.4"
 axum = "0.8.4"
 axum-server = { version = "0.7.2", features = ["tls-rustls"] }
-futures-util = "0.3.31"
 tower-http = { version = "0.6.6", features = ["full"] }
 tokio-util = { version = "0.7.15", features = ["full"] }
 h3 = "0.0.8"
@@ -47,7 +40,6 @@ quinn = { version = "0.11", default-features = false, features = [
 serde_json = "1.0"
 indexmap = { version = "2.10.0", features = ["serde"] }
 indicatif = { version = "0.18.0", features = ["tokio"] }
-tracing-indicatif = "0.3.11"
 num_cpus = "1.16.0"
 rcgen = "0.14.2"
 parking_lot = "0.12"
