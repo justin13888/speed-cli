@@ -64,10 +64,8 @@ async fn run_full_duplex_test(
     let ul_pb = create_progress_bar(ProgressBarType::Upload, duration);
     let start_time = Instant::now();
 
-    let (dl_collector, dl_tx) =
-        ThroughputStatsCollector::new(dl_pb.clone(), start_time, duration);
-    let (ul_collector, ul_tx) =
-        ThroughputStatsCollector::new(ul_pb.clone(), start_time, duration);
+    let (dl_collector, dl_tx) = ThroughputStatsCollector::new(dl_pb.clone(), start_time, duration);
+    let (ul_collector, ul_tx) = ThroughputStatsCollector::new(ul_pb.clone(), start_time, duration);
 
     let mut tasks: Vec<tokio::task::JoinHandle<(Vec<Sample>, Vec<Sample>)>> =
         Vec::with_capacity(parallel_connections);
@@ -467,14 +465,21 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     let mut stream = match TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            return Err(eyre::eyre!("TCP latency: connect to {} failed: {}", addr, e));
+            return Err(eyre::eyre!(
+                "TCP latency: connect to {} failed: {}",
+                addr,
+                e
+            ));
         }
     };
     if let Err(e) = stream.set_nodelay(true) {
         tracing::debug!("TCP set_nodelay failed on latency stream: {e}");
     }
     if let Err(e) = stream.write_all(b"P").await {
-        return Err(eyre::eyre!("TCP latency: failed to send 'P' command: {}", e));
+        return Err(eyre::eyre!(
+            "TCP latency: failed to send 'P' command: {}",
+            e
+        ));
     }
     sleep(Duration::from_millis(10)).await;
 
@@ -490,11 +495,8 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
         send_buf.copy_from_slice(&nonce.to_le_bytes());
         let measurement = match stream.write_all(&send_buf).await {
             Ok(()) => {
-                match tokio::time::timeout(
-                    Duration::from_secs(2),
-                    stream.read_exact(&mut recv_buf),
-                )
-                .await
+                match tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut recv_buf))
+                    .await
                 {
                     Ok(Ok(_)) => {
                         let echoed = u64::from_le_bytes(recv_buf);
@@ -603,7 +605,8 @@ async fn run_download_test(
                             }
                             Ok(n) => {
                                 let duration_us = read_start.elapsed().as_micros() as u64;
-                                let s = Sample::success(t_start_us, duration_us, n as u64, is_warmup);
+                                let s =
+                                    Sample::success(t_start_us, duration_us, n as u64, is_warmup);
                                 local_samples.push(s.clone());
                                 let _ = tx.send(s);
                             }

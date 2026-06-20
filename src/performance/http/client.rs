@@ -118,39 +118,38 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     let info_url = format!("{}/info", config.server_url);
     let mut server_identity: Option<PeerIdentity> = None;
-    let preflight_remote =
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            apply_version(client.get(&info_url), config.http_version).send(),
-        )
-        .await
-        {
-            Ok(Ok(resp)) if resp.status().is_success() => {
-                tracing::debug!("Server pre-flight check passed: {}", info_url);
-                server_identity = parse_server_identity(&resp);
-                resp.remote_addr()
-            }
-            Ok(Ok(resp)) => {
-                return Err(eyre::eyre!(
-                    "Server pre-flight check returned status {} for {}",
-                    resp.status(),
-                    info_url
-                ));
-            }
-            Ok(Err(e)) => {
-                return Err(eyre::eyre!(
-                    "Server pre-flight check failed for {}: {}",
-                    info_url,
-                    e
-                ));
-            }
-            Err(_) => {
-                return Err(eyre::eyre!(
-                    "Server pre-flight check timed out after 5s ({})",
-                    info_url
-                ));
-            }
-        };
+    let preflight_remote = match tokio::time::timeout(
+        Duration::from_secs(5),
+        apply_version(client.get(&info_url), config.http_version).send(),
+    )
+    .await
+    {
+        Ok(Ok(resp)) if resp.status().is_success() => {
+            tracing::debug!("Server pre-flight check passed: {}", info_url);
+            server_identity = parse_server_identity(&resp);
+            resp.remote_addr()
+        }
+        Ok(Ok(resp)) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check returned status {} for {}",
+                resp.status(),
+                info_url
+            ));
+        }
+        Ok(Err(e)) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check failed for {}: {}",
+                info_url,
+                e
+            ));
+        }
+        Err(_) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check timed out after 5s ({})",
+                info_url
+            ));
+        }
+    };
 
     match config.test_type {
         TestType::LatencyOnly => {
@@ -494,8 +493,14 @@ async fn run_upload_test(
                 let upload_start = Instant::now();
                 let t_start_us = offset_us(start_time, upload_start);
                 let is_warmup = start_time.elapsed() < warmup;
-                match upload_chunk(&client, &server_url, payload_size, chunk_data.clone(), version)
-                    .await
+                match upload_chunk(
+                    &client,
+                    &server_url,
+                    payload_size,
+                    chunk_data.clone(),
+                    version,
+                )
+                .await
                 {
                     Ok(bytes) => {
                         let duration_us = upload_start.elapsed().as_micros() as u64;

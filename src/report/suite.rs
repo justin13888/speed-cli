@@ -90,12 +90,7 @@ impl SuiteReport {
         }
     }
 
-    pub fn record(
-        &mut self,
-        label: impl Into<String>,
-        params: PhaseParams,
-        report: TestReport,
-    ) {
+    pub fn record(&mut self, label: impl Into<String>, params: PhaseParams, report: TestReport) {
         self.reports.push(NamedReport {
             label: label.into(),
             params,

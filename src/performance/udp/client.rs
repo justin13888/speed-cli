@@ -172,9 +172,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
 /// UDP socket. Returns `(server_identity, observed_client_addr)` on
 /// success, or `None` if the server didn't reply with a parseable
 /// `HelloAck` within a short window.
-async fn run_udp_hello(
-    socket: &UdpSocket,
-) -> Option<(PeerIdentity, std::net::SocketAddr)> {
+async fn run_udp_hello(socket: &UdpSocket) -> Option<(PeerIdentity, std::net::SocketAddr)> {
     let mut id_buf = Vec::new();
     ciborium::into_writer(&PeerIdentity::local(), &mut id_buf).ok()?;
     let hello = BlasterPacket::Hello {
@@ -436,7 +434,9 @@ async fn run_upload(
 
     let inter_packet_delay = if target_rate_bps > 0 {
         let bps = target_rate_bps as f64 / 8.0;
-        Some(Duration::from_secs_f64((payload_size as f64) / bps.max(1.0)))
+        Some(Duration::from_secs_f64(
+            (payload_size as f64) / bps.max(1.0),
+        ))
     } else {
         None
     };
@@ -498,7 +498,7 @@ async fn run_upload(
 
         if let Some(d) = inter_packet_delay {
             sleep(d).await;
-        } else if seq % 256 == 0 {
+        } else if seq.is_multiple_of(256) {
             tokio::task::yield_now().await;
         }
     }

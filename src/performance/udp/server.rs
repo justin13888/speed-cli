@@ -300,7 +300,7 @@ impl BlasterServer {
         };
         let bytes = report.encode_to_vec(None);
         // Send a few copies to mitigate report-packet loss on lossy
-        // links. The client deduplicates by ignoring repeated REPORTs.
+        // links. The client deduplicates by ignoring repeated REPORT messages.
         for _ in 0..3 {
             let _ = self.socket.send_to(&bytes, peer).await;
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -353,7 +353,7 @@ async fn download_sender(
             tokio::time::sleep(d).await;
         } else {
             // Yield occasionally so we don't monopolize the runtime.
-            if seq % 256 == 0 {
+            if seq.is_multiple_of(256) {
                 tokio::task::yield_now().await;
             }
         }
@@ -365,10 +365,7 @@ async fn download_sender(
 }
 
 /// Convenience entry point used from `main.rs`.
-pub async fn run_udp_server(
-    addr: impl ToSocketAddrs,
-    cancel: CancellationToken,
-) -> Result<()> {
+pub async fn run_udp_server(addr: impl ToSocketAddrs, cancel: CancellationToken) -> Result<()> {
     let server = BlasterServer::new(addr).await?;
     server.run(cancel).await
 }

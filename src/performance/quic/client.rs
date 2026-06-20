@@ -96,14 +96,13 @@ fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u6
 }
 
 fn client_config() -> Result<ClientConfig> {
-    let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
-        aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|e| eyre!("raw-QUIC client TLS setup: {e}"))?
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
-    .with_no_client_auth();
+    let mut crypto =
+        rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| eyre!("raw-QUIC client TLS setup: {e}"))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+            .with_no_client_auth();
     crypto.alpn_protocols = vec![QUIC_RAW_ALPN.to_vec()];
 
     let quic = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
@@ -303,7 +302,9 @@ async fn run_download(conn: &Connection, config: &QuicTestConfig) -> Result<Thro
 
     let results = futures::future::join_all(tasks).await;
     drop(tx);
-    let _ = collector.finish(pb, "raw-QUIC download complete".to_string()).await;
+    let _ = collector
+        .finish(pb, "raw-QUIC download complete".to_string())
+        .await;
     Ok(into_result(results, start, warmup))
 }
 
@@ -388,7 +389,9 @@ async fn run_upload(
 
     let results = futures::future::join_all(tasks).await;
     drop(tx);
-    let _ = collector.finish(pb, "raw-QUIC upload complete".to_string()).await;
+    let _ = collector
+        .finish(pb, "raw-QUIC upload complete".to_string())
+        .await;
     Ok(into_result(results, start, warmup))
 }
 
@@ -441,12 +444,8 @@ async fn run_full_duplex(
                     let w = start.elapsed() < warmup;
                     match recv.read(&mut buf).await {
                         Ok(Some(n)) => {
-                            let s = Sample::success(
-                                t,
-                                op.elapsed().as_micros() as u64,
-                                n as u64,
-                                w,
-                            );
+                            let s =
+                                Sample::success(t, op.elapsed().as_micros() as u64, n as u64, w);
                             dl.push(s.clone());
                             let _ = dl_tx.send(s);
                         }
@@ -558,17 +557,16 @@ async fn measure_latency(
         send_buf.copy_from_slice(&nonce.to_le_bytes());
 
         let measurement = match send.write_all(&send_buf).await {
-            Ok(()) => match tokio::time::timeout(
-                Duration::from_secs(2),
-                recv.read_exact(&mut recv_buf),
-            )
-            .await
-            {
-                Ok(Ok(())) => {
-                    LatencyMeasurement::success(t_start_us, probe.elapsed().as_micros() as u64)
+            Ok(()) => {
+                match tokio::time::timeout(Duration::from_secs(2), recv.read_exact(&mut recv_buf))
+                    .await
+                {
+                    Ok(Ok(())) => {
+                        LatencyMeasurement::success(t_start_us, probe.elapsed().as_micros() as u64)
+                    }
+                    _ => LatencyMeasurement::dropped(t_start_us),
                 }
-                _ => LatencyMeasurement::dropped(t_start_us),
-            },
+            }
             Err(_) => LatencyMeasurement::dropped(t_start_us),
         };
         if !in_warmup {

@@ -108,7 +108,11 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
 
     // ── UDP ─────────────────────────────────────────────────────────
     // No full-duplex row: UDP has no single-socket bidirectional mode.
-    if handshake.manifest.listener(TestTransport::UdpBlaster).is_some() {
+    if handshake
+        .manifest
+        .listener(TestTransport::UdpBlaster)
+        .is_some()
+    {
         for tt in [TestType::LatencyOnly, TestType::Bidirectional] {
             let params = udp_params(&cfg, tt);
             let label = format!("udp/{}", phase_suffix(tt));
@@ -125,7 +129,11 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
     }
 
     // ── Raw QUIC ────────────────────────────────────────────────────
-    if handshake.manifest.listener(TestTransport::QuicRaw).is_some() {
+    if handshake
+        .manifest
+        .listener(TestTransport::QuicRaw)
+        .is_some()
+    {
         for tt in [
             TestType::LatencyOnly,
             TestType::Bidirectional,
@@ -147,14 +155,30 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
 
     // ── HTTP/1.1 ────────────────────────────────────────────────────
     if handshake.manifest.listener(TestTransport::Http1).is_some() {
-        run_http_set(&mut suite, &handshake, &cfg, "http1", HttpVersion::HTTP1, TestTransport::Http1).await;
+        run_http_set(
+            &mut suite,
+            &handshake,
+            &cfg,
+            "http1",
+            HttpVersion::HTTP1,
+            TestTransport::Http1,
+        )
+        .await;
     } else {
         suite.skip("http1/*", "HTTP/1.1 listener not advertised by server");
     }
 
     // ── h2c ─────────────────────────────────────────────────────────
     if handshake.manifest.listener(TestTransport::H2c).is_some() {
-        run_http_set(&mut suite, &handshake, &cfg, "h2c", HttpVersion::H2C, TestTransport::H2c).await;
+        run_http_set(
+            &mut suite,
+            &handshake,
+            &cfg,
+            "h2c",
+            HttpVersion::H2C,
+            TestTransport::H2c,
+        )
+        .await;
     } else {
         suite.skip("h2c/*", "h2c listener not advertised by server");
     }
@@ -162,8 +186,20 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
     // ── HTTP/2 over TLS ─────────────────────────────────────────────
     if !cfg.include_tls {
         suite.skip("http2/*", "TLS phases skipped (--no-tls)");
-    } else if handshake.manifest.listener(TestTransport::Http2Tls).is_some() {
-        run_http_set(&mut suite, &handshake, &cfg, "http2", HttpVersion::HTTP2, TestTransport::Http2Tls).await;
+    } else if handshake
+        .manifest
+        .listener(TestTransport::Http2Tls)
+        .is_some()
+    {
+        run_http_set(
+            &mut suite,
+            &handshake,
+            &cfg,
+            "http2",
+            HttpVersion::HTTP2,
+            TestTransport::Http2Tls,
+        )
+        .await;
     } else {
         suite.skip("http2/*", "HTTP/2-TLS listener not advertised by server");
     }
@@ -172,7 +208,15 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
     if !cfg.include_tls {
         suite.skip("http3/*", "TLS phases skipped (--no-tls)");
     } else if handshake.manifest.listener(TestTransport::Http3).is_some() {
-        run_http_set(&mut suite, &handshake, &cfg, "http3", HttpVersion::HTTP3, TestTransport::Http3).await;
+        run_http_set(
+            &mut suite,
+            &handshake,
+            &cfg,
+            "http3",
+            HttpVersion::HTTP3,
+            TestTransport::Http3,
+        )
+        .await;
     } else {
         suite.skip("http3/*", "HTTP/3 listener not advertised by server");
     }
@@ -258,7 +302,9 @@ where
 {
     eprintln!(
         "{}",
-        format!("\n── Suite phase: {label} ──").bright_magenta().bold()
+        format!("\n── Suite phase: {label} ──")
+            .bright_magenta()
+            .bold()
     );
     match fut.await {
         Ok(report) => suite.record(label, params, report),

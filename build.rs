@@ -32,7 +32,9 @@ fn main() {
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
-    git_command(args).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    git_command(args)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn git_command(args: &[&str]) -> Option<String> {

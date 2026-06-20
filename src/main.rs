@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
                     "Exactly one protocol must be specified. Use --tcp, --udp, --quic, --http1, --http2, --h2c, or --http3."
                 ));
             }
-            let mode: ClientMode = mode.unwrap_or_else(|| {
+            let mode: ClientMode = mode.unwrap_or({
                 if tcp {
                     ClientMode::TCP
                 } else if udp {
@@ -158,25 +158,43 @@ async fn main() -> Result<()> {
 
             let report: TestReport = match mode {
                 ClientMode::TCP => {
-                    let config =
-                        TcpTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
-                            .with_warmup(warmup)
-                            .with_accounting(accounting);
+                    let config = TcpTestConfig::new(
+                        host,
+                        Some(port),
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    )
+                    .with_warmup(warmup)
+                    .with_accounting(accounting);
                     run_tcp_client(config).await?
                 }
                 ClientMode::UDP => {
-                    let config =
-                        UdpTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
-                            .with_warmup(warmup)
-                            .with_accounting(accounting)
-                            .with_target_rate_bps(target_rate_bps);
+                    let config = UdpTestConfig::new(
+                        host,
+                        Some(port),
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    )
+                    .with_warmup(warmup)
+                    .with_accounting(accounting)
+                    .with_target_rate_bps(target_rate_bps);
                     run_udp_client(config).await?
                 }
                 ClientMode::QUIC => {
-                    let config =
-                        QuicTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
-                            .with_warmup(warmup)
-                            .with_accounting(accounting);
+                    let config = QuicTestConfig::new(
+                        host,
+                        Some(port),
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    )
+                    .with_warmup(warmup)
+                    .with_accounting(accounting);
                     run_quic_client(config).await?
                 }
                 ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
@@ -369,7 +387,12 @@ async fn main() -> Result<()> {
                         eprintln!("ctrl_c handler error: {e}");
                         return;
                     }
-                    println!("\n{}", "Received SIGINT, shutting down gracefully...".yellow().bold());
+                    println!(
+                        "\n{}",
+                        "Received SIGINT, shutting down gracefully..."
+                            .yellow()
+                            .bold()
+                    );
                 }
                 cancel_for_signal.cancel();
             });

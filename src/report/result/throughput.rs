@@ -31,15 +31,11 @@ pub const STANDARD_MTU: usize = 1500;
 /// as the assumed MTU and header sizes - documented above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ThroughputAccounting {
+    #[default]
     Goodput,
     Wire,
-}
-
-impl Default for ThroughputAccounting {
-    fn default() -> Self {
-        ThroughputAccounting::Goodput
-    }
 }
 
 /// Per-stream samples for a single parallel connection / stream within
@@ -223,11 +219,8 @@ impl fmt::Display for ThroughputResult {
                     f,
                     "  {}: {}",
                     label.bright_green().bold(),
-                    format_size(
-                        bps as u64,
-                        DECIMAL.base_unit(BaseUnit::Bit).suffix("/s"),
-                    )
-                    .magenta()
+                    format_size(bps as u64, DECIMAL.base_unit(BaseUnit::Bit).suffix("/s"),)
+                        .magenta()
                 )?;
             }
         }
@@ -287,9 +280,7 @@ impl fmt::Display for ThroughputResult {
             f,
             "  {}: {}",
             "Samples".bright_green().bold(),
-            self.sample_count()
-                .to_formatted_string(&Locale::en)
-                .white()
+            self.sample_count().to_formatted_string(&Locale::en).white()
         )?;
 
         // Per-stream breakdown, only when we have more than one stream.
@@ -357,7 +348,10 @@ impl fmt::Display for ThroughputResult {
                 f,
                 "  {}: {} buckets @ {} ms each",
                 "UDP Stats Series".bright_green().bold(),
-                self.udp_series.len().to_formatted_string(&Locale::en).cyan(),
+                self.udp_series
+                    .len()
+                    .to_formatted_string(&Locale::en)
+                    .cyan(),
                 (self.udp_series_window_us / 1000)
                     .to_formatted_string(&Locale::en)
                     .yellow()

@@ -43,8 +43,7 @@ pub fn server_identity_header_value() -> HeaderValue {
 }
 
 fn base64_urlsafe(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let chunks = input.chunks_exact(3);
     let rem = chunks.remainder();
@@ -148,11 +147,7 @@ async fn run_cleartext(
     let router = create_router(config.enable_cors, config.max_upload_size);
     let graceful = GracefulShutdown::new();
 
-    tracing::info!(
-        "{:?} server listening on {}",
-        proto,
-        listener.local_addr()?
-    );
+    tracing::info!("{:?} server listening on {}", proto, listener.local_addr()?);
 
     loop {
         tokio::select! {
@@ -247,10 +242,7 @@ pub async fn run_https_server(
     listener
         .set_nonblocking(true)
         .wrap_err("Failed to set HTTPS listener non-blocking")?;
-    tracing::info!(
-        "HTTPS server listening on {}",
-        listener.local_addr()?
-    );
+    tracing::info!("HTTPS server listening on {}", listener.local_addr()?);
 
     let handle = axum_server::Handle::new();
     let handle_for_shutdown = handle.clone();

@@ -88,10 +88,10 @@ pub async fn bind_all(
     let mut entries: Vec<ListenerEntry> = Vec::new();
 
     let push = |transport: TestTransport,
-                    port: u16,
-                    bound: BoundListener,
-                    listeners: &mut Vec<(TestTransport, BoundListener)>,
-                    entries: &mut Vec<ListenerEntry>| {
+                port: u16,
+                bound: BoundListener,
+                listeners: &mut Vec<(TestTransport, BoundListener)>,
+                entries: &mut Vec<ListenerEntry>| {
         entries.push(ListenerEntry {
             transport,
             host: host.clone(),
@@ -219,13 +219,10 @@ impl BoundListeners {
 
             let _ = transport;
             let (label, handle): (&'static str, JoinHandle<Result<()>>) = match listener {
-                BoundListener::TcpRaw(l) => {
-                    ("TCP", tokio::spawn(run_tcp_server_on(l, cancel)))
+                BoundListener::TcpRaw(l) => ("TCP", tokio::spawn(run_tcp_server_on(l, cancel))),
+                BoundListener::UdpBlaster(server) => {
+                    ("UDP", tokio::spawn(async move { server.run(cancel).await }))
                 }
-                BoundListener::UdpBlaster(server) => (
-                    "UDP",
-                    tokio::spawn(async move { server.run(cancel).await }),
-                ),
                 BoundListener::Http1(l) => (
                     "HTTP/1.1",
                     tokio::spawn(run_http1_server(
