@@ -55,14 +55,7 @@ async fn main() -> Result<()> {
             control_port,
             duration,
             warmup,
-            mode,
-            tcp,
-            udp,
-            quic,
-            http1,
-            http2,
-            h2c,
-            http3,
+            protocol,
             export,
             connections,
             test_type,
@@ -87,30 +80,7 @@ async fn main() -> Result<()> {
             };
             let target_rate_bps: u64 = target_rate_mbps.saturating_mul(1_000_000);
 
-            // Exactly one protocol must be selected.
-            let protocols = [mode.is_some(), tcp, udp, quic, http1, http2, h2c, http3];
-            if protocols.iter().filter(|&&x| x).count() != 1 {
-                return Err(eyre::eyre!(
-                    "Exactly one protocol must be specified. Use --tcp, --udp, --quic, --http1, --http2, --h2c, or --http3."
-                ));
-            }
-            let mode: ClientMode = mode.unwrap_or({
-                if tcp {
-                    ClientMode::TCP
-                } else if udp {
-                    ClientMode::UDP
-                } else if quic {
-                    ClientMode::QUIC
-                } else if http1 {
-                    ClientMode::HTTP1
-                } else if http2 {
-                    ClientMode::HTTP2
-                } else if h2c {
-                    ClientMode::H2C
-                } else {
-                    ClientMode::HTTP3
-                }
-            });
+            let mode = protocol;
 
             // Verify export file path is writable.
             if let Some(export) = &export {
@@ -222,12 +192,7 @@ async fn main() -> Result<()> {
 
         Commands::Server {
             all,
-            tcp,
-            udp,
-            quic,
-            http,
-            https,
-            http3,
+            protocols,
             bind,
             control_port,
             tcp_port,
@@ -240,13 +205,15 @@ async fn main() -> Result<()> {
             cert,
             key,
         } => {
+            use speed_cli::cli::ServerProtocol;
+            let has = |p: ServerProtocol| all || protocols.contains(&p);
             let enabled = EnabledProtocols {
-                tcp: tcp || all,
-                udp: udp || all,
-                http: http || all,
-                https: https || all,
-                http3: http3 || all,
-                quic: quic || all,
+                tcp: has(ServerProtocol::Tcp),
+                udp: has(ServerProtocol::Udp),
+                http: has(ServerProtocol::Http),
+                https: has(ServerProtocol::Https),
+                http3: has(ServerProtocol::Http3),
+                quic: has(ServerProtocol::Quic),
             };
             if !enabled.tcp
                 && !enabled.udp
@@ -256,7 +223,7 @@ async fn main() -> Result<()> {
                 && !enabled.quic
             {
                 return Err(eyre::eyre!(
-                    "At least one server mode must be enabled. Use --all to enable all modes."
+                    "At least one protocol must be enabled. Use --all or --protocol <p>."
                 ));
             }
 
@@ -535,6 +502,22 @@ async fn main() -> Result<()> {
                     format!("Suite report exported to {}", export.display()).cyan()
                 );
             }
+        }
+
+        Commands::Completions { shell } => {
+            use clap::CommandFactory as _;
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "speed-cli",
+                &mut std::io::stdout(),
+            );
+        }
+
+        Commands::Man { out_dir } => {
+            use clap::CommandFactory as _;
+            std::fs::create_dir_all(&out_dir)?;
+            clap_mangen::generate_to(Cli::command(), &out_dir)?;
         }
     }
 
