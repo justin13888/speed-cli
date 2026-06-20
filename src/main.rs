@@ -1,11 +1,10 @@
 use colored::*;
-use eyre::Result;
+use eyre::{Result, WrapErr as _};
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::{error, info, trace};
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -55,23 +54,9 @@ fn create_optimized_runtime() -> tokio::runtime::Runtime {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    // Initialize tracing subscriber for logging
-    let filter_layer = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap();
-    let fmt_layer = fmt::layer()
-        .pretty()
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_file(true)
-        .with_line_number(true);
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(fmt_layer)
-        .init();
-
     let cli = Cli::parse();
-    trace!("Parsed CLI arguments: {:#?}", cli);
+    utils::logging::init(cli.verbose, cli.quiet, cli.color);
+    trace!("Parsed CLI arguments: {cli:#?}");
 
     match cli.command {
         Commands::Client {
@@ -225,18 +210,13 @@ async fn main() -> Result<()> {
             println!("{report:#}");
 
             if let Some(export) = &export {
-                match with_progress_counter(
-                    "Exporting test results",
-                    export_report(&report, export),
-                )
-                .await
-                {
-                    Ok(_) => println!(
-                        "{}",
-                        format!("Results exported to {}", export.to_string_lossy()).cyan()
-                    ),
-                    Err(e) => eprintln!("Error exporting results: {e}"),
-                }
+                with_progress_counter("Exporting test results", export_report(&report, export))
+                    .await
+                    .wrap_err_with(|| format!("exporting results to {}", export.display()))?;
+                println!(
+                    "{}",
+                    format!("Results exported to {}", export.to_string_lossy()).cyan()
+                );
             }
         }
 
@@ -364,14 +344,14 @@ async fn main() -> Result<()> {
                     let mut sigterm = match signal(SignalKind::terminate()) {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("Failed to install SIGTERM handler: {e}");
+                            error!("Failed to install SIGTERM handler: {e}");
                             return;
                         }
                     };
                     tokio::select! {
                         res = tokio::signal::ctrl_c() => {
                             if let Err(e) = res {
-                                eprintln!("ctrl_c handler error: {e}");
+                                error!("ctrl_c handler error: {e}");
                                 return;
                             }
                             println!("\n{}", "Received SIGINT, shutting down gracefully...".yellow().bold());
@@ -384,7 +364,7 @@ async fn main() -> Result<()> {
                 #[cfg(not(unix))]
                 {
                     if let Err(e) = tokio::signal::ctrl_c().await {
-                        eprintln!("ctrl_c handler error: {e}");
+                        error!("ctrl_c handler error: {e}");
                         return;
                     }
                     println!(
@@ -422,13 +402,13 @@ async fn main() -> Result<()> {
                 match result {
                     Ok(server_result) => {
                         if let Err(e) = server_result {
-                            eprintln!("{name} server failed: {e}");
+                            error!("{name} server failed: {e}");
                         } else {
-                            println!("{name} server completed successfully");
+                            info!("{name} server completed successfully");
                         }
                     }
                     Err(e) => {
-                        eprintln!("{name} server task panicked: {e}");
+                        error!("{name} server task panicked: {e}");
                     }
                 }
             }
@@ -464,19 +444,18 @@ async fn main() -> Result<()> {
                     match export_html {
                         None => println!("{report:#}"),
                         Some(html_file) => {
-                            match with_progress_counter(
+                            with_progress_counter(
                                 "Exporting report to HTML",
                                 export_report_html(&report, &html_file),
                             )
                             .await
-                            {
-                                Ok(_) => println!(
-                                    "{}",
-                                    format!("HTML report exported to {}", html_file.display())
-                                        .cyan()
-                                ),
-                                Err(e) => eprintln!("Error exporting to HTML: {e}"),
-                            }
+                            .wrap_err_with(|| {
+                                format!("exporting HTML report to {}", html_file.display())
+                            })?;
+                            println!(
+                                "{}",
+                                format!("HTML report exported to {}", html_file.display()).cyan()
+                            );
                         }
                     }
                 }
@@ -539,7 +518,7 @@ async fn main() -> Result<()> {
                 ciborium::into_writer(&suite, &mut buf)
                     .map_err(|e| eyre::eyre!("CBOR encode: {e}"))?;
                 tokio::fs::write(export, &buf).await?;
-                eprintln!(
+                println!(
                     "{}",
                     format!("Suite report exported to {}", export.display()).cyan()
                 );

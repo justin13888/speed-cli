@@ -3,6 +3,8 @@ pub mod commands;
 use clap::Parser;
 pub use commands::*;
 
+use crate::utils::logging::ColorChoice;
+
 #[derive(Parser, Debug)]
 #[command(name = "speed-cli")]
 #[command(
@@ -14,4 +16,16 @@ pub use commands::*;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+
+    /// Increase log verbosity: -v = debug, -vv = trace. Overridden by RUST_LOG.
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Quiet mode: errors only, suppress progress. Overridden by RUST_LOG.
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
+    /// When to use color: auto (default), always, or never. Honors NO_COLOR.
+    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
 }
