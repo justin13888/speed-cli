@@ -80,7 +80,7 @@ pub async fn perform_handshake(server: &str, control_port: u16) -> Result<Handsh
     }
 
     // Informational: surface who we're talking to and what is on offer.
-    eprintln!(
+    tracing::info!(
         "{}",
         format!(
             "Handshake OK — protocol v{} — server {}",
@@ -93,7 +93,7 @@ pub async fn perform_handshake(server: &str, control_port: u16) -> Result<Handsh
         .iter()
         .map(|l| l.transport.label())
         .collect();
-    eprintln!(
+    tracing::info!(
         "{}",
         format!("Server advertises: {}", advertised.join(", ")).bright_white()
     );

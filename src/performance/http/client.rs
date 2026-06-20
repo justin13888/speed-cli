@@ -86,7 +86,7 @@ fn ensure_crypto_provider() {
 // TODO: Need to optimize HTTPS (e.g. HTTP/2) tests for throughput
 
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
-    eprintln!(
+    tracing::info!(
         "{}",
         format!(
             "Starting {} speed test to server {}...",
@@ -303,7 +303,7 @@ async fn measure_http_latency(
     let url = format!("{server_url}/latency");
     let mut measurements = Vec::new();
 
-    eprintln!("Measuring HTTP latency for {duration:?}...");
+    tracing::info!("Measuring HTTP latency for {duration:?}...");
 
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
     let start = Instant::now();
@@ -362,7 +362,7 @@ async fn run_download_test(
     warmup: Duration,
     version: HttpVersion,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting download test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -447,7 +447,7 @@ async fn run_upload_test(
     warmup: Duration,
     version: HttpVersion,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting upload test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()

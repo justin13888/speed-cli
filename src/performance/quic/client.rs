@@ -124,7 +124,7 @@ async fn connect(server: &str, port: u16) -> Result<(Endpoint, Connection)> {
 }
 
 pub async fn run_quic_client(config: QuicTestConfig) -> Result<TestReport> {
-    eprintln!(
+    tracing::info!(
         "{}",
         format!(
             "Starting raw-QUIC test to server {}:{}...",
@@ -219,7 +219,7 @@ async fn quic_hello(conn: &Connection) -> Option<(PeerIdentity, SocketAddr)> {
 }
 
 async fn run_download(conn: &Connection, config: &QuicTestConfig) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting raw-QUIC download over {} streams...",
         config.parallel_connections.to_string().yellow()
     );
@@ -302,7 +302,7 @@ async fn run_upload(
     config: &QuicTestConfig,
     payload_size: usize,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting raw-QUIC upload over {} streams...",
         config.parallel_connections.to_string().yellow()
     );
@@ -389,7 +389,7 @@ async fn run_full_duplex(
     config: &QuicTestConfig,
     payload_size: usize,
 ) -> Result<(ThroughputResult, ThroughputResult)> {
-    eprintln!(
+    tracing::info!(
         "Starting raw-QUIC full-duplex over {} streams...",
         config.parallel_connections.to_string().yellow()
     );
@@ -522,7 +522,7 @@ async fn measure_latency(
 ) -> Result<Option<LatencyResult>> {
     let duration = config.duration;
     let warmup = config.warmup;
-    eprintln!("Measuring raw-QUIC in-stream RTT for {duration:?}...");
+    tracing::info!("Measuring raw-QUIC in-stream RTT for {duration:?}...");
 
     let pb = create_progress_bar(ProgressBarType::Latency, duration);
     let start = Instant::now();

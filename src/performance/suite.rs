@@ -300,7 +300,7 @@ async fn run_phase<F>(suite: &mut SuiteReport, label: &str, params: PhaseParams,
 where
     F: std::future::Future<Output = Result<crate::report::TestReport>>,
 {
-    eprintln!(
+    tracing::info!(
         "{}",
         format!("\n── Suite phase: {label} ──")
             .bright_magenta()

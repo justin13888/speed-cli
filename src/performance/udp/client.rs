@@ -41,7 +41,7 @@ use crate::{
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
-    eprintln!(
+    tracing::info!(
         "{}",
         format!("Starting UDP test to server {}...", server_addr.cyan())
             .green()
@@ -193,7 +193,7 @@ async fn run_latency(
     duration: Duration,
     warmup: Duration,
 ) -> Result<Option<LatencyResult>> {
-    eprintln!("Measuring UDP latency for {duration:?}...");
+    tracing::info!("Measuring UDP latency for {duration:?}...");
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -279,7 +279,7 @@ async fn run_download(
     warmup: Duration,
     target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "UDP download: {} payload, {} target rate",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
@@ -404,7 +404,7 @@ async fn run_upload(
     warmup: Duration,
     target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "UDP upload: {} payload, {} target rate",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
