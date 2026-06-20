@@ -107,9 +107,9 @@ async fn connect(server: &str, port: u16) -> Result<(Endpoint, Connection)> {
         .ok_or_else(|| eyre!("raw-QUIC: no address for {server}:{port}"))?;
 
     let bind: SocketAddr = if addr.is_ipv6() {
-        "[::]:0".parse().unwrap()
+        SocketAddr::from(([0u16; 8], 0))
     } else {
-        "0.0.0.0:0".parse().unwrap()
+        SocketAddr::from(([0u8; 4], 0))
     };
     let mut endpoint =
         Endpoint::client(bind).map_err(|e| eyre!("raw-QUIC: client endpoint: {e}"))?;

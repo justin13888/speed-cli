@@ -404,19 +404,22 @@ async fn main() -> Result<()> {
             )
             .await;
 
+            let mut any_failed = false;
             for (name, result) in results {
                 match result {
-                    Ok(server_result) => {
-                        if let Err(e) = server_result {
-                            error!("{name} server failed: {e}");
-                        } else {
-                            info!("{name} server completed successfully");
-                        }
+                    Ok(Ok(())) => info!("{name} server completed successfully"),
+                    Ok(Err(e)) => {
+                        error!("{name} server failed: {e}");
+                        any_failed = true;
                     }
                     Err(e) => {
                         error!("{name} server task panicked: {e}");
+                        any_failed = true;
                     }
                 }
+            }
+            if any_failed {
+                return Err(eyre::eyre!("one or more server listeners failed"));
             }
         }
 

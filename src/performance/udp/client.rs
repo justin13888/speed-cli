@@ -309,6 +309,11 @@ async fn run_download(
     let mut buf = vec![0u8; payload_size + 64];
     let mut samples: Vec<Sample> = Vec::new();
     let mut rx_stats = ReceiveStats::default();
+    // A transient recv error (e.g. an ICMP port-unreachable surfaced on the
+    // socket) shouldn't abort the whole download; bail only after several in a
+    // row, which signals the socket is genuinely dead.
+    let mut consecutive_errors = 0u32;
+    const MAX_CONSECUTIVE_RECV_ERRORS: u32 = 8;
 
     while start_time.elapsed() < duration {
         let is_warmup = start_time.elapsed() < warmup;
@@ -316,6 +321,7 @@ async fn run_download(
         let t_start_us = offset_us(start_time, recv_start);
         match timeout(Duration::from_millis(200), socket.recv(&mut buf)).await {
             Ok(Ok(n)) => {
+                consecutive_errors = 0;
                 let recv_ts = now_us();
                 if let Some((BlasterPacket::Data { seq, send_ts_us }, payload_len)) =
                     BlasterPacket::decode(&buf[..n])
@@ -338,7 +344,13 @@ async fn run_download(
                 );
                 samples.push(s.clone());
                 let _ = tx.send(s);
-                break;
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_RECV_ERRORS {
+                    tracing::warn!(
+                        "UDP download: {consecutive_errors} consecutive recv errors, stopping"
+                    );
+                    break;
+                }
             }
             Err(_) => continue,
         }
