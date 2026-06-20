@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the tools pinned in mise.toml (nextest, machete, typos, ...).
+      # Rust itself comes from rust-toolchain.toml via the runner's rustup.
+      - uses: jdx/mise-action@v2
+      - name: fmt + clippy + typos + machete
+        run: mise run check
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: nextest + doctests
+        run: mise run test
+        env:
+          RUST_BACKTRACE: "1"
