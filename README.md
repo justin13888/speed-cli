@@ -12,7 +12,7 @@ It's difficult to have one tool that tests your network conditions between two d
 
 - **Multi-protocol support**: TCP, UDP, raw QUIC, HTTP/1.1, HTTP/2, h2c, HTTP/3
 - **High-performance**: Built with Rust, optimized for high throughput and efficient resource usage
-- **Comprehensive metrics**: Throughput, latency, jitter, packet loss, DNS performance
+- **Comprehensive metrics**: throughput (goodput/wire), latency percentiles, jitter, packet loss
 - **Exporting**: CBOR for re-importable data; HTML for self-contained rendered reports
 - **Cross-platform**: Optimized for popular platforms (Linux, macOS, Windows) and architectures (x86_64, ARM)
 
@@ -43,22 +43,22 @@ port is the only port you normally choose.
 
 ```sh
 # Start server (control endpoint on 9000; every test listener ephemeral)
-speed-cli server --all                       # TCP, UDP, QUIC, HTTP/1.1, h2c, HTTP/2, HTTP/3
-speed-cli server --tcp --udp                 # selected protocols only
-speed-cli server --all --control-port 9100   # pick a different control port
-speed-cli server --all -b 192.168.1.100      # bind a specific interface
+speed-cli server --all                                 # all protocols
+speed-cli server --protocol tcp --protocol udp         # selected protocols only
+speed-cli server --all --control-port 9100             # pick a different control port
+speed-cli server --all -b 192.168.1.100                # bind a specific interface
 
 # Run a single-protocol client test (only --server + --control-port needed)
-speed-cli client --tcp   -s <server-ip>      # raw TCP
-speed-cli client --udp   -s <server-ip>      # UDP blaster
-speed-cli client --quic  -s <server-ip>      # raw QUIC streams
-speed-cli client --http1 -s <server-ip>      # HTTP/1.1
-speed-cli client --http2 -s <server-ip>      # HTTP/2 (TLS)
-speed-cli client --h2c   -s <server-ip>      # HTTP/2 cleartext
-speed-cli client --http3 -s <server-ip>      # HTTP/3 (over QUIC)
+speed-cli client --protocol tcp   -s <server-ip>       # raw TCP
+speed-cli client --protocol udp   -s <server-ip>       # UDP blaster
+speed-cli client --protocol quic  -s <server-ip>       # raw QUIC streams
+speed-cli client --protocol http1 -s <server-ip>       # HTTP/1.1
+speed-cli client --protocol http2 -s <server-ip>       # HTTP/2 (TLS)
+speed-cli client --protocol h2c   -s <server-ip>       # HTTP/2 cleartext
+speed-cli client --protocol http3 -s <server-ip>       # HTTP/3 (over QUIC)
 
 # Longer test, more connections, export to CBOR
-speed-cli client --http1 -s 192.168.1.100 -d 60 -c 4 -e results.cbor
+speed-cli client --protocol http1 -s 192.168.1.100 -d 60 -c 4 -e results.cbor
 
 # Run the full multi-protocol suite (drives every advertised protocol)
 speed-cli suite -s <server-ip>
@@ -74,6 +74,11 @@ For more advanced usage, refer to help:
 speed-cli -h
 speed-cli client -h
 speed-cli server -h
+
+# Verbosity / color are global: -v (debug), -vv (trace), -q (quiet), --color never
+# Shell completions and man pages:
+speed-cli completions zsh > _speed-cli   # bash | zsh | fish | powershell | elvish
+speed-cli man --out-dir ./man
 ```
 
 ### Exporting Results
@@ -84,13 +89,13 @@ as a rendered single-file report for visual inspection.
 
 ```bash
 # Export raw data (re-importable)
-speed-cli client --<mode> -s <server-ip> -e results.cbor
+speed-cli client --protocol <p> -s <server-ip> -e results.cbor
 
 # Export rendered HTML report
-speed-cli client --<mode> -s <server-ip> -e results.html
+speed-cli client --protocol <p> -s <server-ip> -e results.html
 
 # No extension implies CBOR
-speed-cli client --<mode> -s <server-ip> -e results
+speed-cli client --protocol <p> -s <server-ip> -e results
 ```
 
 Other extensions (`.json`, `.txt`, …) are rejected with a clear error.
@@ -124,6 +129,18 @@ The UDP test uses a small, iperf3-u-style "blaster" protocol: a fixed-rate sende
 - [ ] Remove SSH server spin-up (remote SSH server downloads binary, or through client, and runs server based on what's specified by client)
 - [ ] Mobile app support (iOS/Android)
 - [ ] Firm up IPV6 support (which has different NAT characteristics)
+
+## Development
+
+This repo uses [mise](https://mise.jdx.dev) for tooling/tasks and [hk](https://hk.jdx.dev)
+for git hooks. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+```bash
+mise install && mise run setup   # install pinned tools + git hooks
+mise run check                   # fmt, clippy -D warnings, typos, unused-deps
+mise run test                    # nextest + doctests
+mise run bench                   # criterion benchmarks
+```
 
 ## Contributing
 

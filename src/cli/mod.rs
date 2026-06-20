@@ -11,7 +11,9 @@ use crate::utils::logging::ColorChoice;
     about = "A comprehensive network performance measurement tool for TCP-based, UDP-based, HTTP-based protocols"
 )]
 #[command(
-    long_about = "A comprehensive network diagnostics tool that includes:\n• Traditional TCP/UDP throughput testing (like iperf3)\n• HTTP/1.1 and HTTP/2 speed tests (like Ookla/Cloudflare)\n• DNS performance analysis\n• Connection quality assessment\n• Network topology analysis\n• Geographic information and routing analysis"
+    long_about = "A multi-protocol network performance tool. Measures throughput, latency, \
+jitter, and packet loss over TCP, UDP, raw QUIC, and HTTP/1.1, h2c, HTTP/2 and HTTP/3 between \
+two endpoints, and writes CBOR (re-importable) or HTML reports."
 )]
 pub struct Cli {
     #[command(subcommand)]
