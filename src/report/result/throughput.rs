@@ -237,24 +237,14 @@ impl fmt::Display for ThroughputResult {
             format!("{:.1}%", self.request_success_rate() * 100.0).green()
         )?;
 
-        let (total_retries, successful_after_retry, failed_after_retry) = self.retry_statistics();
+        let (total_retries, failed_after_retry) = self.retry_statistics();
         if total_retries > 0 {
             writeln!(
                 f,
-                "  {}: {} (Success: {}, Failed: {})",
+                "  {}: {} ({} failed after retry)",
                 "Total Retries".bright_green().bold(),
                 total_retries.to_formatted_string(&Locale::en).yellow(),
-                successful_after_retry
-                    .to_formatted_string(&Locale::en)
-                    .green(),
                 failed_after_retry.to_formatted_string(&Locale::en).red()
-            )?;
-
-            writeln!(
-                f,
-                "  {}: {:.1}%",
-                "Retry Success Rate".bright_green().bold(),
-                self.retry_success_rate() * 100.0
             )?;
         }
 
@@ -464,10 +454,13 @@ impl ThroughputResult {
         self.connection_success_rate()
     }
 
-    /// `(total_retries, successful_after_retry, failed_after_retry)`.
-    pub fn retry_statistics(&self) -> (u32, u32, u32) {
+    /// `(total_retries, failed_after_retry)`. Retries are observable only on
+    /// the failure path — `Outcome::Success` carries no retry count — so the
+    /// previous "successful after retry" figure was always zero. Reporting it
+    /// (and the rate derived from it) showed 0% success on every flaky link,
+    /// which was misleading, so it is no longer computed.
+    pub fn retry_statistics(&self) -> (u32, u32) {
         let mut total_retries = 0;
-        let successful_after_retry = 0;
         let mut failed_after_retry = 0;
         for s in self.non_warmup_iter() {
             if let Outcome::Failure { retry_count, .. } = &s.outcome {
@@ -475,15 +468,7 @@ impl ThroughputResult {
                 failed_after_retry += 1;
             }
         }
-        (total_retries, successful_after_retry, failed_after_retry)
-    }
-
-    pub fn retry_success_rate(&self) -> f64 {
-        let (total_retries, successful_after_retry, failed_after_retry) = self.retry_statistics();
-        if total_retries == 0 {
-            return 1.0;
-        }
-        successful_after_retry as f64 / (successful_after_retry + failed_after_retry) as f64
+        (total_retries, failed_after_retry)
     }
 
     pub fn error_distribution(&self) -> HashMap<String, u32> {

@@ -81,6 +81,11 @@ async fn main() -> Result<()> {
             accounting,
             target_rate_mbps,
         } => {
+            if warmup >= duration {
+                return Err(eyre::eyre!(
+                    "--warmup ({warmup}s) must be less than --duration ({duration}s)"
+                ));
+            }
             let warmup = std::time::Duration::from_secs(warmup);
             let accounting = match accounting {
                 cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
@@ -480,6 +485,11 @@ async fn main() -> Result<()> {
             accounting,
             export,
         } => {
+            if warmup >= duration {
+                return Err(eyre::eyre!(
+                    "--warmup ({warmup}s) must be less than per-phase --duration ({duration}s)"
+                ));
+            }
             let cfg = SuiteConfig {
                 control_port,
                 phase_duration: std::time::Duration::from_secs(duration),
