@@ -63,4 +63,4 @@ secrets:
 ## License
 
 By contributing you agree your contributions are licensed under the project's
-AGPL-3.0 license.
+Apache-2.0 license.
