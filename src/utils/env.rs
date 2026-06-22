@@ -48,9 +48,7 @@ impl Environment {
             cpu_count: num_cpus::get(),
             linux: if cfg!(target_os = "linux") {
                 Some(LinuxNetEnv {
-                    tcp_congestion_control: read_str(
-                        "/proc/sys/net/ipv4/tcp_congestion_control",
-                    ),
+                    tcp_congestion_control: read_str("/proc/sys/net/ipv4/tcp_congestion_control"),
                     rmem_max: read_u64("/proc/sys/net/core/rmem_max"),
                     wmem_max: read_u64("/proc/sys/net/core/wmem_max"),
                     netdev_max_backlog: read_u64("/proc/sys/net/core/netdev_max_backlog"),

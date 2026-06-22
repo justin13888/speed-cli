@@ -1,0 +1,6 @@
+# Spell-check configuration for `typos`.
+# Add real false-positives under [default.extend-words] (map word -> itself).
+[default.extend-words]
+
+[files]
+extend-exclude = ["Cargo.lock", "*.cbor", "*.html"]

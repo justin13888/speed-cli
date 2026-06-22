@@ -841,10 +841,7 @@ impl ProductionTcpHandler {
     /// connection, which is what most "ping over TCP" benchmarks
     /// actually want - distinct from the connect-time latency that the
     /// older client mode measured.
-    async fn handle_ping(
-        &mut self,
-        shutdown_rx: &mut broadcast::Receiver<()>,
-    ) -> Result<()> {
+    async fn handle_ping(&mut self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         use tokio::io::AsyncWriteExt;
 
         debug!("Handling ping request");

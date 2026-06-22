@@ -229,9 +229,7 @@ fn parse_download_query(query: Option<&str>) -> (usize, usize) {
             };
             match k {
                 "size" => size = v.parse().unwrap_or(0),
-                "chunk_size" => {
-                    chunk_size = v.parse().unwrap_or(DEFAULT_CHUNK_SIZE).max(1)
-                }
+                "chunk_size" => chunk_size = v.parse().unwrap_or(DEFAULT_CHUNK_SIZE).max(1),
                 _ => {}
             }
         }

@@ -134,7 +134,13 @@ impl Display for PeerIdentity {
             };
             write!(f, " ({short}{dirty})")?;
         }
-        write!(f, " on {} {}/{}", self.hostname.as_deref().unwrap_or("?"), self.os, self.arch)
+        write!(
+            f,
+            " on {} {}/{}",
+            self.hostname.as_deref().unwrap_or("?"),
+            self.os,
+            self.arch
+        )
     }
 }
 

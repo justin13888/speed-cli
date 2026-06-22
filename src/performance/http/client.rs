@@ -16,18 +16,17 @@ use tracing::trace;
 
 use crate::{
     TestType,
+    performance::engine::{
+        LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+        measurement_duration_us, offset_us,
+    },
     performance::http::HttpVersion,
     performance::http::server::decode_base64_urlsafe,
     report::{
         ConnectionError, HttpTestConfig, LatencyMeasurement, LatencyResult, NetworkTestResult,
         PeerIdentity, Sample, StreamSamples, TestReport, ThroughputResult,
     },
-    utils::{
-        format::format_bytes,
-        instrumentation::{
-            LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        },
-    },
+    utils::format::format_bytes,
 };
 
 const SERVER_ID_HEADER: &str = "x-speed-cli-server-id";
@@ -47,18 +46,6 @@ fn parse_server_identity(resp: &reqwest::Response) -> Option<PeerIdentity> {
     let value = resp.headers().get(SERVER_ID_HEADER)?.to_str().ok()?;
     let bytes = decode_base64_urlsafe(value)?;
     ciborium::from_reader::<PeerIdentity, _>(bytes.as_slice()).ok()
-}
-
-fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
-    end.duration_since(start)
-        .saturating_sub(warmup)
-        .max(Duration::from_millis(1))
-        .as_micros() as u64
-}
-
-#[inline]
-fn offset_us(start: Instant, now: Instant) -> u64 {
-    now.duration_since(start).as_micros() as u64
 }
 
 fn collect_streams(
@@ -99,7 +86,7 @@ fn ensure_crypto_provider() {
 // TODO: Need to optimize HTTPS (e.g. HTTP/2) tests for throughput
 
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
-    eprintln!(
+    tracing::info!(
         "{}",
         format!(
             "Starting {} speed test to server {}...",
@@ -117,40 +104,39 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     let client = create_http_client(&config.http_version).await?;
 
     let info_url = format!("{}/info", config.server_url);
-    let mut server_identity: Option<PeerIdentity> = None;
-    let preflight_remote =
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            apply_version(client.get(&info_url), config.http_version).send(),
-        )
-        .await
-        {
-            Ok(Ok(resp)) if resp.status().is_success() => {
-                tracing::debug!("Server pre-flight check passed: {}", info_url);
-                server_identity = parse_server_identity(&resp);
-                resp.remote_addr()
-            }
-            Ok(Ok(resp)) => {
-                return Err(eyre::eyre!(
-                    "Server pre-flight check returned status {} for {}",
-                    resp.status(),
-                    info_url
-                ));
-            }
-            Ok(Err(e)) => {
-                return Err(eyre::eyre!(
-                    "Server pre-flight check failed for {}: {}",
-                    info_url,
-                    e
-                ));
-            }
-            Err(_) => {
-                return Err(eyre::eyre!(
-                    "Server pre-flight check timed out after 5s ({})",
-                    info_url
-                ));
-            }
-        };
+    let server_identity: Option<PeerIdentity>;
+    let preflight_remote = match tokio::time::timeout(
+        Duration::from_secs(5),
+        apply_version(client.get(&info_url), config.http_version).send(),
+    )
+    .await
+    {
+        Ok(Ok(resp)) if resp.status().is_success() => {
+            tracing::debug!("Server pre-flight check passed: {}", info_url);
+            server_identity = parse_server_identity(&resp);
+            resp.remote_addr()
+        }
+        Ok(Ok(resp)) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check returned status {} for {}",
+                resp.status(),
+                info_url
+            ));
+        }
+        Ok(Err(e)) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check failed for {}: {}",
+                info_url,
+                e
+            ));
+        }
+        Err(_) => {
+            return Err(eyre::eyre!(
+                "Server pre-flight check timed out after 5s ({})",
+                info_url
+            ));
+        }
+    };
 
     match config.test_type {
         TestType::LatencyOnly => {
@@ -317,7 +303,7 @@ async fn measure_http_latency(
     let url = format!("{server_url}/latency");
     let mut measurements = Vec::new();
 
-    eprintln!("Measuring HTTP latency for {duration:?}...");
+    tracing::info!("Measuring HTTP latency for {duration:?}...");
 
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
     let start = Instant::now();
@@ -376,7 +362,7 @@ async fn run_download_test(
     warmup: Duration,
     version: HttpVersion,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting download test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -461,7 +447,7 @@ async fn run_upload_test(
     warmup: Duration,
     version: HttpVersion,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting upload test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -494,8 +480,14 @@ async fn run_upload_test(
                 let upload_start = Instant::now();
                 let t_start_us = offset_us(start_time, upload_start);
                 let is_warmup = start_time.elapsed() < warmup;
-                match upload_chunk(&client, &server_url, payload_size, chunk_data.clone(), version)
-                    .await
+                match upload_chunk(
+                    &client,
+                    &server_url,
+                    payload_size,
+                    chunk_data.clone(),
+                    version,
+                )
+                .await
                 {
                     Ok(bytes) => {
                         let duration_us = upload_start.elapsed().as_micros() as u64;

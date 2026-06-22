@@ -1,0 +1,39 @@
+name: release-binaries
+
+# Fires when release-plz (or a manual tag) publishes a GitHub Release.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # Native targets only. HTTP/3 + aws-lc-rs make musl / cross targets
+      # fragile; add aarch64-linux / musl once they are confirmed to build.
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: speed-cli
+          target: ${{ matrix.target }}
+          tar: unix
+          zip: windows
+          checksum: sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

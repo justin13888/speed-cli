@@ -11,33 +11,17 @@ use tracing::trace;
 
 use crate::{
     TestType,
+    performance::engine::{
+        LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+        measurement_duration_us, offset_us,
+    },
     performance::tcp::handshake::client_hello,
     report::{
         ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
         Sample, StreamSamples, TcpTestConfig, TestReport, ThroughputResult,
     },
-    utils::{
-        format::format_bytes,
-        instrumentation::{
-            LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        },
-    },
+    utils::format::format_bytes,
 };
-
-/// Effective measurement duration: total elapsed minus the warmup window,
-/// clamped so we never report a zero or negative duration that would blow up
-/// throughput calculations.
-fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
-    end.duration_since(start)
-        .saturating_sub(warmup)
-        .max(Duration::from_millis(1))
-        .as_micros() as u64
-}
-
-#[inline]
-fn offset_us(start: Instant, now: Instant) -> u64 {
-    now.duration_since(start).as_micros() as u64
-}
 
 /// Run a full-duplex test on `parallel_connections` TCP connections,
 /// each simultaneously reading and writing for `duration`. Returns
@@ -54,7 +38,7 @@ async fn run_full_duplex_test(
     read_buffer_size: usize,
     warmup: Duration,
 ) -> Result<(ThroughputResult, ThroughputResult)> {
-    eprintln!(
+    tracing::info!(
         "Starting TCP full-duplex test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -64,10 +48,8 @@ async fn run_full_duplex_test(
     let ul_pb = create_progress_bar(ProgressBarType::Upload, duration);
     let start_time = Instant::now();
 
-    let (dl_collector, dl_tx) =
-        ThroughputStatsCollector::new(dl_pb.clone(), start_time, duration);
-    let (ul_collector, ul_tx) =
-        ThroughputStatsCollector::new(ul_pb.clone(), start_time, duration);
+    let (dl_collector, dl_tx) = ThroughputStatsCollector::new(dl_pb.clone(), start_time, duration);
+    let (ul_collector, ul_tx) = ThroughputStatsCollector::new(ul_pb.clone(), start_time, duration);
 
     let mut tasks: Vec<tokio::task::JoinHandle<(Vec<Sample>, Vec<Sample>)>> =
         Vec::with_capacity(parallel_connections);
@@ -85,7 +67,7 @@ async fn run_full_duplex_test(
             let stream = match TcpStream::connect(&addr).await {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("TCP full-duplex connect error on conn {i}: {e}");
+                    tracing::warn!("TCP full-duplex connect error on conn {i}: {e}");
                     return (dl_local, ul_local);
                 }
             };
@@ -96,7 +78,7 @@ async fn run_full_duplex_test(
 
             // Send the F command to put the server into full-duplex mode.
             if let Err(e) = write_half.write_all(b"F").await {
-                eprintln!("Failed to send F command on conn {i}: {e}");
+                tracing::warn!("Failed to send F command on conn {i}: {e}");
                 return (dl_local, ul_local);
             }
 
@@ -281,7 +263,7 @@ fn collect_streams(
 pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
 
-    eprintln!(
+    tracing::info!(
         "{}",
         format!("Starting TCP test to server {}...", server_addr.cyan())
             .green()
@@ -458,7 +440,7 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     let warmup = config.warmup;
     let mut measurements = Vec::new();
 
-    eprintln!("Measuring TCP in-stream RTT for {duration:?}...");
+    tracing::info!("Measuring TCP in-stream RTT for {duration:?}...");
 
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
     let start = Instant::now();
@@ -467,14 +449,21 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     let mut stream = match TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            return Err(eyre::eyre!("TCP latency: connect to {} failed: {}", addr, e));
+            return Err(eyre::eyre!(
+                "TCP latency: connect to {} failed: {}",
+                addr,
+                e
+            ));
         }
     };
     if let Err(e) = stream.set_nodelay(true) {
         tracing::debug!("TCP set_nodelay failed on latency stream: {e}");
     }
     if let Err(e) = stream.write_all(b"P").await {
-        return Err(eyre::eyre!("TCP latency: failed to send 'P' command: {}", e));
+        return Err(eyre::eyre!(
+            "TCP latency: failed to send 'P' command: {}",
+            e
+        ));
     }
     sleep(Duration::from_millis(10)).await;
 
@@ -490,11 +479,8 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
         send_buf.copy_from_slice(&nonce.to_le_bytes());
         let measurement = match stream.write_all(&send_buf).await {
             Ok(()) => {
-                match tokio::time::timeout(
-                    Duration::from_secs(2),
-                    stream.read_exact(&mut recv_buf),
-                )
-                .await
+                match tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut recv_buf))
+                    .await
                 {
                     Ok(Ok(_)) => {
                         let echoed = u64::from_le_bytes(recv_buf);
@@ -558,7 +544,7 @@ async fn run_download_test(
     read_buffer_size: usize,
     warmup: Duration,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting TCP download test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -585,7 +571,7 @@ async fn run_download_test(
                         tracing::debug!("TCP set_nodelay failed on download conn {i}: {e}");
                     }
                     if let Err(e) = stream.write_all(b"D").await {
-                        eprintln!("Failed to send download command on connection {i}: {e}");
+                        tracing::warn!("Failed to send download command on connection {i}: {e}");
                         return local_samples;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -598,12 +584,13 @@ async fn run_download_test(
                         let is_warmup = start_time.elapsed() < warmup;
                         match stream.read(&mut buffer).await {
                             Ok(0) => {
-                                eprintln!("Server closed connection {i} (might be normal)");
+                                tracing::debug!("Server closed connection {i} (might be normal)");
                                 break;
                             }
                             Ok(n) => {
                                 let duration_us = read_start.elapsed().as_micros() as u64;
-                                let s = Sample::success(t_start_us, duration_us, n as u64, is_warmup);
+                                let s =
+                                    Sample::success(t_start_us, duration_us, n as u64, is_warmup);
                                 local_samples.push(s.clone());
                                 let _ = tx.send(s);
                             }
@@ -623,7 +610,7 @@ async fn run_download_test(
                     }
                 }
                 Err(e) => {
-                    eprintln!("TCP connection error on connection {i}: {e}");
+                    tracing::warn!("TCP connection error on connection {i}: {e}");
                 }
             }
 
@@ -660,7 +647,7 @@ async fn run_upload_test(
     duration: Duration,
     warmup: Duration,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting TCP upload test with {} payload size and {} parallel connections...",
         format_bytes(payload_size).yellow(),
         parallel_connections.to_string().yellow()
@@ -722,7 +709,7 @@ async fn run_upload_test(
                     tracing::debug!("TCP set_nodelay failed on upload conn {i}: {e}");
                 }
                 if let Err(e) = stream.write_all(b"U").await {
-                    eprintln!("Failed to send upload command on connection {i}: {e}");
+                    tracing::warn!("Failed to send upload command on connection {i}: {e}");
                     if reconnects_remaining == 0 {
                         break 'outer;
                     }

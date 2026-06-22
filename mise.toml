@@ -1,0 +1,31 @@
+#:schema https://mise.jdx.dev/schema/mise.json
+# Tool + task manager. Rust itself is intentionally NOT managed here —
+# rustup + rust-toolchain.toml own the compiler version. mise pins
+# everything else and centralizes common commands as tasks.
+
+[tools]
+# nextest/machete via the cargo backend: this environment's aqua registry has
+# no nextest entry, and cargo builds work anywhere mise + rustup do.
+"cargo:cargo-nextest" = "latest"   # cargo-nextest test runner
+"cargo:cargo-machete" = "latest"   # unused-dependency detector
+typos                 = "latest"   # source spell-checker
+hk                    = "1.48.0"   # git hook manager (pinned to match hk.pkl amends)
+pkl                   = "latest"   # hk's configuration language
+
+[env]
+HK_MISE = "1"   # hk resolves linters/tools through mise
+
+[tasks]
+build         = { run = "cargo build --all-targets", description = "Build all targets" }
+build-release = { run = "cargo build --release", description = "Build the optimized release binary" }
+fmt           = { run = "cargo fmt --all", description = "Format all code" }
+fmt-check     = { run = "cargo fmt --all --check", description = "Check formatting" }
+lint          = { run = "cargo clippy --all-targets --all-features -- -D warnings", description = "Lint (deny warnings)" }
+lint-fix      = { run = "cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features", description = "Apply clippy autofixes" }
+machete       = { run = "cargo machete", description = "Find unused dependencies" }
+spell         = { run = "typos", description = "Spell-check the source" }
+test          = { run = ["cargo nextest run --all-features", "cargo test --doc"], description = "Run tests + doctests" }
+bench         = { run = "cargo bench", description = "Run criterion benchmarks" }
+check         = { depends = ["fmt-check", "lint", "spell", "machete"], description = "All static checks" }
+ci            = { depends = ["check", "test"], description = "Full CI gate (checks + tests)" }
+setup         = { run = "hk install", description = "Install git hooks" }

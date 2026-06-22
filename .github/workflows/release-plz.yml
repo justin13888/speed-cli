@@ -1,0 +1,55 @@
+name: release-plz
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Opens/updates a "release" PR that bumps the version and updates CHANGELOG.md.
+  release-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The default GITHUB_TOKEN cannot trigger downstream workflows, so the
+      # release PR's CI and the on-release binary build would never run. A
+      # GitHub App token (set up once, see CONTRIBUTING.md) fixes that.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # When the release PR is merged, tags the commit and creates the GitHub
+  # Release (which triggers release-binaries.yml).
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

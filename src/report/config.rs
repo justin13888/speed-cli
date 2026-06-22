@@ -292,6 +292,7 @@ pub struct HttpTestConfig {
 }
 
 impl HttpTestConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new<T>(
         server: String,
         port: Option<u16>,

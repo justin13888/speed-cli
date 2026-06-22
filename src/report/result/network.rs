@@ -107,10 +107,7 @@ impl NetworkTestResult {
     /// Wire (or as a footnote in Goodput mode).
     fn render_wire_rate_line(&self, result: &ThroughputResult) -> String {
         use humansize::{BaseUnit, DECIMAL, format_size_i};
-        let bps = result.avg_throughput_wire_bps(
-            self.wire_overhead_per_segment(),
-            self.wire_mtu(),
-        );
+        let bps = result.avg_throughput_wire_bps(self.wire_overhead_per_segment(), self.wire_mtu());
         format!(
             "    Wire-rate (est): {}",
             format_size_i(bps, DECIMAL.base_unit(BaseUnit::Bit).suffix("/s"))

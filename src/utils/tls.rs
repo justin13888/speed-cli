@@ -59,10 +59,7 @@ impl TlsMaterial {
             .collect::<std::result::Result<_, _>>()
             .map_err(|e| eyre!("parsing certificate {}: {e}", cert_path.display()))?;
         if certs.is_empty() {
-            return Err(eyre!(
-                "no certificates found in {}",
-                cert_path.display()
-            ));
+            return Err(eyre!("no certificates found in {}", cert_path.display()));
         }
         let key = PrivateKeyDer::from_pem_file(key_path)
             .map_err(|e| eyre!("reading private key {}: {e}", key_path.display()))?;
@@ -73,12 +70,13 @@ impl TlsMaterial {
     /// list. Pinned to TLS 1.3 with the aws-lc-rs provider — required
     /// by QUIC and harmless for the HTTPS listener.
     pub fn server_config(&self, alpn: &[&[u8]]) -> Result<ServerConfig> {
-        let mut config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|e| eyre!("rustls TLS 1.3 setup failed: {e}"))?
-            .with_no_client_auth()
-            .with_single_cert(self.certs.clone(), self.key.clone_key())
-            .map_err(|e| eyre!("rustls server config (cert/key) failed: {e}"))?;
+        let mut config =
+            ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(|e| eyre!("rustls TLS 1.3 setup failed: {e}"))?
+                .with_no_client_auth()
+                .with_single_cert(self.certs.clone(), self.key.clone_key())
+                .map_err(|e| eyre!("rustls server config (cert/key) failed: {e}"))?;
         config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         // QUIC permits early data to be 0 or u32::MAX; harmless for TCP TLS.
         config.max_early_data_size = u32::MAX;

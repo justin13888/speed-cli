@@ -1,45 +1,34 @@
 use colored::*;
-use eyre::Result;
+use eyre::{Result, WrapErr as _};
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::{error, info, trace};
 
 use clap::Parser;
-use cli::{Cli, Commands};
-use performance::suite::{SuiteConfig, run_suite};
-use performance::tcp::client::run_tcp_client;
-use performance::udp::client::run_udp_client;
-
-pub use utils::types::*;
-
-use crate::constants::MAX_HTTP_UPLOAD_SIZE;
-use crate::control::{
+use speed_cli::ClientMode;
+use speed_cli::cli::{Cli, Commands};
+use speed_cli::constants::MAX_HTTP_UPLOAD_SIZE;
+use speed_cli::control::{
     ControlServerConfig, EnabledProtocols, PortOverrides, ServerManifest, ServerRuntime,
     TestTransport, bind_all, perform_handshake, run_control_server,
 };
-use crate::performance::http::HttpVersion;
-use crate::performance::http::client::run_http_test;
-use crate::performance::quic::client::run_quic_client;
-use crate::report::{
+use speed_cli::performance::http::HttpVersion;
+use speed_cli::performance::http::client::run_http_test;
+use speed_cli::performance::quic::client::run_quic_client;
+use speed_cli::performance::suite::{SuiteConfig, run_suite};
+use speed_cli::performance::tcp::client::run_tcp_client;
+use speed_cli::performance::udp::client::run_udp_client;
+use speed_cli::report::{
     DEFAULT_TCP_READ_BUFFER, HttpTestConfig, QuicTestConfig, TcpTestConfig, TestReport,
     UdpTestConfig,
 };
-use crate::utils::export::{export_report, export_report_html};
-use crate::utils::file::can_write;
-use crate::utils::import::import_report_cbor;
-use crate::utils::progress::with_progress_counter;
-use crate::utils::tls::TlsMaterial;
-
-mod cli;
-mod constants;
-mod control;
-mod performance;
-mod renderer;
-mod report;
-mod utils;
+use speed_cli::utils::export::{export_report, export_report_html};
+use speed_cli::utils::file::can_write;
+use speed_cli::utils::import::import_report_cbor;
+use speed_cli::utils::progress::with_progress_counter;
+use speed_cli::utils::tls::TlsMaterial;
 
 /// Creates an optimized Tokio runtime for network performance testing
 #[allow(dead_code)]
@@ -55,23 +44,10 @@ fn create_optimized_runtime() -> tokio::runtime::Runtime {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    // Initialize tracing subscriber for logging
-    let filter_layer = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info"))
-        .unwrap();
-    let fmt_layer = fmt::layer()
-        .pretty()
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_file(true)
-        .with_line_number(true);
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(fmt_layer)
-        .init();
-
     let cli = Cli::parse();
-    trace!("Parsed CLI arguments: {:#?}", cli);
+    speed_cli::utils::logging::init(cli.verbose, cli.quiet, cli.color);
+    speed_cli::performance::engine::progress::set_enabled(!cli.quiet);
+    trace!("Parsed CLI arguments: {cli:#?}");
 
     match cli.command {
         Commands::Client {
@@ -79,14 +55,7 @@ async fn main() -> Result<()> {
             control_port,
             duration,
             warmup,
-            mode,
-            tcp,
-            udp,
-            quic,
-            http1,
-            http2,
-            h2c,
-            http3,
+            protocol,
             export,
             connections,
             test_type,
@@ -95,37 +64,23 @@ async fn main() -> Result<()> {
             accounting,
             target_rate_mbps,
         } => {
+            if warmup >= duration {
+                return Err(eyre::eyre!(
+                    "--warmup ({warmup}s) must be less than --duration ({duration}s)"
+                ));
+            }
             let warmup = std::time::Duration::from_secs(warmup);
             let accounting = match accounting {
-                cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
-                cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
+                speed_cli::cli::AccountingArg::Goodput => {
+                    speed_cli::report::ThroughputAccounting::Goodput
+                }
+                speed_cli::cli::AccountingArg::Wire => {
+                    speed_cli::report::ThroughputAccounting::Wire
+                }
             };
             let target_rate_bps: u64 = target_rate_mbps.saturating_mul(1_000_000);
 
-            // Exactly one protocol must be selected.
-            let protocols = [mode.is_some(), tcp, udp, quic, http1, http2, h2c, http3];
-            if protocols.iter().filter(|&&x| x).count() != 1 {
-                return Err(eyre::eyre!(
-                    "Exactly one protocol must be specified. Use --tcp, --udp, --quic, --http1, --http2, --h2c, or --http3."
-                ));
-            }
-            let mode: ClientMode = mode.unwrap_or_else(|| {
-                if tcp {
-                    ClientMode::TCP
-                } else if udp {
-                    ClientMode::UDP
-                } else if quic {
-                    ClientMode::QUIC
-                } else if http1 {
-                    ClientMode::HTTP1
-                } else if http2 {
-                    ClientMode::HTTP2
-                } else if h2c {
-                    ClientMode::H2C
-                } else {
-                    ClientMode::HTTP3
-                }
-            });
+            let mode = protocol;
 
             // Verify export file path is writable.
             if let Some(export) = &export {
@@ -158,25 +113,43 @@ async fn main() -> Result<()> {
 
             let report: TestReport = match mode {
                 ClientMode::TCP => {
-                    let config =
-                        TcpTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
-                            .with_warmup(warmup)
-                            .with_accounting(accounting);
+                    let config = TcpTestConfig::new(
+                        host,
+                        Some(port),
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    )
+                    .with_warmup(warmup)
+                    .with_accounting(accounting);
                     run_tcp_client(config).await?
                 }
                 ClientMode::UDP => {
-                    let config =
-                        UdpTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
-                            .with_warmup(warmup)
-                            .with_accounting(accounting)
-                            .with_target_rate_bps(target_rate_bps);
+                    let config = UdpTestConfig::new(
+                        host,
+                        Some(port),
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    )
+                    .with_warmup(warmup)
+                    .with_accounting(accounting)
+                    .with_target_rate_bps(target_rate_bps);
                     run_udp_client(config).await?
                 }
                 ClientMode::QUIC => {
-                    let config =
-                        QuicTestConfig::new(host, Some(port), duration, connections, test_type, test_sizes)
-                            .with_warmup(warmup)
-                            .with_accounting(accounting);
+                    let config = QuicTestConfig::new(
+                        host,
+                        Some(port),
+                        duration,
+                        connections,
+                        test_type,
+                        test_sizes,
+                    )
+                    .with_warmup(warmup)
+                    .with_accounting(accounting);
                     run_quic_client(config).await?
                 }
                 ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
@@ -207,29 +180,19 @@ async fn main() -> Result<()> {
             println!("{report:#}");
 
             if let Some(export) = &export {
-                match with_progress_counter(
-                    "Exporting test results",
-                    export_report(&report, export),
-                )
-                .await
-                {
-                    Ok(_) => println!(
-                        "{}",
-                        format!("Results exported to {}", export.to_string_lossy()).cyan()
-                    ),
-                    Err(e) => eprintln!("Error exporting results: {e}"),
-                }
+                with_progress_counter("Exporting test results", export_report(&report, export))
+                    .await
+                    .wrap_err_with(|| format!("exporting results to {}", export.display()))?;
+                println!(
+                    "{}",
+                    format!("Results exported to {}", export.to_string_lossy()).cyan()
+                );
             }
         }
 
         Commands::Server {
             all,
-            tcp,
-            udp,
-            quic,
-            http,
-            https,
-            http3,
+            protocols,
             bind,
             control_port,
             tcp_port,
@@ -242,13 +205,15 @@ async fn main() -> Result<()> {
             cert,
             key,
         } => {
+            use speed_cli::cli::ServerProtocol;
+            let has = |p: ServerProtocol| all || protocols.contains(&p);
             let enabled = EnabledProtocols {
-                tcp: tcp || all,
-                udp: udp || all,
-                http: http || all,
-                https: https || all,
-                http3: http3 || all,
-                quic: quic || all,
+                tcp: has(ServerProtocol::Tcp),
+                udp: has(ServerProtocol::Udp),
+                http: has(ServerProtocol::Http),
+                https: has(ServerProtocol::Https),
+                http3: has(ServerProtocol::Http3),
+                quic: has(ServerProtocol::Quic),
             };
             if !enabled.tcp
                 && !enabled.udp
@@ -258,7 +223,7 @@ async fn main() -> Result<()> {
                 && !enabled.quic
             {
                 return Err(eyre::eyre!(
-                    "At least one server mode must be enabled. Use --all to enable all modes."
+                    "At least one protocol must be enabled. Use --all or --protocol <p>."
                 ));
             }
 
@@ -346,14 +311,14 @@ async fn main() -> Result<()> {
                     let mut sigterm = match signal(SignalKind::terminate()) {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("Failed to install SIGTERM handler: {e}");
+                            error!("Failed to install SIGTERM handler: {e}");
                             return;
                         }
                     };
                     tokio::select! {
                         res = tokio::signal::ctrl_c() => {
                             if let Err(e) = res {
-                                eprintln!("ctrl_c handler error: {e}");
+                                error!("ctrl_c handler error: {e}");
                                 return;
                             }
                             println!("\n{}", "Received SIGINT, shutting down gracefully...".yellow().bold());
@@ -366,10 +331,15 @@ async fn main() -> Result<()> {
                 #[cfg(not(unix))]
                 {
                     if let Err(e) = tokio::signal::ctrl_c().await {
-                        eprintln!("ctrl_c handler error: {e}");
+                        error!("ctrl_c handler error: {e}");
                         return;
                     }
-                    println!("\n{}", "Received SIGINT, shutting down gracefully...".yellow().bold());
+                    println!(
+                        "\n{}",
+                        "Received SIGINT, shutting down gracefully..."
+                            .yellow()
+                            .bold()
+                    );
                 }
                 cancel_for_signal.cancel();
             });
@@ -395,19 +365,22 @@ async fn main() -> Result<()> {
             )
             .await;
 
+            let mut any_failed = false;
             for (name, result) in results {
                 match result {
-                    Ok(server_result) => {
-                        if let Err(e) = server_result {
-                            eprintln!("{name} server failed: {e}");
-                        } else {
-                            println!("{name} server completed successfully");
-                        }
+                    Ok(Ok(())) => info!("{name} server completed successfully"),
+                    Ok(Err(e)) => {
+                        error!("{name} server failed: {e}");
+                        any_failed = true;
                     }
                     Err(e) => {
-                        eprintln!("{name} server task panicked: {e}");
+                        error!("{name} server task panicked: {e}");
+                        any_failed = true;
                     }
                 }
+            }
+            if any_failed {
+                return Err(eyre::eyre!("one or more server listeners failed"));
             }
         }
 
@@ -441,19 +414,18 @@ async fn main() -> Result<()> {
                     match export_html {
                         None => println!("{report:#}"),
                         Some(html_file) => {
-                            match with_progress_counter(
+                            with_progress_counter(
                                 "Exporting report to HTML",
                                 export_report_html(&report, &html_file),
                             )
                             .await
-                            {
-                                Ok(_) => println!(
-                                    "{}",
-                                    format!("HTML report exported to {}", html_file.display())
-                                        .cyan()
-                                ),
-                                Err(e) => eprintln!("Error exporting to HTML: {e}"),
-                            }
+                            .wrap_err_with(|| {
+                                format!("exporting HTML report to {}", html_file.display())
+                            })?;
+                            println!(
+                                "{}",
+                                format!("HTML report exported to {}", html_file.display()).cyan()
+                            );
                         }
                     }
                 }
@@ -477,6 +449,11 @@ async fn main() -> Result<()> {
             accounting,
             export,
         } => {
+            if warmup >= duration {
+                return Err(eyre::eyre!(
+                    "--warmup ({warmup}s) must be less than per-phase --duration ({duration}s)"
+                ));
+            }
             let cfg = SuiteConfig {
                 control_port,
                 phase_duration: std::time::Duration::from_secs(duration),
@@ -484,8 +461,12 @@ async fn main() -> Result<()> {
                 connections,
                 udp_target_rate_mbps,
                 accounting: match accounting {
-                    cli::AccountingArg::Goodput => crate::report::ThroughputAccounting::Goodput,
-                    cli::AccountingArg::Wire => crate::report::ThroughputAccounting::Wire,
+                    speed_cli::cli::AccountingArg::Goodput => {
+                        speed_cli::report::ThroughputAccounting::Goodput
+                    }
+                    speed_cli::cli::AccountingArg::Wire => {
+                        speed_cli::report::ThroughputAccounting::Wire
+                    }
                 },
                 include_tls: !no_tls,
                 // `server` plus the shared I/O-size defaults come from `new`.
@@ -516,11 +497,27 @@ async fn main() -> Result<()> {
                 ciborium::into_writer(&suite, &mut buf)
                     .map_err(|e| eyre::eyre!("CBOR encode: {e}"))?;
                 tokio::fs::write(export, &buf).await?;
-                eprintln!(
+                println!(
                     "{}",
                     format!("Suite report exported to {}", export.display()).cyan()
                 );
             }
+        }
+
+        Commands::Completions { shell } => {
+            use clap::CommandFactory as _;
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "speed-cli",
+                &mut std::io::stdout(),
+            );
+        }
+
+        Commands::Man { out_dir } => {
+            use clap::CommandFactory as _;
+            std::fs::create_dir_all(&out_dir)?;
+            clap_mangen::generate_to(Cli::command(), &out_dir)?;
         }
     }
 

@@ -1,0 +1,41 @@
+amends "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Config.pkl"
+
+import "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Builtins.pkl"
+
+// pre-commit MUTATES: `cargo fmt` + `cargo clippy --fix` on staged code, then
+// re-stage, so every commit lands already-clean. The fmt/clippy builtins define
+// both a `check` and a `fix` command; `fix = true` selects the mutating ones.
+//
+// pre-push VERIFIES only (no mutation): fmt --check + clippy (deny warnings) +
+// typos + tests, failing the push if anything is unclean. typos is intentionally
+// NOT in pre-commit: its auto-fix mode wrongly rewrites all-caps acronym plurals
+// in comments, so it only ever runs read-only here.
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps {
+      // clippy --fix first, then fmt formats clippy's rewrites (otherwise a
+      // parallel fmt can run before clippy and leave its output unformatted).
+      ["clippy"] = Builtins.cargo_clippy
+      ["fmt"] = (Builtins.cargo_fmt) { depends = List("clippy") }
+    }
+  }
+  ["commit-msg"] {
+    steps {
+      ["conventional"] = Builtins.check_conventional_commit
+    }
+  }
+  ["pre-push"] {
+    steps {
+      ["fmt"] = Builtins.cargo_fmt
+      ["clippy"] = (Builtins.cargo_clippy) {
+        check = "cargo clippy --all-targets --all-features -- -D warnings"
+      }
+      ["typos"] = Builtins.typos
+      ["test"] {
+        check = "cargo nextest run --all-features"
+      }
+    }
+  }
+}

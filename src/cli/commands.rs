@@ -10,6 +10,18 @@ pub enum AccountingArg {
     Wire,
 }
 
+/// Protocols a server can serve. `Http` enables HTTP/1.1 and h2c; `Https` is
+/// HTTP/2 over TLS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ServerProtocol {
+    Tcp,
+    Udp,
+    Quic,
+    Http,
+    Https,
+    Http3,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Run as client
@@ -34,45 +46,9 @@ pub enum Commands {
         #[arg(long, default_value = "1")]
         warmup: u64,
 
-        /// Protocol mode (tcp, udp, quic, http1, http2, h2c, http3)
-        #[arg(short, long, value_enum)]
-        #[clap(group = "protocol")]
-        mode: Option<ClientMode>,
-
-        /// Use TCP protocol
-        #[arg(long)]
-        #[clap(group = "protocol")]
-        tcp: bool,
-
-        /// Use UDP protocol
-        #[arg(long)]
-        #[clap(group = "protocol")]
-        udp: bool,
-
-        /// Use raw QUIC stream throughput
-        #[arg(long)]
-        #[clap(group = "protocol")]
-        quic: bool,
-
-        /// Use HTTP/1.1 without TLS
-        #[arg(long)]
-        #[clap(group = "protocol", alias = "http")]
-        http1: bool,
-
-        /// Use HTTP/2 with TLS
-        #[arg(long)]
-        #[clap(group = "protocol")]
-        http2: bool,
-
-        /// Use h2c (HTTP/2 Cleartext)
-        #[arg(long)]
-        #[clap(group = "protocol")]
-        h2c: bool,
-
-        /// Use HTTP/3 (over QUIC)
-        #[arg(long)]
-        #[clap(group = "protocol")]
-        http3: bool,
+        /// Protocol to test: tcp, udp, quic, http1, h2c, http2, or http3.
+        #[arg(short = 'p', long, value_enum)]
+        protocol: ClientMode,
 
         /// Export results to file. `.cbor` (or no extension) writes the
         /// raw CBOR data report; `.html` writes a rendered single-file
@@ -116,35 +92,14 @@ pub enum Commands {
     /// distinct (OS-assigned ephemeral) port and is advertised through
     /// that endpoint; clients only ever need the control port.
     Server {
-        /// Enable all server modes
-        #[arg(short, long, action = clap::ArgAction::SetTrue)]
-        #[clap(conflicts_with_all = ["tcp", "udp", "http", "https", "http3", "quic"])]
+        /// Enable all server protocols.
+        #[arg(short, long, action = clap::ArgAction::SetTrue, conflicts_with = "protocols")]
         all: bool,
 
-        /// Enable TCP server mode
-        #[arg(long)]
-        tcp: bool,
-
-        /// Enable UDP server mode
-        #[arg(long)]
-        udp: bool,
-
-        /// Enable raw QUIC server mode
-        #[arg(long)]
-        quic: bool,
-
-        /// Enable unencrypted HTTP server modes (HTTP/1.1 and h2c, on
-        /// separate ports each)
-        #[arg(long, alias = "http1")]
-        http: bool,
-
-        /// Enable HTTPS server mode (HTTP/2 over TLS)
-        #[arg(long)]
-        https: bool,
-
-        /// Enable HTTP/3 server mode (over QUIC)
-        #[arg(long)]
-        http3: bool,
+        /// Protocols to serve (repeatable), e.g. `--protocol tcp --protocol http`.
+        /// `http` serves HTTP/1.1 and h2c; `https` is HTTP/2 over TLS.
+        #[arg(long = "protocol", value_enum)]
+        protocols: Vec<ServerProtocol>,
 
         /// Bind to specific interface. Defaults to 0.0.0.0
         #[arg(short, long, default_value = "0.0.0.0")]
@@ -236,5 +191,19 @@ pub enum Commands {
         /// Export the suite report to a CBOR file.
         #[arg(short, long)]
         export: Option<PathBuf>,
+    },
+
+    /// Print a shell completion script to stdout (e.g. `completions zsh`).
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Generate man pages into a directory.
+    Man {
+        /// Output directory (created if missing).
+        #[arg(long, default_value = ".")]
+        out_dir: PathBuf,
     },
 }

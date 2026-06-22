@@ -47,7 +47,6 @@ impl TestTransport {
             TestTransport::QuicRaw => "quic",
         }
     }
-
 }
 
 /// One advertised test listener.

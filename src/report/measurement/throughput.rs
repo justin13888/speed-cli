@@ -88,7 +88,7 @@ impl Display for Sample {
                 f,
                 "{} in {} ms ({})",
                 format_size(self.bytes, BINARY).cyan(),
-                (self.duration_us / 1000).to_string().yellow(),
+                format!("{:.2}", self.duration_us as f64 / 1000.0).yellow(),
                 format_size_i(
                     self.throughput_bps(),
                     DECIMAL.base_unit(BaseUnit::Bit).suffix("/s")
@@ -100,9 +100,24 @@ impl Display for Sample {
                 "{}: {} (after {} ms, {} retries)",
                 "Error".red(),
                 error,
-                (self.duration_us / 1000).to_string().yellow(),
+                format!("{:.2}", self.duration_us as f64 / 1000.0).yellow(),
                 retry_count.to_string().yellow()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_millisecond_sample_is_not_truncated_to_zero_ms() {
+        colored::control::set_override(false);
+        // 500us used to render as "0 ms" via integer division; it must now
+        // show fractional milliseconds.
+        let s = Sample::success(0, 500, 1024, false);
+        let rendered = format!("{s}");
+        assert!(rendered.contains("0.50 ms"), "got: {rendered}");
     }
 }

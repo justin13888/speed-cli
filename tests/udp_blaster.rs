@@ -20,9 +20,10 @@ async fn upload_and_download_roundtrip() -> Result<()> {
     let port = pick_port().await?;
     let cancel = CancellationToken::new();
     let server_cancel = cancel.clone();
-    let server = tokio::spawn(async move {
-        run_udp_server(format!("127.0.0.1:{port}"), server_cancel).await
-    });
+    let server =
+        tokio::spawn(
+            async move { run_udp_server(format!("127.0.0.1:{port}"), server_cancel).await },
+        );
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let config = UdpTestConfig::new(
@@ -70,7 +71,9 @@ async fn latency_runs() -> Result<()> {
     let cancel = CancellationToken::new();
     let server_cancel = cancel.clone();
     let server =
-        tokio::spawn(async move { run_udp_server(format!("127.0.0.1:{port}"), server_cancel).await });
+        tokio::spawn(
+            async move { run_udp_server(format!("127.0.0.1:{port}"), server_cancel).await },
+        );
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let config = UdpTestConfig::new(
@@ -89,7 +92,10 @@ async fn latency_runs() -> Result<()> {
         _ => panic!("expected network result"),
     };
     let latency = net.latency.as_ref().expect("latency present");
-    assert!(latency.successful_count() > 0, "got at least one RTT sample");
+    assert!(
+        latency.successful_count() > 0,
+        "got at least one RTT sample"
+    );
 
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), server).await;

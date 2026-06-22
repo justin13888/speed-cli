@@ -1,0 +1,5 @@
+# release-plz: automate version bumps, CHANGELOG, and GitHub Releases from
+# Conventional Commits. We do NOT publish to crates.io (this is a CLI binary),
+# so `publish = false`; tag + GitHub Release creation stay enabled by default.
+[workspace]
+publish = false

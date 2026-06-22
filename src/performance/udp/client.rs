@@ -27,34 +27,21 @@ use tracing::{debug, trace};
 use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
 use crate::{
     TestType,
+    performance::engine::{
+        LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+        measurement_duration_us, offset_us,
+    },
     report::{
         ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
         Sample, StreamSamples, TestReport, ThroughputResult, UdpRunStats, UdpStatsSide,
         UdpTestConfig,
     },
-    utils::{
-        format::format_bytes,
-        instrumentation::{
-            LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        },
-    },
+    utils::format::format_bytes,
 };
-
-fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
-    end.duration_since(start)
-        .saturating_sub(warmup)
-        .max(Duration::from_millis(1))
-        .as_micros() as u64
-}
-
-#[inline]
-fn offset_us(start: Instant, now: Instant) -> u64 {
-    now.duration_since(start).as_micros() as u64
-}
 
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
-    eprintln!(
+    tracing::info!(
         "{}",
         format!("Starting UDP test to server {}...", server_addr.cyan())
             .green()
@@ -172,9 +159,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
 /// UDP socket. Returns `(server_identity, observed_client_addr)` on
 /// success, or `None` if the server didn't reply with a parseable
 /// `HelloAck` within a short window.
-async fn run_udp_hello(
-    socket: &UdpSocket,
-) -> Option<(PeerIdentity, std::net::SocketAddr)> {
+async fn run_udp_hello(socket: &UdpSocket) -> Option<(PeerIdentity, std::net::SocketAddr)> {
     let mut id_buf = Vec::new();
     ciborium::into_writer(&PeerIdentity::local(), &mut id_buf).ok()?;
     let hello = BlasterPacket::Hello {
@@ -208,7 +193,7 @@ async fn run_latency(
     duration: Duration,
     warmup: Duration,
 ) -> Result<Option<LatencyResult>> {
-    eprintln!("Measuring UDP latency for {duration:?}...");
+    tracing::info!("Measuring UDP latency for {duration:?}...");
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -294,7 +279,7 @@ async fn run_download(
     warmup: Duration,
     target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "UDP download: {} payload, {} target rate",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
@@ -324,6 +309,11 @@ async fn run_download(
     let mut buf = vec![0u8; payload_size + 64];
     let mut samples: Vec<Sample> = Vec::new();
     let mut rx_stats = ReceiveStats::default();
+    // A transient recv error (e.g. an ICMP port-unreachable surfaced on the
+    // socket) shouldn't abort the whole download; bail only after several in a
+    // row, which signals the socket is genuinely dead.
+    let mut consecutive_errors = 0u32;
+    const MAX_CONSECUTIVE_RECV_ERRORS: u32 = 8;
 
     while start_time.elapsed() < duration {
         let is_warmup = start_time.elapsed() < warmup;
@@ -331,6 +321,7 @@ async fn run_download(
         let t_start_us = offset_us(start_time, recv_start);
         match timeout(Duration::from_millis(200), socket.recv(&mut buf)).await {
             Ok(Ok(n)) => {
+                consecutive_errors = 0;
                 let recv_ts = now_us();
                 if let Some((BlasterPacket::Data { seq, send_ts_us }, payload_len)) =
                     BlasterPacket::decode(&buf[..n])
@@ -353,7 +344,13 @@ async fn run_download(
                 );
                 samples.push(s.clone());
                 let _ = tx.send(s);
-                break;
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_RECV_ERRORS {
+                    tracing::warn!(
+                        "UDP download: {consecutive_errors} consecutive recv errors, stopping"
+                    );
+                    break;
+                }
             }
             Err(_) => continue,
         }
@@ -407,7 +404,7 @@ async fn run_upload(
     warmup: Duration,
     target_rate_bps: u64,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "UDP upload: {} payload, {} target rate",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
@@ -436,7 +433,9 @@ async fn run_upload(
 
     let inter_packet_delay = if target_rate_bps > 0 {
         let bps = target_rate_bps as f64 / 8.0;
-        Some(Duration::from_secs_f64((payload_size as f64) / bps.max(1.0)))
+        Some(Duration::from_secs_f64(
+            (payload_size as f64) / bps.max(1.0),
+        ))
     } else {
         None
     };
@@ -498,7 +497,7 @@ async fn run_upload(
 
         if let Some(d) = inter_packet_delay {
             sleep(d).await;
-        } else if seq % 256 == 0 {
+        } else if seq.is_multiple_of(256) {
             tokio::task::yield_now().await;
         }
     }

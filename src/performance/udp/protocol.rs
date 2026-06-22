@@ -93,13 +93,9 @@ pub enum BlasterPacket {
         duplicates: u64,
     },
     /// Latency probe.
-    Ping {
-        send_ts_us: u64,
-    },
+    Ping { send_ts_us: u64 },
     /// Latency response. `send_ts_us` echoes the corresponding Ping.
-    Pong {
-        send_ts_us: u64,
-    },
+    Pong { send_ts_us: u64 },
     /// Client → Server: identity handshake. `identity_cbor` is a
     /// CBOR-encoded `PeerIdentity` (kept opaque at the protocol layer
     /// so this module doesn't depend on the report types).
@@ -272,7 +268,11 @@ impl BlasterPacket {
                 let jitter_us = buf.get_u64();
                 // duplicates was added later; treat absence as 0 so we
                 // can decode reports from older peers without crashing.
-                let duplicates = if buf.remaining() >= 8 { buf.get_u64() } else { 0 };
+                let duplicates = if buf.remaining() >= 8 {
+                    buf.get_u64()
+                } else {
+                    0
+                };
                 Some((
                     BlasterPacket::Report {
                         received,
@@ -537,7 +537,9 @@ mod tests {
         let bytes = p.encode_to_vec(None);
         let (decoded, _) = BlasterPacket::decode(&bytes).unwrap();
         match decoded {
-            BlasterPacket::Report { duplicates, lost, .. } => {
+            BlasterPacket::Report {
+                duplicates, lost, ..
+            } => {
                 assert_eq!(duplicates, 3);
                 assert_eq!(lost, 5);
             }

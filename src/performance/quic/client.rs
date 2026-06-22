@@ -21,14 +21,15 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::TestType;
+use crate::performance::engine::{
+    LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
+    measurement_duration_us, offset_us,
+};
 use crate::performance::handshake::client_hello_io;
 use crate::performance::quic::QUIC_RAW_ALPN;
 use crate::report::{
     ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
     QuicTestConfig, Sample, StreamSamples, TestReport, ThroughputResult,
-};
-use crate::utils::instrumentation::{
-    LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
 };
 
 /// Certificate verifier that accepts any server certificate. This
@@ -83,27 +84,14 @@ impl ServerCertVerifier for AcceptAnyServerCert {
     }
 }
 
-#[inline]
-fn offset_us(start: Instant, now: Instant) -> u64 {
-    now.duration_since(start).as_micros() as u64
-}
-
-fn measurement_duration_us(start: Instant, end: Instant, warmup: Duration) -> u64 {
-    end.duration_since(start)
-        .saturating_sub(warmup)
-        .max(Duration::from_millis(1))
-        .as_micros() as u64
-}
-
 fn client_config() -> Result<ClientConfig> {
-    let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(
-        aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|e| eyre!("raw-QUIC client TLS setup: {e}"))?
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
-    .with_no_client_auth();
+    let mut crypto =
+        rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| eyre!("raw-QUIC client TLS setup: {e}"))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+            .with_no_client_auth();
     crypto.alpn_protocols = vec![QUIC_RAW_ALPN.to_vec()];
 
     let quic = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
@@ -119,9 +107,9 @@ async fn connect(server: &str, port: u16) -> Result<(Endpoint, Connection)> {
         .ok_or_else(|| eyre!("raw-QUIC: no address for {server}:{port}"))?;
 
     let bind: SocketAddr = if addr.is_ipv6() {
-        "[::]:0".parse().unwrap()
+        SocketAddr::from(([0u16; 8], 0))
     } else {
-        "0.0.0.0:0".parse().unwrap()
+        SocketAddr::from(([0u8; 4], 0))
     };
     let mut endpoint =
         Endpoint::client(bind).map_err(|e| eyre!("raw-QUIC: client endpoint: {e}"))?;
@@ -136,7 +124,7 @@ async fn connect(server: &str, port: u16) -> Result<(Endpoint, Connection)> {
 }
 
 pub async fn run_quic_client(config: QuicTestConfig) -> Result<TestReport> {
-    eprintln!(
+    tracing::info!(
         "{}",
         format!(
             "Starting raw-QUIC test to server {}:{}...",
@@ -231,7 +219,7 @@ async fn quic_hello(conn: &Connection) -> Option<(PeerIdentity, SocketAddr)> {
 }
 
 async fn run_download(conn: &Connection, config: &QuicTestConfig) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting raw-QUIC download over {} streams...",
         config.parallel_connections.to_string().yellow()
     );
@@ -303,7 +291,9 @@ async fn run_download(conn: &Connection, config: &QuicTestConfig) -> Result<Thro
 
     let results = futures::future::join_all(tasks).await;
     drop(tx);
-    let _ = collector.finish(pb, "raw-QUIC download complete".to_string()).await;
+    let _ = collector
+        .finish(pb, "raw-QUIC download complete".to_string())
+        .await;
     Ok(into_result(results, start, warmup))
 }
 
@@ -312,7 +302,7 @@ async fn run_upload(
     config: &QuicTestConfig,
     payload_size: usize,
 ) -> Result<ThroughputResult> {
-    eprintln!(
+    tracing::info!(
         "Starting raw-QUIC upload over {} streams...",
         config.parallel_connections.to_string().yellow()
     );
@@ -388,7 +378,9 @@ async fn run_upload(
 
     let results = futures::future::join_all(tasks).await;
     drop(tx);
-    let _ = collector.finish(pb, "raw-QUIC upload complete".to_string()).await;
+    let _ = collector
+        .finish(pb, "raw-QUIC upload complete".to_string())
+        .await;
     Ok(into_result(results, start, warmup))
 }
 
@@ -397,7 +389,7 @@ async fn run_full_duplex(
     config: &QuicTestConfig,
     payload_size: usize,
 ) -> Result<(ThroughputResult, ThroughputResult)> {
-    eprintln!(
+    tracing::info!(
         "Starting raw-QUIC full-duplex over {} streams...",
         config.parallel_connections.to_string().yellow()
     );
@@ -441,12 +433,8 @@ async fn run_full_duplex(
                     let w = start.elapsed() < warmup;
                     match recv.read(&mut buf).await {
                         Ok(Some(n)) => {
-                            let s = Sample::success(
-                                t,
-                                op.elapsed().as_micros() as u64,
-                                n as u64,
-                                w,
-                            );
+                            let s =
+                                Sample::success(t, op.elapsed().as_micros() as u64, n as u64, w);
                             dl.push(s.clone());
                             let _ = dl_tx.send(s);
                         }
@@ -534,7 +522,7 @@ async fn measure_latency(
 ) -> Result<Option<LatencyResult>> {
     let duration = config.duration;
     let warmup = config.warmup;
-    eprintln!("Measuring raw-QUIC in-stream RTT for {duration:?}...");
+    tracing::info!("Measuring raw-QUIC in-stream RTT for {duration:?}...");
 
     let pb = create_progress_bar(ProgressBarType::Latency, duration);
     let start = Instant::now();
@@ -558,17 +546,16 @@ async fn measure_latency(
         send_buf.copy_from_slice(&nonce.to_le_bytes());
 
         let measurement = match send.write_all(&send_buf).await {
-            Ok(()) => match tokio::time::timeout(
-                Duration::from_secs(2),
-                recv.read_exact(&mut recv_buf),
-            )
-            .await
-            {
-                Ok(Ok(())) => {
-                    LatencyMeasurement::success(t_start_us, probe.elapsed().as_micros() as u64)
+            Ok(()) => {
+                match tokio::time::timeout(Duration::from_secs(2), recv.read_exact(&mut recv_buf))
+                    .await
+                {
+                    Ok(Ok(())) => {
+                        LatencyMeasurement::success(t_start_us, probe.elapsed().as_micros() as u64)
+                    }
+                    _ => LatencyMeasurement::dropped(t_start_us),
                 }
-                _ => LatencyMeasurement::dropped(t_start_us),
-            },
+            }
             Err(_) => LatencyMeasurement::dropped(t_start_us),
         };
         if !in_warmup {
