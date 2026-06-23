@@ -69,7 +69,10 @@ pub enum Commands {
         #[arg(long = "sizes", num_args = 0.., value_delimiter = ',')]
         test_sizes: Vec<usize>,
 
-        /// Maximum chunk size. Effective only for HTTP/1.1 tests.
+        /// Application-level chunk size for HTTP upload/download bodies (HTTP
+        /// only; TCP and UDP ignore it). Visible on the wire mainly for
+        /// HTTP/1.1 — HTTP/2 and HTTP/3 re-frame bodies into their own frame
+        /// sizes regardless.
         #[arg(long)]
         chunk_size: Option<usize>,
 
