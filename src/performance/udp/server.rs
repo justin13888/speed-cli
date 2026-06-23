@@ -21,7 +21,7 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
-use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
+use super::protocol::{BlasterPacket, DataPacketWriter, Mode, ReceiveStats, now_us};
 use crate::report::PeerIdentity;
 
 /// Hard ceiling on per-source sessions. Beyond this we evict the
@@ -323,6 +323,10 @@ async fn download_sender(
     use rand::RngCore as _;
     let mut payload = vec![0u8; payload_size];
     rand::rng().fill_bytes(&mut payload);
+    // One reusable packet buffer: the payload is constant for the session, so
+    // each send rewrites only seq + timestamp instead of reallocating and
+    // re-copying the payload.
+    let mut packet = DataPacketWriter::new(&payload);
 
     let inter_packet_delay = if target_rate_bps > 0 {
         // bytes per second from bps; seconds per packet from that.
@@ -341,12 +345,8 @@ async fn download_sender(
             break;
         }
 
-        let pkt = BlasterPacket::Data {
-            seq,
-            send_ts_us: now_us(),
-        };
-        let bytes = pkt.encode_to_vec(Some(&payload));
-        if let Err(e) = socket.send_to(&bytes, peer).await {
+        let bytes = packet.frame(seq, now_us());
+        if let Err(e) = socket.send_to(bytes, peer).await {
             debug!("blaster download send_to {} failed: {}", peer, e);
             break;
         }

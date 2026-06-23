@@ -357,6 +357,42 @@ impl BlasterPacket {
     }
 }
 
+/// Reusable encoder for DATA packets. A DATA packet is a fixed 24-byte header
+/// (magic, kind, padding, seq, send_ts_us) followed by a payload that stays
+/// constant for the life of a blaster session. Rather than allocate a fresh
+/// buffer and re-copy the payload on every packet (as [`BlasterPacket::encode_to_vec`]
+/// does), this renders the whole packet once and then rewrites only the 16
+/// mutable header bytes — `seq` and `send_ts_us` — per packet. The bytes it
+/// produces are byte-for-byte identical to
+/// `BlasterPacket::Data { seq, send_ts_us }.encode_to_vec(Some(payload))`.
+pub struct DataPacketWriter {
+    buf: Vec<u8>,
+}
+
+impl DataPacketWriter {
+    /// magic(4) + kind(1) + pad(3) + seq(8) + send_ts_us(8).
+    const HEADER_LEN: usize = 24;
+    const SEQ_OFFSET: usize = 8;
+    const TS_OFFSET: usize = 16;
+
+    /// Build a writer for a session whose DATA packets all carry `payload`.
+    pub fn new(payload: &[u8]) -> Self {
+        let mut buf = vec![0u8; Self::HEADER_LEN + payload.len()];
+        buf[0..4].copy_from_slice(&MAGIC.to_be_bytes());
+        buf[4] = KIND_DATA;
+        // buf[5..8] is padding, already zero; seq/ts are filled by `frame`.
+        buf[Self::HEADER_LEN..].copy_from_slice(payload);
+        Self { buf }
+    }
+
+    /// Rewrite `seq` and `send_ts_us` in place and return the full packet.
+    pub fn frame(&mut self, seq: u64, send_ts_us: u64) -> &[u8] {
+        self.buf[Self::SEQ_OFFSET..Self::SEQ_OFFSET + 8].copy_from_slice(&seq.to_be_bytes());
+        self.buf[Self::TS_OFFSET..Self::TS_OFFSET + 8].copy_from_slice(&send_ts_us.to_be_bytes());
+        &self.buf
+    }
+}
+
 /// Tracks per-session loss / OOO / duplicates / jitter on the
 /// receiving side. Loss is computed at report time so that reordering
 /// across the highest-seq mark doesn't get counted as a permanent loss.
@@ -562,5 +598,39 @@ mod tests {
         jittery.record(2, 0, 100, 350); // transit 250 (was 100)
         jittery.record(3, 0, 200, 400); // transit 200 (was 250)
         assert!(jittery.jitter_us() > 0);
+    }
+
+    #[test]
+    fn data_packet_writer_matches_encode_to_vec() {
+        let payload = vec![0xCDu8; 200];
+        let mut w = DataPacketWriter::new(&payload);
+        // Reusing the same writer across packets must keep producing bytes
+        // identical to a fresh encode_to_vec, and they must decode back.
+        for (seq, ts) in [(1u64, 42u64), (123, 456_789), (u64::MAX, 0)] {
+            let framed = w.frame(seq, ts).to_vec();
+            let reference = BlasterPacket::Data {
+                seq,
+                send_ts_us: ts,
+            }
+            .encode_to_vec(Some(&payload));
+            assert_eq!(framed, reference.as_ref(), "seq={seq} ts={ts}");
+            let (decoded, plen) = BlasterPacket::decode(&framed).unwrap();
+            assert!(
+                matches!(decoded, BlasterPacket::Data { seq: s, send_ts_us: t } if s == seq && t == ts)
+            );
+            assert_eq!(plen, payload.len());
+        }
+    }
+
+    #[test]
+    fn data_packet_writer_empty_payload() {
+        let mut w = DataPacketWriter::new(&[]);
+        let framed = w.frame(7, 9).to_vec();
+        let reference = BlasterPacket::Data {
+            seq: 7,
+            send_ts_us: 9,
+        }
+        .encode_to_vec(Some(&[]));
+        assert_eq!(framed, reference.as_ref());
     }
 }

@@ -24,7 +24,7 @@ use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, trace};
 
-use super::protocol::{BlasterPacket, Mode, ReceiveStats, now_us};
+use super::protocol::{BlasterPacket, DataPacketWriter, Mode, ReceiveStats, now_us};
 use crate::{
     TestType,
     performance::engine::{
@@ -518,6 +518,10 @@ async fn run_upload(
 
     let mut payload = vec![0u8; payload_size];
     rand::rng().fill_bytes(&mut payload);
+    // One reusable packet buffer: the payload is constant for the session, so
+    // each send rewrites only seq + timestamp instead of reallocating and
+    // re-copying the payload.
+    let mut packet = DataPacketWriter::new(&payload);
 
     let inter_packet_delay = if target_rate_bps > 0 {
         let bps = target_rate_bps as f64 / 8.0;
@@ -538,12 +542,8 @@ async fn run_upload(
         let is_warmup = start_time.elapsed() < warmup;
         let send_start = Instant::now();
         let t_start_us = offset_us(start_time, send_start);
-        let p = BlasterPacket::Data {
-            seq,
-            send_ts_us: now_us(),
-        };
-        let bytes = p.encode_to_vec(Some(&payload));
-        match socket.send(&bytes).await {
+        let bytes = packet.frame(seq, now_us());
+        match socket.send(bytes).await {
             Ok(_) => {
                 let duration_us = send_start.elapsed().as_micros() as u64;
                 let s = Sample::success(t_start_us, duration_us, payload_size as u64, is_warmup);
