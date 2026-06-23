@@ -82,6 +82,13 @@ async fn main() -> Result<()> {
 
             let mode = protocol;
 
+            // Report rows are keyed by payload size in insertion order; sort the
+            // user-supplied sizes ascending so the report is deterministic
+            // regardless of the order given on the command line. Empty stays
+            // empty — defaults are applied downstream and are already ascending.
+            let mut test_sizes = test_sizes;
+            test_sizes.sort_unstable();
+
             // Verify export file path is writable.
             if let Some(export) = &export {
                 if let Some(parent) = export.parent()
