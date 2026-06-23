@@ -16,6 +16,20 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::utils::format::{format_bytes, format_throughput};
 
+/// A peer-initiated close — the normal way a throughput stream ends — rather
+/// than a server-side fault. A client that has finished a test simply drops
+/// the connection; depending on timing that surfaces to our in-flight read or
+/// write as one of these error kinds rather than a clean EOF. Treating them as
+/// errors logs noise and inflates the `connection_errors` metric for routine
+/// end-of-test behaviour.
+fn is_client_disconnect(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        BrokenPipe | ConnectionReset | ConnectionAborted | UnexpectedEof
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct TcpServerConfig {
     /// Maximum number of concurrent connections
@@ -656,6 +670,10 @@ impl ProductionTcpHandler {
                             }
                         }
                         Ok(Err(e)) => {
+                            if is_client_disconnect(&e) {
+                                debug!("Client disconnected during upload: {}", e);
+                                break Ok(());
+                            }
                             error!("Read error: {}", e);
                             self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
                             break Err(e.into());
@@ -741,6 +759,10 @@ impl ProductionTcpHandler {
                             tokio::task::yield_now().await;
                         }
                         Err(e) => {
+                            if is_client_disconnect(&e) {
+                                debug!("Client disconnected during download: {}", e);
+                                break Ok(());
+                            }
                             error!("Write error during download: {}", e);
                             self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
                             break Err(e.into());
@@ -798,6 +820,10 @@ impl ProductionTcpHandler {
                             self.metrics.total_bytes_received.fetch_add(n as u64, Ordering::Relaxed);
                         }
                         Ok(Err(e)) => {
+                            if is_client_disconnect(&e) {
+                                debug!("Full-duplex: peer disconnected (read): {}", e);
+                                break Ok(());
+                            }
                             error!("Full-duplex read error: {}", e);
                             self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
                             break Err(e.into());
@@ -821,6 +847,10 @@ impl ProductionTcpHandler {
                                 }
                         }
                         Err(e) => {
+                            if is_client_disconnect(&e) {
+                                debug!("Full-duplex: peer disconnected (write): {}", e);
+                                break Ok(());
+                            }
                             error!("Full-duplex write error: {}", e);
                             self.metrics.connection_errors.fetch_add(1, Ordering::Relaxed);
                             break Err(e.into());
