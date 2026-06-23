@@ -189,6 +189,9 @@ pub async fn run_quic_client(config: QuicTestConfig) -> Result<TestReport> {
                 result.upload.insert(size, ul);
             }
         }
+        TestType::LatencyUnderLoad => {
+            return Err(eyre!("latency-under-load is UDP-only; use --protocol udp"));
+        }
     }
 
     conn.close(0u32.into(), b"done");

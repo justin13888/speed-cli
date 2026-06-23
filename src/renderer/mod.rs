@@ -39,6 +39,49 @@ fn latency_extras_html(result: &LatencyResult, overlay: Option<&LatencyResult>) 
     s
 }
 
+/// The "Latency Under Load" section for a `NetworkTestResult`: a bufferbloat
+/// headline, an idle-vs-loaded comparison chart, and the loaded numeric detail.
+/// Empty when no under-load series was captured.
+fn under_load_html(result: &NetworkTestResult, prefix: &str) -> String {
+    let Some(loaded) = &result.latency_under_load else {
+        return String::new();
+    };
+    let mut s = format!(
+        r#"<div class="result-section" style="margin-bottom: 30px;">
+            <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{prefix}Latency Under Load</h3>"#
+    );
+
+    if let Some(inf) = result.bufferbloat_inflation() {
+        let color = if inf.is_severe() {
+            "#dc3545"
+        } else if inf.is_mild() {
+            "#fd7e14"
+        } else {
+            "#28a745"
+        };
+        s.push_str(&format!(
+            r#"<div style="margin: 8px 0; color: {color}; font-weight: 600;">
+                Bufferbloat: median {dm:+.1} ms, p99 {dp:+.1} ms under load
+                (idle {i50:.1}/{i99:.1} &rarr; loaded {l50:.1}/{l99:.1} ms)
+            </div>"#,
+            dm = inf.d_median_ms(),
+            dp = inf.d_p99_ms(),
+            i50 = inf.idle_p50,
+            i99 = inf.idle_p99,
+            l50 = inf.loaded_p50,
+            l99 = inf.loaded_p99,
+        ));
+    }
+
+    // Idle-vs-loaded comparison chart, then the loaded numeric detail.
+    if let Some(idle) = &result.latency {
+        s.push_str(&latency_svg(loaded, Some(idle)));
+    }
+    s.push_str(&loaded.to_html());
+    s.push_str("</div>");
+    s
+}
+
 /// Trait for converting structs/enums related to `TestReport` into HTML representation.
 ///
 /// This trait supports both streaming writes to any `Write` implementation and
@@ -705,6 +748,9 @@ impl ToHtml for NetworkTestResult {
             write!(writer, r#"</div>"#)?;
         }
 
+        // Latency under load (WiFi / bufferbloat stress test).
+        write!(writer, "{}", under_load_html(self, protocol_prefix))?;
+
         // Download results
         if !self.download.is_empty() {
             write!(
@@ -774,6 +820,9 @@ impl ToHtml for NetworkTestResult {
                 latency.to_html()
             ));
         }
+
+        // Latency under load (WiFi / bufferbloat stress test).
+        html.push_str(&under_load_html(self, protocol_prefix));
 
         // Download results
         if !self.download.is_empty() {
@@ -1117,6 +1166,7 @@ impl ToHtml for TestType {
             TestType::Simultaneous => "simultaneous".to_string(),
             TestType::FullDuplex => "full-duplex".to_string(),
             TestType::LatencyOnly => "latency-only".to_string(),
+            TestType::LatencyUnderLoad => "latency-under-load".to_string(),
         }
     }
 }

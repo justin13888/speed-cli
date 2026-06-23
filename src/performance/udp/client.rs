@@ -39,6 +39,20 @@ use crate::{
     utils::format::format_bytes,
 };
 
+/// Probe cadence for the latency-under-load stress test (~200 Hz). Tight enough
+/// to catch the brief spikes a WiFi card / AP throws under load; `LatencyOnly`
+/// keeps the gentler 100 ms cadence.
+const STRESS_PROBE_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Idle/loaded split for the latency-under-load test: a short idle baseline,
+/// then the remainder under load. The baseline is a third of the run, clamped
+/// to `[1s, 5s]` and never longer than the whole test.
+fn baseline_duration(total: Duration) -> Duration {
+    (total / 3)
+        .clamp(Duration::from_secs(1), Duration::from_secs(5))
+        .min(total)
+}
+
 pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let server_addr = format!("{}:{}", config.server, config.port);
     tracing::info!(
@@ -102,13 +116,71 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
 
     match config.test_type {
         TestType::LatencyOnly => {
-            result.latency = run_latency(&server_addr, duration, warmup).await?;
+            result.latency = run_latency(
+                &server_addr,
+                duration,
+                warmup,
+                Duration::from_millis(100),
+                "latency",
+            )
+            .await?;
+        }
+        TestType::LatencyUnderLoad => {
+            let baseline = baseline_duration(duration);
+            let load = duration
+                .saturating_sub(baseline)
+                .max(Duration::from_secs(1));
+            let payload = config.payload_sizes.iter().copied().next().unwrap_or(1200);
+            tracing::info!(
+                "WiFi latency stress: {baseline:?} idle baseline, then {load:?} under saturating load"
+            );
+
+            // Idle baseline first: probe at the stress cadence with no load.
+            result.latency = run_latency(
+                &server_addr,
+                baseline,
+                Duration::ZERO,
+                STRESS_PROBE_INTERVAL,
+                "idle baseline",
+            )
+            .await?;
+
+            // Then probe latency while saturating the link in both directions.
+            // The load generators run silently so the latency bar stays legible.
+            let (loaded, dl, ul) = tokio::join!(
+                run_latency(
+                    &server_addr,
+                    load,
+                    Duration::ZERO,
+                    STRESS_PROBE_INTERVAL,
+                    "under load",
+                ),
+                run_download(
+                    &server_addr,
+                    payload,
+                    load,
+                    Duration::ZERO,
+                    target_rate,
+                    false
+                ),
+                run_upload(
+                    &server_addr,
+                    payload,
+                    load,
+                    Duration::ZERO,
+                    target_rate,
+                    false
+                ),
+            );
+            result.latency_under_load = loaded?;
+            result.download.insert(payload, dl?);
+            result.upload.insert(payload, ul?);
         }
         TestType::Download => {
             for sz in &config.payload_sizes {
                 result.download.insert(
                     *sz,
-                    run_download(&server_addr, *sz, duration, warmup, target_rate).await?,
+                    run_download(&server_addr, *sz, duration, warmup, target_rate, true).await?,
                 );
             }
         }
@@ -116,14 +188,15 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
             for sz in &config.payload_sizes {
                 result.upload.insert(
                     *sz,
-                    run_upload(&server_addr, *sz, duration, warmup, target_rate).await?,
+                    run_upload(&server_addr, *sz, duration, warmup, target_rate, true).await?,
                 );
             }
         }
         TestType::Bidirectional => {
             for sz in &config.payload_sizes {
-                let dl = run_download(&server_addr, *sz, duration, warmup, target_rate).await?;
-                let ul = run_upload(&server_addr, *sz, duration, warmup, target_rate).await?;
+                let dl =
+                    run_download(&server_addr, *sz, duration, warmup, target_rate, true).await?;
+                let ul = run_upload(&server_addr, *sz, duration, warmup, target_rate, true).await?;
                 result.download.insert(*sz, dl);
                 result.upload.insert(*sz, ul);
             }
@@ -131,8 +204,8 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
         TestType::Simultaneous => {
             for sz in &config.payload_sizes {
                 let (dl, ul) = tokio::join!(
-                    run_download(&server_addr, *sz, duration, warmup, target_rate),
-                    run_upload(&server_addr, *sz, duration, warmup, target_rate),
+                    run_download(&server_addr, *sz, duration, warmup, target_rate, true),
+                    run_upload(&server_addr, *sz, duration, warmup, target_rate, true),
                 );
                 result.download.insert(*sz, dl?);
                 result.upload.insert(*sz, ul?);
@@ -192,8 +265,10 @@ async fn run_latency(
     server_addr: &str,
     duration: Duration,
     warmup: Duration,
+    probe_interval: Duration,
+    label: &str,
 ) -> Result<Option<LatencyResult>> {
-    tracing::info!("Measuring UDP latency for {duration:?}...");
+    tracing::info!("Measuring UDP latency ({label}) for {duration:?}...");
     let progress_bar = create_progress_bar(ProgressBarType::Latency, duration);
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -234,12 +309,15 @@ async fn run_latency(
             let _ = tx.send(m);
         }
 
-        sleep(Duration::from_millis(100)).await;
+        sleep(probe_interval).await;
     }
 
     drop(tx);
     measurements = stats_collector
-        .finish(progress_bar, "Latency measurement complete".to_string())
+        .finish(
+            progress_bar,
+            format!("Latency measurement complete ({label})"),
+        )
         .await;
 
     if measurements.is_empty() {
@@ -278,6 +356,7 @@ async fn run_download(
     duration: Duration,
     warmup: Duration,
     target_rate_bps: u64,
+    show_progress: bool,
 ) -> Result<ThroughputResult> {
     tracing::info!(
         "UDP download: {} payload, {} target rate",
@@ -289,7 +368,11 @@ async fn run_download(
         }
         .yellow()
     );
-    let progress_bar = create_progress_bar(ProgressBarType::Download, duration);
+    let progress_bar = if show_progress {
+        create_progress_bar(ProgressBarType::Download, duration)
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(server_addr).await?;
@@ -403,6 +486,7 @@ async fn run_upload(
     duration: Duration,
     warmup: Duration,
     target_rate_bps: u64,
+    show_progress: bool,
 ) -> Result<ThroughputResult> {
     tracing::info!(
         "UDP upload: {} payload, {} target rate",
@@ -414,7 +498,11 @@ async fn run_upload(
         }
         .yellow()
     );
-    let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
+    let progress_bar = if show_progress {
+        create_progress_bar(ProgressBarType::Upload, duration)
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(server_addr).await?;
