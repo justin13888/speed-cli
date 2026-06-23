@@ -5,5 +5,6 @@ pub mod format;
 pub mod import;
 pub mod logging;
 pub mod progress;
+pub mod sparkline;
 pub mod tls;
 pub mod types;

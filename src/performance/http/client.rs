@@ -252,6 +252,11 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
                  Use --type=simultaneous for parallel up/down on HTTP."
             ));
         }
+        TestType::LatencyUnderLoad => {
+            return Err(eyre::eyre!(
+                "latency-under-load is UDP-only; use --protocol udp"
+            ));
+        }
     }
 
     let mut report: TestReport = (start_time, config, result).into();
