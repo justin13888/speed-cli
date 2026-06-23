@@ -492,6 +492,18 @@ impl ProductionTcpHandler {
         }
     }
 
+    /// Release this connection's slot in the active-connection accounting.
+    /// Must run exactly once per accepted connection, on every exit path: the
+    /// accept loop increments the counter before spawning us, so any path that
+    /// forgets to decrement leaks it and stalls graceful drain.
+    fn release_slot(&self) {
+        let remaining = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+        self.metrics
+            .active_connections
+            .store(remaining, Ordering::Relaxed);
+        debug!("Active connections: {}", remaining);
+    }
+
     #[instrument(skip(self), fields(conn_id = self.connection_id, peer = %self.peer_addr))]
     async fn handle(mut self) -> Result<()> {
         debug!("Starting connection handler");
@@ -512,11 +524,20 @@ impl ProductionTcpHandler {
         .await
         {
             Ok(Ok(_)) => buffer[0],
+            Ok(Err(e)) if is_client_disconnect(&e) => {
+                // A peer that connects and closes before sending a command
+                // (e.g. the client's own preflight address probe, or a port
+                // health check) is a normal disconnect, not a fault.
+                debug!("Connection closed before sending a command: {}", e);
+                self.release_slot();
+                return Ok(());
+            }
             Ok(Err(e)) => {
                 error!("Failed to read command byte: {}", e);
                 self.metrics
                     .connection_errors
                     .fetch_add(1, Ordering::Relaxed);
+                self.release_slot();
                 return Err(e.into());
             }
             Err(_) => {
@@ -524,6 +545,7 @@ impl ProductionTcpHandler {
                 self.metrics
                     .connection_errors
                     .fetch_add(1, Ordering::Relaxed);
+                self.release_slot();
                 return Err(eyre::eyre!("Command timeout"));
             }
         };
@@ -602,12 +624,10 @@ impl ProductionTcpHandler {
             }
         };
 
-        // Update active connection count and metrics
-        let remaining = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
-        self.metrics
-            .active_connections
-            .store(remaining, Ordering::Relaxed);
-        debug!("Active connections: {}", remaining);
+        // Release the active-connection slot. Done on every exit path (see the
+        // early returns above) so a connection that never dispatched a command
+        // can't leak the counter and stall graceful shutdown.
+        self.release_slot();
 
         result
     }
