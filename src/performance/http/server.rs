@@ -105,7 +105,9 @@ pub fn decode_base64_urlsafe(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-use crate::constants::DEFAULT_CHUNK_SIZE;
+use crate::constants::{
+    DEFAULT_CHUNK_SIZE, HTTP2_CONNECTION_WINDOW, HTTP2_MAX_FRAME_SIZE, HTTP2_STREAM_WINDOW,
+};
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
@@ -174,8 +176,14 @@ async fn run_cleartext(
                         });
                     }
                     CleartextProto::H2c => {
-                        let conn = http2::Builder::new(TokioExecutor::new())
-                            .serve_connection(io, svc);
+                        // Match the client's enlarged flow-control windows so h2c
+                        // throughput isn't pinned at the 64 KiB h2 defaults.
+                        let mut builder = http2::Builder::new(TokioExecutor::new());
+                        builder
+                            .initial_stream_window_size(HTTP2_STREAM_WINDOW)
+                            .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+                            .max_frame_size(HTTP2_MAX_FRAME_SIZE);
+                        let conn = builder.serve_connection(io, svc);
                         let watched = graceful.watch(conn);
                         tokio::spawn(async move {
                             if let Err(e) = watched.await {
@@ -252,10 +260,17 @@ pub async fn run_https_server(
         handle_for_shutdown.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 
-    let result = axum_server::from_tcp_rustls(listener, tls_config)
-        .handle(handle)
-        .serve(app.into_make_service())
-        .await;
+    // Enlarge HTTP/2 flow-control windows (axum_server exposes the underlying
+    // hyper-util auto builder) so HTTPS throughput isn't pinned at the 64 KiB
+    // h2 defaults, matching the h2c and client configuration.
+    let mut server = axum_server::from_tcp_rustls(listener, tls_config);
+    server
+        .http_builder()
+        .http2()
+        .initial_stream_window_size(HTTP2_STREAM_WINDOW)
+        .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+        .max_frame_size(HTTP2_MAX_FRAME_SIZE);
+    let result = server.handle(handle).serve(app.into_make_service()).await;
 
     shutdown_task.abort();
     result?;

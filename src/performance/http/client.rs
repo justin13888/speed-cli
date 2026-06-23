@@ -16,6 +16,7 @@ use tracing::trace;
 
 use crate::{
     TestType,
+    constants::{HTTP2_CONNECTION_WINDOW, HTTP2_MAX_FRAME_SIZE, HTTP2_STREAM_WINDOW},
     performance::engine::{
         LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
         measurement_duration_us, offset_us,
@@ -82,8 +83,6 @@ fn ensure_crypto_provider() {
         let _ = CryptoProvider::install_default(aws_lc_rs::default_provider());
     });
 }
-
-// TODO: Need to optimize HTTPS (e.g. HTTP/2) tests for throughput
 
 pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     tracing::info!(
@@ -285,10 +284,15 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
             builder = builder.http1_only();
         }
         HttpVersion::HTTP2 | HttpVersion::H2C => {
+            // Explicit large flow-control windows rather than adaptive: reqwest's
+            // adaptive window *overrides* these setters and sizes from the
+            // bandwidth-delay product, which collapses to the 64 KiB default on a
+            // low-latency path and throttles throughput. See constants for why.
             builder = builder
                 .http2_prior_knowledge()
-                .http2_max_frame_size(Some(65536))
-                .http2_adaptive_window(true);
+                .http2_initial_stream_window_size(HTTP2_STREAM_WINDOW)
+                .http2_initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+                .http2_max_frame_size(HTTP2_MAX_FRAME_SIZE);
         }
         HttpVersion::HTTP3 => {
             builder = builder.http3_prior_knowledge();

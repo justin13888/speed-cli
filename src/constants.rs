@@ -27,3 +27,14 @@ pub const DEFAULT_HTTP_PAYLOAD_SIZES: &[usize] =
 pub const MAX_HTTP_UPLOAD_SIZE: usize = 100 * 1024 * 1024 * 1024; // 100GiB
 
 pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024; // 1MB
+
+// HTTP/2 flow-control tuning. The h2 defaults (64 KiB stream *and* connection
+// windows) throttle throughput badly on a fast, low-latency path: every
+// multiplexed stream shares one 64 KiB connection window, so in-flight data is
+// capped at 64 KiB and a WINDOW_UPDATE round-trip is needed every 64 KiB. These
+// larger windows keep the pipe full. They bound per-connection receive
+// buffering, trading a few MiB of memory per connection for throughput.
+pub const HTTP2_STREAM_WINDOW: u32 = 8 * 1024 * 1024; // 8 MiB
+pub const HTTP2_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024; // 32 MiB
+/// Larger frames mean less per-frame framing/CPU overhead on bulk transfers.
+pub const HTTP2_MAX_FRAME_SIZE: u32 = 64 * 1024; // 64 KiB
