@@ -80,6 +80,82 @@ impl LatencyResult {
             .fold(None, |acc, rtt| Some(acc.map_or(rtt, |m| rtt.max(m))))
     }
 
+    /// 90th-percentile RTT in milliseconds. The tail is where WiFi / AP
+    /// latency spikes hide: the median can look healthy while the tail tells
+    /// the real story of a contended link.
+    pub fn p90_rtt(&self) -> Option<f64> {
+        self.percentile_rtt(90.0)
+    }
+
+    /// 95th-percentile RTT in milliseconds.
+    pub fn p95_rtt(&self) -> Option<f64> {
+        self.percentile_rtt(95.0)
+    }
+
+    /// 99th-percentile RTT in milliseconds.
+    pub fn p99_rtt(&self) -> Option<f64> {
+        self.percentile_rtt(99.0)
+    }
+
+    /// 99.9th-percentile RTT in milliseconds.
+    pub fn p999_rtt(&self) -> Option<f64> {
+        self.percentile_rtt(99.9)
+    }
+
+    /// Detect latency spikes across the time-series. Returns `None` when there
+    /// are no successful samples to establish a baseline from.
+    ///
+    /// A *spike* is a successful probe whose RTT exceeds an adaptive threshold
+    /// derived from the median: `max(median * 3, median + 20 ms)`. The
+    /// multiplicative term catches proportional blow-ups on an already-slow
+    /// link; the additive floor stops a tiny sub-millisecond median from
+    /// flagging every minor wobble. Spikes are the fingerprint of a contended
+    /// WiFi link or AP — bufferbloat, airtime contention, power-save wakeups,
+    /// background scans, rate adaptation.
+    ///
+    /// Everything here is derived on demand from `measurements`; nothing is
+    /// serialized.
+    pub fn spike_report(&self) -> Option<LatencySpikeReport> {
+        const SPIKE_FACTOR: f64 = 3.0;
+        const SPIKE_FLOOR_MS: f64 = 20.0;
+        const MAX_SPIKE_OFFSETS: usize = 10;
+
+        let baseline_ms = self.percentile_rtt(50.0)?;
+        let successful = self.successful_count();
+        // `percentile_rtt` only returns `Some` when there is at least one
+        // successful sample, so `successful` is guaranteed non-zero here.
+        let threshold_ms = (baseline_ms * SPIKE_FACTOR).max(baseline_ms + SPIKE_FLOOR_MS);
+
+        let mut spike_count = 0usize;
+        let mut worst_ms = baseline_ms;
+        let mut spike_offsets_ms = Vec::new();
+        for m in &self.measurements {
+            let Some(rtt) = m.rtt_ms() else { continue };
+            if rtt > worst_ms {
+                worst_ms = rtt;
+            }
+            if rtt > threshold_ms {
+                spike_count += 1;
+                if spike_offsets_ms.len() < MAX_SPIKE_OFFSETS {
+                    spike_offsets_ms.push(m.t_start_us as f64 / 1000.0);
+                }
+            }
+        }
+
+        let spike_rate_pct = (spike_count as f64 / successful as f64) * 100.0;
+        let verdict = SpikeVerdict::classify(spike_count, spike_rate_pct, worst_ms, baseline_ms);
+
+        Some(LatencySpikeReport {
+            baseline_ms,
+            threshold_ms,
+            spike_count,
+            spike_rate_pct,
+            worst_ms,
+            spike_offsets_ms,
+            verdict,
+        })
+    }
+
     pub fn rtt_stddev(&self) -> Option<f64> {
         let rtts = self.rtts_ms();
         if rtts.is_empty() {
@@ -120,6 +196,85 @@ impl LatencyResult {
         }
 
         if updates == 0 { None } else { Some(jitter) }
+    }
+}
+
+/// How spiky a latency series is. Spikes are the signature of a congested or
+/// contended WiFi link / AP. Derived by [`LatencyResult::spike_report`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpikeVerdict {
+    /// No probe crossed the spike threshold.
+    Clean,
+    /// A small number of mild spikes — usually tolerable.
+    Occasional,
+    /// Spikes are frequent, or at least one is severe (an order of magnitude
+    /// over the steady-state median). The link is misbehaving.
+    Frequent,
+}
+
+impl SpikeVerdict {
+    fn classify(spike_count: usize, spike_rate_pct: f64, worst_ms: f64, baseline_ms: f64) -> Self {
+        if spike_count == 0 {
+            return SpikeVerdict::Clean;
+        }
+        // Frequent if spikes are common (≥2% of probes) or any single spike is
+        // an order of magnitude over the steady-state median.
+        if spike_rate_pct >= 2.0 || worst_ms >= baseline_ms * 10.0 {
+            SpikeVerdict::Frequent
+        } else {
+            SpikeVerdict::Occasional
+        }
+    }
+
+    /// Short human label for the verdict.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SpikeVerdict::Clean => "Clean",
+            SpikeVerdict::Occasional => "Occasional latency spikes",
+            SpikeVerdict::Frequent => "Frequent latency spikes",
+        }
+    }
+}
+
+/// Spike-detection summary for a latency series. Computed on demand from the
+/// raw measurements; not serialized.
+#[derive(Debug, Clone)]
+pub struct LatencySpikeReport {
+    /// Steady-state reference (median RTT), in milliseconds.
+    pub baseline_ms: f64,
+    /// Adaptive threshold above which a probe counts as a spike, in ms.
+    pub threshold_ms: f64,
+    /// Number of successful probes above `threshold_ms`.
+    pub spike_count: usize,
+    /// Spikes as a percentage of successful probes.
+    pub spike_rate_pct: f64,
+    /// Worst (maximum) RTT observed, in milliseconds.
+    pub worst_ms: f64,
+    /// Test-timeline offsets (ms) of the first few spikes, for the report.
+    pub spike_offsets_ms: Vec<f64>,
+    pub verdict: SpikeVerdict,
+}
+
+impl Display for LatencySpikeReport {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.verdict {
+            SpikeVerdict::Clean => write!(
+                f,
+                "{} (no probe over {:.1} ms)",
+                self.verdict.label(),
+                self.threshold_ms
+            ),
+            _ => write!(
+                f,
+                "{} ({} over {:.1} ms, {:.1}% of probes, worst {:.1} ms vs {:.1} ms baseline)",
+                self.verdict.label(),
+                self.spike_count,
+                self.threshold_ms,
+                self.spike_rate_pct,
+                self.worst_ms,
+                self.baseline_ms
+            ),
+        }
     }
 }
 
@@ -311,5 +466,55 @@ mod tests {
     fn test_percentile_all_dropped() {
         let result = build_result(vec![None, None, None]);
         assert_eq!(result.percentile_rtt(50.0), None);
+    }
+
+    #[test]
+    fn tail_percentiles_match_distribution() {
+        // RTTs 1..=100 ms. `percentile_rtt` uses nearest-rank over (len-1).
+        let result = build_result((1..=100).map(|i| Some(i as f64)).collect());
+        assert_eq!(result.p90_rtt(), Some(90.0));
+        assert_eq!(result.p95_rtt(), Some(95.0));
+        assert_eq!(result.p99_rtt(), Some(99.0));
+        assert_eq!(result.p999_rtt(), Some(100.0));
+    }
+
+    #[test]
+    fn spike_report_flags_injected_spikes() {
+        // Flat 10 ms baseline with two large spikes. Threshold = max(30, 30) = 30.
+        let mut rtts = vec![Some(10.0); 100];
+        rtts[20] = Some(120.0);
+        rtts[70] = Some(95.0);
+        let sr = build_result(rtts).spike_report().expect("spike report");
+        assert_eq!(sr.baseline_ms, 10.0);
+        assert!((sr.threshold_ms - 30.0).abs() < 1e-9);
+        assert_eq!(sr.spike_count, 2);
+        assert!((sr.worst_ms - 120.0).abs() < 1e-9);
+        // worst 120 ms ≥ 10× baseline → Frequent.
+        assert_eq!(sr.verdict, SpikeVerdict::Frequent);
+    }
+
+    #[test]
+    fn spike_report_occasional_for_mild_single_spike() {
+        // One spike at 45 ms over a 10 ms baseline: 1% of probes, < 10× baseline.
+        let mut rtts = vec![Some(10.0); 100];
+        rtts[50] = Some(45.0);
+        let sr = build_result(rtts).spike_report().expect("spike report");
+        assert_eq!(sr.spike_count, 1);
+        assert_eq!(sr.verdict, SpikeVerdict::Occasional);
+    }
+
+    #[test]
+    fn spike_report_clean_when_flat() {
+        let sr = build_result(vec![Some(12.0); 50])
+            .spike_report()
+            .expect("spike report");
+        assert_eq!(sr.spike_count, 0);
+        assert_eq!(sr.verdict, SpikeVerdict::Clean);
+    }
+
+    #[test]
+    fn spike_report_none_without_samples() {
+        assert!(build_result(vec![]).spike_report().is_none());
+        assert!(build_result(vec![None, None]).spike_report().is_none());
     }
 }
