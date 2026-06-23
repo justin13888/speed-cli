@@ -3,8 +3,41 @@ use crate::report::*;
 use crate::utils::types::TestType;
 use std::io::{self, Write};
 
-// TODO: Expand amount of graphs in HTML
+mod graph;
+use graph::latency_svg;
+
 // TODO: Ensure correctness and performance of HTML generation from huge reports (10GB+)
+
+/// Tail percentiles, spike verdict, and the time-vs-latency SVG chart, rendered
+/// below a `LatencyResult`'s numeric grid. `overlay`, when present, is drawn as
+/// a dashed reference series on the chart (used for the idle-vs-loaded view).
+fn latency_extras_html(result: &LatencyResult, overlay: Option<&LatencyResult>) -> String {
+    let mut s = String::new();
+
+    if let (Some(p95), Some(p99)) = (result.p95_rtt(), result.p99_rtt()) {
+        let p999 = result.p999_rtt().unwrap_or(p99);
+        s.push_str(&format!(
+            r#"<div style="display: flex; justify-content: space-between; margin-top: 10px;">
+                <strong>Tail RTT (p95 / p99 / p99.9):</strong>
+                <span style="color: #fd7e14;">{p95:.2} / {p99:.2} / {p999:.2} ms</span>
+            </div>"#
+        ));
+    }
+
+    if let Some(sr) = result.spike_report() {
+        let color = match sr.verdict {
+            SpikeVerdict::Clean => "#28a745",
+            SpikeVerdict::Occasional => "#fd7e14",
+            SpikeVerdict::Frequent => "#dc3545",
+        };
+        s.push_str(&format!(
+            r#"<div style="margin-top: 8px; color: {color};"><strong>Spikes:</strong> {sr}</div>"#
+        ));
+    }
+
+    s.push_str(&latency_svg(result, overlay));
+    s
+}
 
 /// Trait for converting structs/enums related to `TestReport` into HTML representation.
 ///
@@ -899,11 +932,13 @@ impl ToHtml for LatencyResult {
             }
         }
 
+        let extras = latency_extras_html(self, None);
         write!(
             writer,
             r#"</div>
+                {extras}
                 <div style="margin-top: 15px;">
-                    <strong>Timestamp:</strong> 
+                    <strong>Timestamp:</strong>
                     <span style="color: #007acc;">{}</span>
                 </div>
             </div>"#,
@@ -1008,12 +1043,13 @@ impl ToHtml for LatencyResult {
         }
 
         stats_html.push_str("</div>");
+        stats_html.push_str(&latency_extras_html(self, None));
 
         format!(
             r#"<div style="background-color: #f8f9fa; padding: 20px; border-radius: 6px; border-left: 4px solid #007acc;">
                 {}
                 <div style="margin-top: 15px;">
-                    <strong>Timestamp:</strong> 
+                    <strong>Timestamp:</strong>
                     <span style="color: #007acc;">{}</span>
                 </div>
             </div>"#,

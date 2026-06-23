@@ -5,6 +5,7 @@ use colored::*;
 use serde::{Deserialize, Serialize};
 
 use crate::report::LatencyMeasurement;
+use crate::utils::sparkline::latency_sparkline;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LatencyResult {
@@ -377,6 +378,37 @@ impl Display for LatencyResult {
                 "Jitter (RFC 3550)".bright_blue().bold(),
                 format!("{jitter:.2} ms").magenta()
             )?;
+        }
+
+        // Tail percentiles — where WiFi / AP latency spikes show up.
+        if let (Some(p95), Some(p99)) = (self.p95_rtt(), self.p99_rtt()) {
+            let p999 = self.p999_rtt().unwrap_or(p99);
+            writeln!(
+                f,
+                "    {}: {}",
+                "Tail RTT (p95/p99/p99.9)".bright_blue().bold(),
+                format!("{p95:.2} / {p99:.2} / {p999:.2} ms").yellow()
+            )?;
+        }
+
+        // Spike verdict, coloured by severity.
+        if let Some(sr) = self.spike_report() {
+            let line = sr.to_string();
+            let coloured = match sr.verdict {
+                SpikeVerdict::Clean => line.green(),
+                SpikeVerdict::Occasional => line.yellow(),
+                SpikeVerdict::Frequent => line.red().bold(),
+            };
+            writeln!(f, "    {}: {}", "Spikes".bright_blue().bold(), coloured)?;
+        }
+
+        // Time-vs-latency chart so spikes are visible at a glance.
+        let chart = latency_sparkline(&self.measurements, 60, 5);
+        if !chart.is_empty() {
+            writeln!(f, "    {}:", "Latency over time".bright_blue().bold())?;
+            for line in chart.lines() {
+                writeln!(f, "    {line}")?;
+            }
         }
 
         writeln!(
