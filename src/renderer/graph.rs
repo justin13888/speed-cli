@@ -88,10 +88,10 @@ pub fn latency_svg(primary: &LatencyResult, overlay: Option<&LatencyResult>) -> 
             x2 = ML + plot_w,
         ));
         svg.push_str(&format!(
-            r##"<text x="{tx}" y="{tyl}" font-size="10" fill="{THRESHOLD_COLOR}">spike &gt; {thr:.0} ms</text>"##,
+            r##"<text x="{tx}" y="{tyl}" font-size="10" fill="{THRESHOLD_COLOR}">spike &gt; {threshold:.0} ms</text>"##,
             tx = ML + 4.0,
             tyl = ty - 3.0,
-            thr = sr.threshold_ms,
+            threshold = sr.threshold_ms,
         ));
     }
 
