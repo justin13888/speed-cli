@@ -194,4 +194,4 @@ Contributions are welcome! This tool aims to be the most comprehensive network t
 
 ## License
 
-This project is licensed under [AGPL-3.0 License](LICENSE)
+This project is licensed under the [Apache License 2.0](LICENSE).
