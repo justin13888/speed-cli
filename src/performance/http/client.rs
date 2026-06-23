@@ -465,12 +465,15 @@ async fn run_upload_test(
     let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
     let start_time = Instant::now();
 
-    let chunk_data = {
+    // Build the upload payload once as an immutable Bytes. Cloning Bytes is a
+    // cheap refcount bump, so every parallel task and every request shares this
+    // one buffer instead of copying chunk_size bytes per request.
+    let chunk = {
         let mut data = vec![0u8; chunk_size];
         rng().fill_bytes(&mut data);
-        data
+        debug_assert!(data.len() == chunk_size, "Chunk data size mismatch");
+        bytes::Bytes::from(data)
     };
-    debug_assert!(chunk_data.len() == chunk_size, "Chunk data size mismatch");
 
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
@@ -481,7 +484,7 @@ async fn run_upload_test(
         let client = client.clone();
         let tx = tx.clone();
         let server_url = server_url.to_string();
-        let chunk_data = chunk_data.clone();
+        let chunk = chunk.clone();
 
         let task = tokio::spawn(async move {
             let mut local_samples: Vec<Sample> = Vec::new();
@@ -489,14 +492,7 @@ async fn run_upload_test(
                 let upload_start = Instant::now();
                 let t_start_us = offset_us(start_time, upload_start);
                 let is_warmup = start_time.elapsed() < warmup;
-                match upload_chunk(
-                    &client,
-                    &server_url,
-                    payload_size,
-                    chunk_data.clone(),
-                    version,
-                )
-                .await
+                match upload_chunk(&client, &server_url, payload_size, chunk.clone(), version).await
                 {
                     Ok(bytes) => {
                         let duration_us = upload_start.elapsed().as_micros() as u64;
@@ -586,24 +582,25 @@ async fn upload_chunk(
     client: &Client,
     server_url: &str,
     payload_size: usize,
-    chunk_data: Vec<u8>,
+    chunk: bytes::Bytes,
     version: HttpVersion,
 ) -> Result<u64> {
-    let chunk_size = chunk_data.len();
+    let chunk_size = chunk.len();
     if chunk_size == 0 || payload_size == 0 {
         return Ok(0);
     }
     let num_chunks = payload_size.div_ceil(chunk_size);
-    let chunk_template = bytes::Bytes::from(chunk_data);
 
     let stream = futures::stream::iter((0..num_chunks).map(move |i| {
         let bytes_already = i * chunk_size;
         let remaining = payload_size - bytes_already;
         let this_chunk = chunk_size.min(remaining);
+        // Both branches are zero-copy: Bytes::clone is a refcount bump and
+        // Bytes::slice is a view into the same allocation.
         let bytes = if this_chunk == chunk_size {
-            chunk_template.clone()
+            chunk.clone()
         } else {
-            chunk_template.slice(0..this_chunk)
+            chunk.slice(0..this_chunk)
         };
         Ok::<_, std::io::Error>(bytes)
     }));
