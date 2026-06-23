@@ -12,10 +12,20 @@ ciborium = "0.2"
 chrono = { version = "0.4.41", features = ["serde"] }
 colored = "3.0.0"
 humansize = "2.1"
-reqwest = { version = "0.12.22", features = [
+# Pin reqwest to rustls only. Without `default-features = false`, reqwest's
+# default `default-tls` feature compiles in native-tls + the system OpenSSL /
+# SChannel / SecureTransport stack, none of which we use (we always call
+# `.use_rustls_tls()`). rustls + aws-lc-rs gives reproducible, platform-
+# independent TLS behaviour — the right default for a benchmarking tool — with
+# no C build dependency. `http2`/`charset`/`system-proxy` are reqwest defaults
+# we still rely on, so they are re-listed explicitly.
+reqwest = { version = "0.12.22", default-features = false, features = [
+    "rustls-tls",
+    "http2",
     "http3",
     "stream",
-    "rustls-tls",
+    "charset",
+    "system-proxy",
 ] }
 hyper = { version = "1.0", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
