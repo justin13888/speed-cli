@@ -416,6 +416,11 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                 result.upload.insert(*payload_size, up);
             }
         }
+        TestType::LatencyUnderLoad => {
+            return Err(eyre::eyre!(
+                "latency-under-load is UDP-only; use --protocol udp"
+            ));
+        }
     }
 
     let mut report: TestReport = (start_time, config, result).into();

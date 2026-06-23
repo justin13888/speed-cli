@@ -19,6 +19,12 @@ fn default_accounting() -> ThroughputAccounting {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkTestResult {
     pub latency: Option<LatencyResult>,
+    /// Latency sampled while the link was saturated — the under-load phase of a
+    /// `latency-under-load` stress test. `latency` holds the idle baseline
+    /// captured first; comparing the two surfaces bufferbloat and the WiFi
+    /// card / AP latency spikes that only appear under load.
+    #[serde(default)]
+    pub latency_under_load: Option<LatencyResult>,
     /// Map of download results by payload size
     pub download: IndexMap<usize, ThroughputResult>,
     /// Map of upload results by payload size
@@ -45,6 +51,7 @@ impl NetworkTestResult {
     pub fn new_http() -> Self {
         Self {
             latency: None,
+            latency_under_load: None,
             download: IndexMap::new(),
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Http,
@@ -55,6 +62,7 @@ impl NetworkTestResult {
     pub fn new_tcp() -> Self {
         Self {
             latency: None,
+            latency_under_load: None,
             download: IndexMap::new(),
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Tcp,
@@ -65,6 +73,7 @@ impl NetworkTestResult {
     pub fn new_udp() -> Self {
         Self {
             latency: None,
+            latency_under_load: None,
             download: IndexMap::new(),
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Udp,
@@ -75,6 +84,7 @@ impl NetworkTestResult {
     pub fn new_quic() -> Self {
         Self {
             latency: None,
+            latency_under_load: None,
             download: IndexMap::new(),
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Quic,
@@ -98,6 +108,52 @@ impl NetworkTestResult {
     /// MTU used to estimate segment count from payload size.
     pub fn wire_mtu(&self) -> usize {
         STANDARD_MTU
+    }
+
+    /// Bufferbloat snapshot: idle-vs-loaded median and p99 RTT. `Some` only
+    /// when both an idle baseline (`latency`) and an under-load series
+    /// (`latency_under_load`) carry enough data. The growth from idle to
+    /// loaded is the headline WiFi / AP latency-under-load signal.
+    pub fn bufferbloat_inflation(&self) -> Option<BufferbloatInflation> {
+        let idle = self.latency.as_ref()?;
+        let loaded = self.latency_under_load.as_ref()?;
+        Some(BufferbloatInflation {
+            idle_p50: idle.percentile_rtt(50.0)?,
+            idle_p99: idle.percentile_rtt(99.0)?,
+            loaded_p50: loaded.percentile_rtt(50.0)?,
+            loaded_p99: loaded.percentile_rtt(99.0)?,
+        })
+    }
+}
+
+/// Idle-vs-under-load latency snapshot for the bufferbloat comparison.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferbloatInflation {
+    pub idle_p50: f64,
+    pub idle_p99: f64,
+    pub loaded_p50: f64,
+    pub loaded_p99: f64,
+}
+
+impl BufferbloatInflation {
+    /// Median RTT growth from idle to under load, in milliseconds.
+    pub fn d_median_ms(&self) -> f64 {
+        self.loaded_p50 - self.idle_p50
+    }
+
+    /// p99 RTT growth from idle to under load, in milliseconds.
+    pub fn d_p99_ms(&self) -> f64 {
+        self.loaded_p99 - self.idle_p99
+    }
+
+    /// Severe bufferbloat: p99 grew by 100 ms or more under load.
+    pub fn is_severe(&self) -> bool {
+        self.d_p99_ms() >= 100.0
+    }
+
+    /// Mild bufferbloat: p99 grew by 30 ms or more under load.
+    pub fn is_mild(&self) -> bool {
+        self.d_p99_ms() >= 30.0
     }
 }
 
@@ -126,15 +182,47 @@ impl Display for NetworkTestResult {
 
         // Display latency if available
         if let Some(latency) = &self.latency {
+            let title = if self.latency_under_load.is_some() {
+                format!("{protocol_prefix}Latency (idle baseline):")
+            } else {
+                format!("{protocol_prefix}Latency Results:")
+            };
+            writeln!(f, "  {}", title.bright_green().bold())?;
+            write!(f, "{latency}")?;
+            writeln!(f)?;
+        }
+
+        // Latency under load (WiFi / bufferbloat stress test).
+        if let Some(loaded) = &self.latency_under_load {
             writeln!(
                 f,
                 "  {}",
-                format!("{}Latency Results:", protocol_prefix)
+                format!("{protocol_prefix}Latency Under Load:")
                     .bright_green()
                     .bold()
             )?;
-            write!(f, "{latency}")?;
+            write!(f, "{loaded}")?;
             writeln!(f)?;
+            if let Some(inf) = self.bufferbloat_inflation() {
+                let line = format!(
+                    "    Bufferbloat: median {dm:+.1} ms, p99 {dp:+.1} ms under load \
+                     (idle {i50:.1}/{i99:.1} → loaded {l50:.1}/{l99:.1} ms)",
+                    dm = inf.d_median_ms(),
+                    dp = inf.d_p99_ms(),
+                    i50 = inf.idle_p50,
+                    i99 = inf.idle_p99,
+                    l50 = inf.loaded_p50,
+                    l99 = inf.loaded_p99,
+                );
+                let coloured = if inf.is_severe() {
+                    line.red().bold()
+                } else if inf.is_mild() {
+                    line.yellow()
+                } else {
+                    line.green()
+                };
+                writeln!(f, "{coloured}")?;
+            }
         }
 
         // Display download results

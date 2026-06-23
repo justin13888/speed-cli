@@ -37,6 +37,12 @@ pub enum TestType {
     /// Latency only
     #[clap(alias = "latency")]
     LatencyOnly,
+    /// Latency measured while the link is saturated — a WiFi / bufferbloat
+    /// stress test. Captures an idle baseline first, then probes latency at a
+    /// high rate under load so spikes from the WiFi card / AP become visible.
+    /// UDP only.
+    #[clap(alias = "latency-load", alias = "wifi")]
+    LatencyUnderLoad,
 }
 
 use std::fmt;
@@ -49,6 +55,7 @@ impl fmt::Display for TestType {
             TestType::Simultaneous => write!(f, "simultaneous"),
             TestType::FullDuplex => write!(f, "full-duplex"),
             TestType::LatencyOnly => write!(f, "latency-only"),
+            TestType::LatencyUnderLoad => write!(f, "latency-under-load"),
         }
     }
 }

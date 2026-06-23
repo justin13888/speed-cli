@@ -3,8 +3,84 @@ use crate::report::*;
 use crate::utils::types::TestType;
 use std::io::{self, Write};
 
-// TODO: Expand amount of graphs in HTML
+mod graph;
+use graph::latency_svg;
+
 // TODO: Ensure correctness and performance of HTML generation from huge reports (10GB+)
+
+/// Tail percentiles, spike verdict, and the time-vs-latency SVG chart, rendered
+/// below a `LatencyResult`'s numeric grid. `overlay`, when present, is drawn as
+/// a dashed reference series on the chart (used for the idle-vs-loaded view).
+fn latency_extras_html(result: &LatencyResult, overlay: Option<&LatencyResult>) -> String {
+    let mut s = String::new();
+
+    if let (Some(p95), Some(p99)) = (result.p95_rtt(), result.p99_rtt()) {
+        let p999 = result.p999_rtt().unwrap_or(p99);
+        s.push_str(&format!(
+            r#"<div style="display: flex; justify-content: space-between; margin-top: 10px;">
+                <strong>Tail RTT (p95 / p99 / p99.9):</strong>
+                <span style="color: #fd7e14;">{p95:.2} / {p99:.2} / {p999:.2} ms</span>
+            </div>"#
+        ));
+    }
+
+    if let Some(sr) = result.spike_report() {
+        let color = match sr.verdict {
+            SpikeVerdict::Clean => "#28a745",
+            SpikeVerdict::Occasional => "#fd7e14",
+            SpikeVerdict::Frequent => "#dc3545",
+        };
+        s.push_str(&format!(
+            r#"<div style="margin-top: 8px; color: {color};"><strong>Spikes:</strong> {sr}</div>"#
+        ));
+    }
+
+    s.push_str(&latency_svg(result, overlay));
+    s
+}
+
+/// The "Latency Under Load" section for a `NetworkTestResult`: a bufferbloat
+/// headline, an idle-vs-loaded comparison chart, and the loaded numeric detail.
+/// Empty when no under-load series was captured.
+fn under_load_html(result: &NetworkTestResult, prefix: &str) -> String {
+    let Some(loaded) = &result.latency_under_load else {
+        return String::new();
+    };
+    let mut s = format!(
+        r#"<div class="result-section" style="margin-bottom: 30px;">
+            <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{prefix}Latency Under Load</h3>"#
+    );
+
+    if let Some(inf) = result.bufferbloat_inflation() {
+        let color = if inf.is_severe() {
+            "#dc3545"
+        } else if inf.is_mild() {
+            "#fd7e14"
+        } else {
+            "#28a745"
+        };
+        s.push_str(&format!(
+            r#"<div style="margin: 8px 0; color: {color}; font-weight: 600;">
+                Bufferbloat: median {dm:+.1} ms, p99 {dp:+.1} ms under load
+                (idle {i50:.1}/{i99:.1} &rarr; loaded {l50:.1}/{l99:.1} ms)
+            </div>"#,
+            dm = inf.d_median_ms(),
+            dp = inf.d_p99_ms(),
+            i50 = inf.idle_p50,
+            i99 = inf.idle_p99,
+            l50 = inf.loaded_p50,
+            l99 = inf.loaded_p99,
+        ));
+    }
+
+    // Idle-vs-loaded comparison chart, then the loaded numeric detail.
+    if let Some(idle) = &result.latency {
+        s.push_str(&latency_svg(loaded, Some(idle)));
+    }
+    s.push_str(&loaded.to_html());
+    s.push_str("</div>");
+    s
+}
 
 /// Trait for converting structs/enums related to `TestReport` into HTML representation.
 ///
@@ -672,6 +748,9 @@ impl ToHtml for NetworkTestResult {
             write!(writer, r#"</div>"#)?;
         }
 
+        // Latency under load (WiFi / bufferbloat stress test).
+        write!(writer, "{}", under_load_html(self, protocol_prefix))?;
+
         // Download results
         if !self.download.is_empty() {
             write!(
@@ -741,6 +820,9 @@ impl ToHtml for NetworkTestResult {
                 latency.to_html()
             ));
         }
+
+        // Latency under load (WiFi / bufferbloat stress test).
+        html.push_str(&under_load_html(self, protocol_prefix));
 
         // Download results
         if !self.download.is_empty() {
@@ -899,11 +981,13 @@ impl ToHtml for LatencyResult {
             }
         }
 
+        let extras = latency_extras_html(self, None);
         write!(
             writer,
             r#"</div>
+                {extras}
                 <div style="margin-top: 15px;">
-                    <strong>Timestamp:</strong> 
+                    <strong>Timestamp:</strong>
                     <span style="color: #007acc;">{}</span>
                 </div>
             </div>"#,
@@ -1008,12 +1092,13 @@ impl ToHtml for LatencyResult {
         }
 
         stats_html.push_str("</div>");
+        stats_html.push_str(&latency_extras_html(self, None));
 
         format!(
             r#"<div style="background-color: #f8f9fa; padding: 20px; border-radius: 6px; border-left: 4px solid #007acc;">
                 {}
                 <div style="margin-top: 15px;">
-                    <strong>Timestamp:</strong> 
+                    <strong>Timestamp:</strong>
                     <span style="color: #007acc;">{}</span>
                 </div>
             </div>"#,
@@ -1081,6 +1166,7 @@ impl ToHtml for TestType {
             TestType::Simultaneous => "simultaneous".to_string(),
             TestType::FullDuplex => "full-duplex".to_string(),
             TestType::LatencyOnly => "latency-only".to_string(),
+            TestType::LatencyUnderLoad => "latency-under-load".to_string(),
         }
     }
 }

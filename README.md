@@ -13,6 +13,7 @@ It's difficult to have one tool that tests your network conditions between two d
 - **Multi-protocol support**: TCP, UDP, raw QUIC, HTTP/1.1, HTTP/2, h2c, HTTP/3
 - **High-performance**: Built with Rust, optimized for high throughput and efficient resource usage
 - **Comprehensive metrics**: throughput (goodput/wire), latency percentiles, jitter, packet loss
+- **WiFi / latency-under-load stress test**: probes latency while saturating the link, detects spikes, and graphs latency over time (terminal + HTML)
 - **Exporting**: CBOR for re-importable data; HTML for self-contained rendered reports
 - **Cross-platform**: Optimized for popular platforms (Linux, macOS, Windows) and architectures (x86_64, ARM)
 
@@ -57,6 +58,9 @@ speed-cli client --protocol http2 -s <server-ip>       # HTTP/2 (TLS)
 speed-cli client --protocol h2c   -s <server-ip>       # HTTP/2 cleartext
 speed-cli client --protocol http3 -s <server-ip>       # HTTP/3 (over QUIC)
 
+# WiFi latency-under-load stress test (UDP): idle baseline + latency under saturation
+speed-cli client --protocol udp --type latency-load -s <server-ip>
+
 # Longer test, more connections, export to CBOR
 speed-cli client --protocol http1 -s 192.168.1.100 -d 60 -c 4 -e results.cbor
 
@@ -99,6 +103,41 @@ speed-cli client --protocol <p> -s <server-ip> -e results
 ```
 
 Other extensions (`.json`, `.txt`, …) are rejected with a clear error.
+
+## WiFi / Latency-Under-Load Stress Test
+
+WiFi cards and the AP on the other end produce their worst latency *under load* —
+airtime contention, driver/AP queue buildup (bufferbloat), power-save wakeups,
+background scans and rate adaptation all show up as latency spikes that an idle
+ping never sees. The `latency-under-load` test (UDP only) exposes them:
+
+```sh
+# Captures a short idle baseline, then probes latency at ~200 Hz while
+# saturating the link in both directions.
+speed-cli client --protocol udp --type latency-load -s <server-ip>
+
+# Aliases: --type wifi, --type latency-under-load
+# Export an HTML report with the interactive-looking latency chart:
+speed-cli client --protocol udp --type wifi -s <server-ip> -d 30 -e wifi.html
+```
+
+How to read the output:
+
+- **Latency over time** — a time-vs-latency chart (Unicode sparkline in the
+  terminal, an SVG in the HTML report) so spikes are visible at a glance. The
+  HTML chart overlays the idle baseline against the under-load series.
+- **Spikes** — a verdict (`Clean` / `Occasional` / `Frequent`) from adaptive
+  spike detection: any probe exceeding `max(median × 3, median + 20 ms)` counts
+  as a spike. Frequent or severe spikes point at a misbehaving card / AP.
+- **Tail RTT (p95 / p99 / p99.9)** — the tail is where WiFi latency hides; the
+  median can look healthy while the tail tells the real story.
+- **Bufferbloat** — the median and p99 latency *inflation* from idle to under
+  load. A large jump is the classic bufferbloat signature.
+
+Loopback (`-s 127.0.0.1`) is useful for a smoke test but won't show real spikes —
+point it across the actual WiFi link to a server on the wired side to see them.
+Use `--target-rate-mbps <N>` to probe latency under a fixed load instead of full
+saturation.
 
 ## Developer Notes
 

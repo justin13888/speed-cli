@@ -41,6 +41,17 @@ Samples taken during the warmup window are excluded from the reported numbers so
 results reflect steady state. Aggregation (throughput percentiles, latency
 percentiles, jitter) happens at report time.
 
+Latency probes are recorded the same way — one `LatencyMeasurement {
+t_start_us, rtt_us }` per probe — so a latency result is a time-line, not just a
+summary. On top of that series the report derives tail percentiles, adaptive
+**spike detection**, and a time-vs-latency chart (a terminal sparkline plus a
+self-contained SVG in the HTML report). The UDP `latency-under-load` test type
+(`--type latency-load`) drives this end to end: it captures an idle baseline,
+then probes latency at ~200 Hz while saturating the link, and reports the
+idle-vs-loaded "bufferbloat" inflation — stored in the report's
+`latency_under_load` field (added in schema version 6) and the WiFi / AP
+latency-spike signal.
+
 ## Reports
 
 `src/report/` defines the result types and serialization:

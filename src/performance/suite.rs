@@ -232,6 +232,7 @@ pub async fn run_suite(cfg: SuiteConfig) -> Result<SuiteReport> {
 fn phase_suffix(tt: TestType) -> &'static str {
     match tt {
         TestType::LatencyOnly => "latency",
+        TestType::LatencyUnderLoad => "latency-under-load",
         TestType::Bidirectional => "bidirectional",
         TestType::FullDuplex | TestType::Simultaneous => "full-duplex",
         TestType::Download => "download",
