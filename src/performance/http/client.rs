@@ -288,6 +288,14 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
             // adaptive window *overrides* these setters and sizes from the
             // bandwidth-delay product, which collapses to the 64 KiB default on a
             // low-latency path and throttles throughput. See constants for why.
+            //
+            // NOTE: the receive (download) direction is fully tunable here, and
+            // the server raises its send buffer to match (see
+            // `HTTP2_MAX_SEND_BUF`). The client *send* (upload) direction is
+            // bounded by hyper-util's 400 KB default send buffer, which reqwest
+            // 0.12 does not expose a setter for — so h2/h2c uploads over a single
+            // multiplexed connection can still under-perform HTTP/1. Revisit if
+            // reqwest adds `http2_max_send_buf_size`.
             builder = builder
                 .http2_prior_knowledge()
                 .http2_initial_stream_window_size(HTTP2_STREAM_WINDOW)

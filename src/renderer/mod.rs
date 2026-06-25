@@ -707,7 +707,8 @@ impl ToHtml for ThroughputResult {
             </div>"#,
             format_bytes_u64(self.bytes_transferred()),
             self.total_duration().as_secs_f64(),
-            format_throughput(self.avg_throughput()),
+            // avg_throughput() is bytes/sec; format_throughput expects bits/sec.
+            format_throughput(self.avg_throughput() * 8.0),
             self.sample_count(),
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         )
@@ -742,7 +743,8 @@ impl ToHtml for ThroughputResult {
             </div>"#,
             format_bytes_u64(self.bytes_transferred()),
             self.total_duration().as_secs_f64(),
-            format_throughput(self.avg_throughput()),
+            // avg_throughput() is bytes/sec; format_throughput expects bits/sec.
+            format_throughput(self.avg_throughput() * 8.0),
             self.sample_count(),
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         )

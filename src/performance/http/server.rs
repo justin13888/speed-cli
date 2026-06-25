@@ -106,7 +106,8 @@ pub fn decode_base64_urlsafe(s: &str) -> Option<Vec<u8>> {
 }
 
 use crate::constants::{
-    DEFAULT_CHUNK_SIZE, HTTP2_CONNECTION_WINDOW, HTTP2_MAX_FRAME_SIZE, HTTP2_STREAM_WINDOW,
+    DEFAULT_CHUNK_SIZE, HTTP2_CONNECTION_WINDOW, HTTP2_MAX_FRAME_SIZE, HTTP2_MAX_SEND_BUF,
+    HTTP2_STREAM_WINDOW,
 };
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
@@ -182,7 +183,10 @@ async fn run_cleartext(
                         builder
                             .initial_stream_window_size(HTTP2_STREAM_WINDOW)
                             .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
-                            .max_frame_size(HTTP2_MAX_FRAME_SIZE);
+                            .max_frame_size(HTTP2_MAX_FRAME_SIZE)
+                            // Raise the per-connection send buffer off hyper's
+                            // 400 KB default; all h2c streams share it.
+                            .max_send_buf_size(HTTP2_MAX_SEND_BUF);
                         let conn = builder.serve_connection(io, svc);
                         let watched = graceful.watch(conn);
                         tokio::spawn(async move {
@@ -269,7 +273,10 @@ pub async fn run_https_server(
         .http2()
         .initial_stream_window_size(HTTP2_STREAM_WINDOW)
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
-        .max_frame_size(HTTP2_MAX_FRAME_SIZE);
+        .max_frame_size(HTTP2_MAX_FRAME_SIZE)
+        // Raise the per-connection send buffer off hyper's 400 KB default;
+        // all multiplexed streams share it. Matches the h2c path.
+        .max_send_buf_size(HTTP2_MAX_SEND_BUF);
     let result = server.handle(handle).serve(app.into_make_service()).await;
 
     shutdown_task.abort();

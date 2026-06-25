@@ -202,9 +202,11 @@ impl fmt::Display for ThroughputResult {
             .magenta()
         )?;
 
-        // Per-sample throughput percentiles. These describe the spread of the
-        // individual transfer measurements, complementing the time-averaged
-        // mean above. Only emit them if we actually have successful samples.
+        // Per-window throughput percentiles. These describe the spread of
+        // throughput across fixed wall-clock intervals, complementing the
+        // time-averaged mean above. Computed by the same methodology as the
+        // average (see `windowed_bps_series`), so `min ≤ avg ≤ max` holds.
+        // Only emit them if we actually have successful samples.
         let percentiles = [
             ("Min Throughput", 0.0),
             ("p50 Throughput", 50.0),
@@ -403,34 +405,134 @@ impl ThroughputResult {
         (total_wire_bytes as f64 * 8.0) / (self.total_duration_us as f64 / 1_000_000.0)
     }
 
-    /// Per-sample throughput in bps for non-warmup successful samples,
-    /// sorted ascending. Used by percentile helpers.
-    fn sample_bps_sorted(&self) -> Vec<f64> {
-        let mut samples: Vec<f64> = self
-            .non_warmup_iter()
-            .filter(|s| s.is_success())
-            .map(|s| s.throughput_bps())
-            .collect();
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        samples
+    /// Bucket width (microseconds) for the windowed throughput series.
+    ///
+    /// Aim for ~100 windows across the measured span, clamped to a 10 ms
+    /// floor / 250 ms ceiling. Short tests get proportionally smaller
+    /// windows so the percentile spread stays usable; very short tests
+    /// collapse to a single window (then min == p50 == max == avg, which
+    /// is correct).
+    fn analysis_window_us(&self) -> u64 {
+        const TARGET_WINDOWS: u64 = 100;
+        const MIN_WINDOW_US: u64 = 10_000; // 10 ms
+        const MAX_WINDOW_US: u64 = 250_000; // 250 ms
+        if self.total_duration_us == 0 {
+            return MIN_WINDOW_US;
+        }
+        (self.total_duration_us / TARGET_WINDOWS).clamp(MIN_WINDOW_US, MAX_WINDOW_US)
     }
 
+    /// Aggregate, mass-conserving per-window throughput series in bits/sec.
+    ///
+    /// Every non-warmup successful sample's bytes are spread across the
+    /// wall-clock windows its `[t_start, t_start + duration)` interval
+    /// overlaps, in proportion to the overlap. This is the same
+    /// methodology as [`avg_throughput`]: a slow 8 MB HTTP request that
+    /// spans seconds is treated as a constant-rate flow over its real
+    /// duration rather than as one instantaneous spike, and a UDP send
+    /// whose duration is shorter than a window lands entirely in one
+    /// window. Because the spread conserves mass
+    /// (`Σ window_bytes == bytes_transferred()`) and each window's rate is
+    /// `window_bytes * 8 / window_width`, the time-weighted mean of this
+    /// series equals `avg_throughput() * 8` exactly — so the percentiles
+    /// taken over it always satisfy `min ≤ avg ≤ max`. (The old per-sample
+    /// instantaneous rate excluded inter-op gaps — pacing sleeps, request
+    /// setup — and so could report a `min` above the wall-clock average.)
+    ///
+    /// Returns one bits/sec value per window, in time order (unsorted).
+    /// Empty when there are no successful samples.
+    fn windowed_bps_series(&self, window_us: u64) -> Vec<f64> {
+        let window_us = window_us.max(1);
+        let span_us = self.total_duration_us;
+        if span_us == 0 {
+            return Vec::new();
+        }
+
+        // Origin = first non-warmup sample start. Sample times include the
+        // warmup window; `total_duration_us` excludes it (see
+        // `engine::sampler::measurement_duration_us`), so anchor the series
+        // to the first measured sample to keep the two axes aligned.
+        let origin = self
+            .non_warmup_iter()
+            .filter(|s| s.is_success())
+            .map(|s| s.t_start_us)
+            .min();
+        let Some(origin) = origin else {
+            return Vec::new();
+        };
+
+        let n_windows = span_us.div_ceil(window_us) as usize;
+        if n_windows == 0 {
+            return Vec::new();
+        }
+        let mut bytes_per_window = vec![0f64; n_windows];
+
+        for s in self.non_warmup_iter().filter(|s| s.is_success()) {
+            let bytes = s.bytes as f64;
+            if bytes == 0.0 {
+                continue;
+            }
+            // Sample interval on the post-warmup axis, clamped into
+            // [0, span). A sample that starts at/after the span end (clock
+            // skew at the boundary) or runs past it has its full byte count
+            // squeezed into the remaining windows so no mass is lost.
+            let raw_start = s.t_start_us.saturating_sub(origin);
+            let start = raw_start.min(span_us - 1);
+            let raw_end = raw_start.saturating_add(s.duration_us.max(1));
+            let end = raw_end.min(span_us).max(start + 1);
+            let sample_span = (end - start) as f64;
+
+            let first = (start / window_us) as usize;
+            let last = (((end - 1) / window_us) as usize).min(n_windows - 1);
+            for (w, bucket) in bytes_per_window
+                .iter_mut()
+                .enumerate()
+                .skip(first)
+                .take(last + 1 - first)
+            {
+                let w_start = (w as u64) * window_us;
+                let w_end = (w_start + window_us).min(span_us);
+                let overlap = end.min(w_end).saturating_sub(start.max(w_start));
+                if overlap > 0 {
+                    *bucket += bytes * (overlap as f64 / sample_span);
+                }
+            }
+        }
+
+        (0..n_windows)
+            .map(|w| {
+                let w_start = (w as u64) * window_us;
+                let w_end = (w_start + window_us).min(span_us);
+                let width_s = (w_end - w_start) as f64 / 1_000_000.0;
+                if width_s <= 0.0 {
+                    0.0
+                } else {
+                    (bytes_per_window[w] * 8.0) / width_s
+                }
+            })
+            .collect()
+    }
+
+    /// Percentile of the windowed throughput series, in bits/sec. Consistent
+    /// with [`avg_throughput`] (`min ≤ avg ≤ max` always holds); see
+    /// [`windowed_bps_series`] for why.
     pub fn percentile_throughput_bps(&self, n: f64) -> Option<f64> {
         if !(0.0..=100.0).contains(&n) {
             return None;
         }
-        let samples = self.sample_bps_sorted();
-        if samples.is_empty() {
+        let mut series = self.windowed_bps_series(self.analysis_window_us());
+        if series.is_empty() {
             return None;
         }
-        if n == 0.0 {
-            return Some(samples[0]);
-        }
-        if n == 100.0 {
-            return Some(samples[samples.len() - 1]);
-        }
-        let index = ((n / 100.0) * (samples.len() - 1) as f64).round() as usize;
-        Some(samples[index])
+        series.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = if n == 0.0 {
+            0
+        } else if n == 100.0 {
+            series.len() - 1
+        } else {
+            ((n / 100.0) * (series.len() - 1) as f64).round() as usize
+        };
+        Some(series[idx])
     }
 
     pub fn min_throughput_bps(&self) -> Option<f64> {
@@ -489,5 +591,100 @@ impl ThroughputResult {
 
     pub fn total_errors(&self) -> u32 {
         self.non_warmup_iter().filter(|s| !s.is_success()).count() as u32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn result_from(samples: Vec<Sample>, total_duration_us: u64) -> ThroughputResult {
+        ThroughputResult {
+            streams: vec![StreamSamples {
+                stream_id: 0,
+                start_offset_us: samples.first().map(|s| s.t_start_us).unwrap_or(0),
+                samples,
+            }],
+            total_duration_us,
+            timestamp: Utc::now(),
+            udp_stats: None,
+            udp_series: Vec::new(),
+            udp_series_window_us: 0,
+        }
+    }
+
+    /// The core invariant the windowing rework guarantees: the windowed
+    /// percentiles are consistent with the wall-clock average, so the
+    /// physically-impossible `min > avg` the per-sample rate used to
+    /// produce can no longer happen.
+    fn assert_min_le_avg_le_max(r: &ThroughputResult) {
+        let avg_bps = r.avg_throughput() * 8.0;
+        let min = r.min_throughput_bps().expect("min");
+        let max = r.max_throughput_bps().expect("max");
+        // Generous epsilon: the trailing partial window and float rounding
+        // can nudge the weighted mean a hair outside the discrete extremes.
+        let eps = avg_bps * 1e-6 + 1.0;
+        assert!(
+            min <= avg_bps + eps,
+            "min {min} must not exceed avg {avg_bps}"
+        );
+        assert!(
+            avg_bps <= max + eps,
+            "avg {avg_bps} must not exceed max {max}"
+        );
+        assert!(min <= max + eps, "min {min} must not exceed max {max}");
+    }
+
+    #[test]
+    fn udp_like_paced_stream_keeps_min_below_avg() {
+        // 10_000 tiny datagrams, each "sent" in ~2us but spaced 100us apart
+        // by pacing. Per-sample instantaneous rate is ~4.8 Gbps while the
+        // paced aggregate is ~96 Mbps — the exact shape that used to make
+        // `min` exceed `avg`.
+        let mut samples = Vec::new();
+        for i in 0..10_000u64 {
+            samples.push(Sample::success(i * 100, 2, 1200, false));
+        }
+        let r = result_from(samples, 1_000_000); // 1s window
+        assert_min_le_avg_le_max(&r);
+        // Sanity: paced aggregate is ~96 Mbps, nowhere near the per-sample
+        // multi-Gbps burst the old code reported as the minimum.
+        let max = r.max_throughput_bps().unwrap();
+        assert!(max < 500_000_000.0, "windowed max {max} unexpectedly high");
+    }
+
+    #[test]
+    fn http_like_large_slow_samples_keep_min_le_avg_le_max() {
+        // Three back-to-back 8 MB transfers, each spanning 2s. A single
+        // sample now spans dozens of windows; spreading its bytes keeps the
+        // per-window series flat instead of producing one giant spike.
+        let eight_mb = 8 * 1024 * 1024;
+        let samples = vec![
+            Sample::success(0, 2_000_000, eight_mb, false),
+            Sample::success(2_000_000, 2_000_000, eight_mb, false),
+            Sample::success(4_000_000, 2_000_000, eight_mb, false),
+        ];
+        let r = result_from(samples, 6_000_000); // 6s window
+        assert_min_le_avg_le_max(&r);
+    }
+
+    #[test]
+    fn single_window_collapses_to_average() {
+        // A test shorter than one window yields a single window where
+        // min == p50 == max == avg.
+        let r = result_from(vec![Sample::success(0, 500, 4096, false)], 1000);
+        let avg_bps = r.avg_throughput() * 8.0;
+        let min = r.min_throughput_bps().unwrap();
+        let max = r.max_throughput_bps().unwrap();
+        assert!((min - max).abs() < 1.0, "single window must be flat");
+        assert!((min - avg_bps).abs() <= avg_bps * 1e-6 + 1.0);
+    }
+
+    #[test]
+    fn no_successful_samples_yields_no_percentile() {
+        let r = result_from(Vec::new(), 1_000_000);
+        assert!(r.min_throughput_bps().is_none());
+        assert!(r.max_throughput_bps().is_none());
     }
 }

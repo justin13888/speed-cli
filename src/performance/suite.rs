@@ -36,6 +36,23 @@ const SUITE_HTTP_PAYLOAD: usize = 8 * 1024 * 1024;
 /// must stay below the path MTU to avoid IP fragmentation, which would
 /// make the UDP test measure something qualitatively different.
 const SUITE_UDP_DATAGRAM: usize = 1200;
+/// Upper bound on the auto-derived parallel-stream count. Beyond a handful
+/// of streams the suite stops measuring more parallelism and starts
+/// measuring scheduler/CPU contention, which hurts comparability.
+const MAX_AUTO_CONNECTIONS: usize = 8;
+
+/// Default parallel-stream count when the user doesn't pass `--connections`.
+///
+/// There is no universal optimum (it depends on cores, NIC, RTT, and the
+/// client cannot see the server's hardware), so we scale with the client's
+/// available parallelism, capped at [`MAX_AUTO_CONNECTIONS`]. Falls back to
+/// 4 if the platform won't report a core count.
+pub fn default_connections() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, MAX_AUTO_CONNECTIONS)
+}
 
 /// User-facing knobs for the suite.
 #[derive(Debug, Clone)]
@@ -68,7 +85,7 @@ impl SuiteConfig {
             control_port: crate::constants::DEFAULT_CONTROL_PORT,
             phase_duration: Duration::from_secs(8),
             warmup: Duration::from_secs(1),
-            connections: 4,
+            connections: default_connections(),
             udp_target_rate_mbps: 100,
             io_size: SUITE_IO_SIZE,
             http_payload: SUITE_HTTP_PAYLOAD,
@@ -254,21 +271,21 @@ fn tcp_quic_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
     }
 }
 
-/// Effective parameters for a UDP phase. UDP cannot match the shared
-/// I/O size (datagrams must stay MTU-safe) and is single-stream, so
-/// both facts are recorded as intrinsic deviations.
+/// Effective parameters for a UDP phase. UDP uses the same parallel-stream
+/// count as the other protocols (each stream is its own socket / server
+/// session); its one intrinsic difference is the MTU-bound datagram size,
+/// recorded as a deviation.
 fn udp_params(cfg: &SuiteConfig, test_type: TestType) -> PhaseParams {
     let is_latency = matches!(test_type, TestType::LatencyOnly);
     PhaseParams {
         payload_size: (!is_latency).then_some(SUITE_UDP_DATAGRAM),
         io_unit: SUITE_UDP_DATAGRAM,
-        connections: 1,
+        connections: if is_latency { 1 } else { cfg.connections },
         duration: cfg.phase_duration,
         test_type,
         deviations: vec![
-            "UDP datagram kept MTU-safe (1200 B); cannot match the 64 KB TCP/QUIC I/O unit"
-                .to_string(),
-            "UDP blaster is single-stream; the suite --connections value does not apply"
+            "UDP datagram is MTU-bound (1200 B) by design; it intentionally does not use the \
+             64 KB TCP/QUIC I/O unit, to avoid IP fragmentation"
                 .to_string(),
         ],
     }

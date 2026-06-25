@@ -174,9 +174,10 @@ pub enum Commands {
         #[arg(long, default_value = "1")]
         warmup: u64,
 
-        /// Parallel connections / streams.
-        #[arg(short, long, default_value = "4")]
-        connections: usize,
+        /// Parallel connections / streams. When unset, auto-derives from the
+        /// client's CPU cores (capped at 8).
+        #[arg(short, long)]
+        connections: Option<usize>,
 
         /// UDP target rate in Mbps for throughput phase. 0 = saturate.
         #[arg(long, default_value = "100")]

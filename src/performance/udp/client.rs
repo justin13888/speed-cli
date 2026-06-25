@@ -10,7 +10,11 @@
 //!
 //! Pacing uses `tokio::time::sleep`, which has roughly 1 ms
 //! resolution. That caps the achievable target rate at a few hundred
-//! Mbps before pacing starts to bunch packets. For higher rates, set
+//! Mbps before pacing starts to bunch packets. Throughput runs fan out
+//! across `parallel_streams` independent sockets (each a separate server
+//! session); the target rate is split evenly across them, so more streams
+//! raise the aggregate ceiling that pacing granularity would otherwise
+//! impose on one socket. For higher rates still, set
 //! `target_rate_bps = 0` ("saturate") and let the kernel + scheduler
 //! decide.
 
@@ -61,14 +65,6 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
             .green()
             .bold()
     );
-
-    if config.parallel_streams > 1 {
-        tracing::warn!(
-            "UDP test was asked for {} parallel streams, but the blaster runs a single \
-             stream per session. Multi-stream UDP is tracked in the Phase 3 follow-up.",
-            config.parallel_streams
-        );
-    }
 
     // Pre-flight: PING/PONG with a 1s timeout. Capture the socket's
     // local and remote addresses for the report's peers section, then
@@ -161,6 +157,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                     load,
                     Duration::ZERO,
                     target_rate,
+                    config.parallel_streams,
                     false
                 ),
                 run_upload(
@@ -169,6 +166,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                     load,
                     Duration::ZERO,
                     target_rate,
+                    config.parallel_streams,
                     false
                 ),
             );
@@ -180,7 +178,16 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
             for sz in &config.payload_sizes {
                 result.download.insert(
                     *sz,
-                    run_download(&server_addr, *sz, duration, warmup, target_rate, true).await?,
+                    run_download(
+                        &server_addr,
+                        *sz,
+                        duration,
+                        warmup,
+                        target_rate,
+                        config.parallel_streams,
+                        true,
+                    )
+                    .await?,
                 );
             }
         }
@@ -188,15 +195,41 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
             for sz in &config.payload_sizes {
                 result.upload.insert(
                     *sz,
-                    run_upload(&server_addr, *sz, duration, warmup, target_rate, true).await?,
+                    run_upload(
+                        &server_addr,
+                        *sz,
+                        duration,
+                        warmup,
+                        target_rate,
+                        config.parallel_streams,
+                        true,
+                    )
+                    .await?,
                 );
             }
         }
         TestType::Bidirectional => {
             for sz in &config.payload_sizes {
-                let dl =
-                    run_download(&server_addr, *sz, duration, warmup, target_rate, true).await?;
-                let ul = run_upload(&server_addr, *sz, duration, warmup, target_rate, true).await?;
+                let dl = run_download(
+                    &server_addr,
+                    *sz,
+                    duration,
+                    warmup,
+                    target_rate,
+                    config.parallel_streams,
+                    true,
+                )
+                .await?;
+                let ul = run_upload(
+                    &server_addr,
+                    *sz,
+                    duration,
+                    warmup,
+                    target_rate,
+                    config.parallel_streams,
+                    true,
+                )
+                .await?;
                 result.download.insert(*sz, dl);
                 result.upload.insert(*sz, ul);
             }
@@ -204,8 +237,24 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
         TestType::Simultaneous => {
             for sz in &config.payload_sizes {
                 let (dl, ul) = tokio::join!(
-                    run_download(&server_addr, *sz, duration, warmup, target_rate, true),
-                    run_upload(&server_addr, *sz, duration, warmup, target_rate, true),
+                    run_download(
+                        &server_addr,
+                        *sz,
+                        duration,
+                        warmup,
+                        target_rate,
+                        config.parallel_streams,
+                        true
+                    ),
+                    run_upload(
+                        &server_addr,
+                        *sz,
+                        duration,
+                        warmup,
+                        target_rate,
+                        config.parallel_streams,
+                        true
+                    ),
                 );
                 result.download.insert(*sz, dl?);
                 result.upload.insert(*sz, ul?);
@@ -350,23 +399,101 @@ async fn send_start(
     Ok(())
 }
 
+/// Split a target rate evenly across `streams` so the aggregate matches
+/// the request. `0` means "saturate" and is passed through unchanged.
+fn split_rate(total_bps: u64, streams: usize) -> u64 {
+    if total_bps == 0 {
+        return 0;
+    }
+    (total_bps / streams.max(1) as u64).max(1)
+}
+
+/// Fold a per-session receiver stat into the run aggregate: counts sum,
+/// jitter takes the worst stream (conservative), and `observed_by` is
+/// kept from the first stream (every stream observes the same side).
+fn merge_udp_stats(acc: &mut Option<UdpRunStats>, s: UdpRunStats) {
+    match acc {
+        None => *acc = Some(s),
+        Some(a) => {
+            a.received_packets += s.received_packets;
+            a.bytes_received += s.bytes_received;
+            a.lost_packets += s.lost_packets;
+            a.out_of_order += s.out_of_order;
+            a.duplicates += s.duplicates;
+            a.jitter_us = a.jitter_us.max(s.jitter_us);
+        }
+    }
+}
+
+/// Per-stream task output: this stream's samples plus its per-session
+/// receiver stats (`None` when the stream couldn't collect them).
+type UdpStreamOutput = (Vec<Sample>, Option<UdpRunStats>);
+
+/// Collect the joined per-stream task results into `StreamSamples` (one
+/// per stream, indexed by spawn order) and a merged run-level
+/// [`UdpRunStats`]. A stream that errored or panicked contributes an
+/// empty `StreamSamples` so stream ids stay stable.
+fn collect_udp_streams(
+    results: Vec<Result<Result<UdpStreamOutput>, tokio::task::JoinError>>,
+    direction: &'static str,
+) -> (Vec<StreamSamples>, Option<UdpRunStats>) {
+    let mut streams = Vec::with_capacity(results.len());
+    let mut agg: Option<UdpRunStats> = None;
+    for (idx, res) in results.into_iter().enumerate() {
+        let stream_id = idx as u32;
+        match res {
+            Ok(Ok((samples, stats))) => {
+                let start_offset_us = samples.first().map(|s| s.t_start_us).unwrap_or(0);
+                streams.push(StreamSamples {
+                    stream_id,
+                    start_offset_us,
+                    samples,
+                });
+                if let Some(s) = stats {
+                    merge_udp_stats(&mut agg, s);
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("UDP {direction} stream {idx} failed: {e}");
+                streams.push(StreamSamples {
+                    stream_id,
+                    start_offset_us: 0,
+                    samples: Vec::new(),
+                });
+            }
+            Err(e) => {
+                tracing::error!("UDP {direction} stream {idx} panicked or was cancelled: {e}");
+                streams.push(StreamSamples {
+                    stream_id,
+                    start_offset_us: 0,
+                    samples: Vec::new(),
+                });
+            }
+        }
+    }
+    (streams, agg)
+}
+
 async fn run_download(
     server_addr: &str,
     payload_size: usize,
     duration: Duration,
     warmup: Duration,
     target_rate_bps: u64,
+    parallel_streams: usize,
     show_progress: bool,
 ) -> Result<ThroughputResult> {
+    let parallel_streams = parallel_streams.max(1);
     tracing::info!(
-        "UDP download: {} payload, {} target rate",
+        "UDP download: {} payload, {} target rate, {} stream(s)",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
             "saturate".to_string()
         } else {
             format!("{} bps", target_rate_bps)
         }
-        .yellow()
+        .yellow(),
+        parallel_streams.to_string().yellow(),
     );
     let progress_bar = if show_progress {
         create_progress_bar(ProgressBarType::Download, duration)
@@ -374,102 +501,121 @@ async fn run_download(
         indicatif::ProgressBar::hidden()
     };
 
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.connect(server_addr).await?;
-
-    send_start(
-        &socket,
-        Mode::Download,
-        target_rate_bps,
-        payload_size as u32,
-        duration,
-    )
-    .await?;
-
+    // One shared clock and one shared stats collector so all streams land on
+    // the same time axis and the progress bar shows aggregate throughput.
     let start_time = Instant::now();
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
-    let mut buf = vec![0u8; payload_size + 64];
-    let mut samples: Vec<Sample> = Vec::new();
-    let mut rx_stats = ReceiveStats::default();
-    // A transient recv error (e.g. an ICMP port-unreachable surfaced on the
-    // socket) shouldn't abort the whole download; bail only after several in a
-    // row, which signals the socket is genuinely dead.
-    let mut consecutive_errors = 0u32;
-    const MAX_CONSECUTIVE_RECV_ERRORS: u32 = 8;
 
-    while start_time.elapsed() < duration {
-        let is_warmup = start_time.elapsed() < warmup;
-        let recv_start = Instant::now();
-        let t_start_us = offset_us(start_time, recv_start);
-        match timeout(Duration::from_millis(200), socket.recv(&mut buf)).await {
-            Ok(Ok(n)) => {
-                consecutive_errors = 0;
-                let recv_ts = now_us();
-                if let Some((BlasterPacket::Data { seq, send_ts_us }, payload_len)) =
-                    BlasterPacket::decode(&buf[..n])
-                {
-                    rx_stats.record(seq, payload_len as u64, send_ts_us, recv_ts);
-                    let duration_us = recv_start.elapsed().as_micros() as u64;
-                    let s = Sample::success(t_start_us, duration_us, payload_len as u64, is_warmup);
-                    samples.push(s.clone());
-                    let _ = tx.send(s);
+    // Each stream is an independent socket (unique source port ⇒ a separate
+    // server session) paced at its share of the target rate.
+    let per_stream_rate = split_rate(target_rate_bps, parallel_streams);
+
+    let mut tasks = Vec::with_capacity(parallel_streams);
+    for _ in 0..parallel_streams {
+        let server_addr = server_addr.to_string();
+        let tx = tx.clone();
+        tasks.push(tokio::spawn(async move {
+            let socket = UdpSocket::bind("0.0.0.0:0").await?;
+            socket.connect(&server_addr).await?;
+            send_start(
+                &socket,
+                Mode::Download,
+                per_stream_rate,
+                payload_size as u32,
+                duration,
+            )
+            .await?;
+
+            let mut buf = vec![0u8; payload_size + 64];
+            let mut samples: Vec<Sample> = Vec::new();
+            let mut rx_stats = ReceiveStats::default();
+            // A transient recv error (e.g. an ICMP port-unreachable surfaced on
+            // the socket) shouldn't abort the whole download; bail only after
+            // several in a row, which signals the socket is genuinely dead.
+            let mut consecutive_errors = 0u32;
+            const MAX_CONSECUTIVE_RECV_ERRORS: u32 = 8;
+
+            while start_time.elapsed() < duration {
+                let is_warmup = start_time.elapsed() < warmup;
+                let recv_start = Instant::now();
+                let t_start_us = offset_us(start_time, recv_start);
+                match timeout(Duration::from_millis(200), socket.recv(&mut buf)).await {
+                    Ok(Ok(n)) => {
+                        consecutive_errors = 0;
+                        let recv_ts = now_us();
+                        if let Some((BlasterPacket::Data { seq, send_ts_us }, payload_len)) =
+                            BlasterPacket::decode(&buf[..n])
+                        {
+                            rx_stats.record(seq, payload_len as u64, send_ts_us, recv_ts);
+                            let duration_us = recv_start.elapsed().as_micros() as u64;
+                            let s = Sample::success(
+                                t_start_us,
+                                duration_us,
+                                payload_len as u64,
+                                is_warmup,
+                            );
+                            samples.push(s.clone());
+                            let _ = tx.send(s);
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let duration_us = recv_start.elapsed().as_micros() as u64;
+                        let s = Sample::failure(
+                            t_start_us,
+                            duration_us,
+                            ConnectionError::Unknown(format!("UDP recv error: {e}")),
+                            0,
+                            is_warmup,
+                        );
+                        samples.push(s.clone());
+                        let _ = tx.send(s);
+                        consecutive_errors += 1;
+                        if consecutive_errors >= MAX_CONSECUTIVE_RECV_ERRORS {
+                            tracing::warn!(
+                                "UDP download stream: {consecutive_errors} consecutive recv errors, stopping"
+                            );
+                            break;
+                        }
+                    }
+                    Err(_) => continue,
                 }
             }
-            Ok(Err(e)) => {
-                let duration_us = recv_start.elapsed().as_micros() as u64;
-                let s = Sample::failure(
-                    t_start_us,
-                    duration_us,
-                    ConnectionError::Unknown(format!("UDP recv error: {e}")),
-                    0,
-                    is_warmup,
-                );
-                samples.push(s.clone());
-                let _ = tx.send(s);
-                consecutive_errors += 1;
-                if consecutive_errors >= MAX_CONSECUTIVE_RECV_ERRORS {
-                    tracing::warn!(
-                        "UDP download: {consecutive_errors} consecutive recv errors, stopping"
-                    );
-                    break;
-                }
-            }
-            Err(_) => continue,
-        }
+
+            let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
+
+            let stats = UdpRunStats {
+                observed_by: UdpStatsSide::Local,
+                received_packets: rx_stats.received,
+                bytes_received: rx_stats.bytes_received,
+                lost_packets: rx_stats.lost(),
+                out_of_order: rx_stats.out_of_order,
+                duplicates: rx_stats.duplicates,
+                jitter_us: rx_stats.jitter_us(),
+            };
+            Ok::<UdpStreamOutput, eyre::Report>((samples, Some(stats)))
+        }));
     }
 
-    let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
-
+    let results = futures::future::join_all(tasks).await;
     drop(tx);
     let _ = stats_collector
         .finish(progress_bar, "Download complete".to_string())
         .await;
-
     let end_time = Instant::now();
-    debug!(
-        "UDP download complete: {} packets, {} bytes, {} lost, jitter {} us",
-        rx_stats.received,
-        rx_stats.bytes_received,
-        rx_stats.lost(),
-        rx_stats.jitter_us()
-    );
 
-    let start_offset_us = samples.first().map(|s| s.t_start_us).unwrap_or(0);
-    let streams = vec![StreamSamples {
-        stream_id: 0,
-        start_offset_us,
-        samples,
-    }];
-    let udp_stats = Some(UdpRunStats {
-        observed_by: UdpStatsSide::Local,
-        received_packets: rx_stats.received,
-        bytes_received: rx_stats.bytes_received,
-        lost_packets: rx_stats.lost(),
-        out_of_order: rx_stats.out_of_order,
-        duplicates: rx_stats.duplicates,
-        jitter_us: rx_stats.jitter_us(),
-    });
+    let (streams, udp_stats) = collect_udp_streams(results, "download");
+    if let Some(s) = &udp_stats {
+        debug!(
+            "UDP download complete: {} packets, {} bytes, {} lost, jitter {} us ({} streams)",
+            s.received_packets,
+            s.bytes_received,
+            s.lost_packets,
+            s.jitter_us,
+            streams.len()
+        );
+    }
+
     Ok(ThroughputResult {
         streams,
         total_duration_us: measurement_duration_us(start_time, end_time, warmup),
@@ -486,17 +632,20 @@ async fn run_upload(
     duration: Duration,
     warmup: Duration,
     target_rate_bps: u64,
+    parallel_streams: usize,
     show_progress: bool,
 ) -> Result<ThroughputResult> {
+    let parallel_streams = parallel_streams.max(1);
     tracing::info!(
-        "UDP upload: {} payload, {} target rate",
+        "UDP upload: {} payload, {} target rate, {} stream(s)",
         format_bytes(payload_size).yellow(),
         if target_rate_bps == 0 {
             "saturate".to_string()
         } else {
             format!("{} bps", target_rate_bps)
         }
-        .yellow()
+        .yellow(),
+        parallel_streams.to_string().yellow(),
     );
     let progress_bar = if show_progress {
         create_progress_bar(ProgressBarType::Upload, duration)
@@ -504,146 +653,160 @@ async fn run_upload(
         indicatif::ProgressBar::hidden()
     };
 
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.connect(server_addr).await?;
-
-    send_start(
-        &socket,
-        Mode::Upload,
-        target_rate_bps,
-        payload_size as u32,
-        duration,
-    )
-    .await?;
-
-    let mut payload = vec![0u8; payload_size];
-    rand::rng().fill_bytes(&mut payload);
-    // One reusable packet buffer: the payload is constant for the session, so
-    // each send rewrites only seq + timestamp instead of reallocating and
-    // re-copying the payload.
-    let mut packet = DataPacketWriter::new(&payload);
-
-    let inter_packet_delay = if target_rate_bps > 0 {
-        let bps = target_rate_bps as f64 / 8.0;
-        Some(Duration::from_secs_f64(
-            (payload_size as f64) / bps.max(1.0),
-        ))
-    } else {
-        None
-    };
-
     let start_time = Instant::now();
     let (stats_collector, tx) =
         ThroughputStatsCollector::new(progress_bar.clone(), start_time, duration);
-    let mut samples: Vec<Sample> = Vec::new();
-    let mut seq: u64 = 1;
 
-    while start_time.elapsed() < duration {
-        let is_warmup = start_time.elapsed() < warmup;
-        let send_start = Instant::now();
-        let t_start_us = offset_us(start_time, send_start);
-        let bytes = packet.frame(seq, now_us());
-        match socket.send(bytes).await {
-            Ok(_) => {
-                let duration_us = send_start.elapsed().as_micros() as u64;
-                let s = Sample::success(t_start_us, duration_us, payload_size as u64, is_warmup);
-                samples.push(s.clone());
-                let _ = tx.send(s);
-                seq += 1;
-            }
-            Err(e) => {
-                // UDP send failures are *expected* at saturation: ENOBUFS
-                // (kernel send queue full) and EAGAIN/WouldBlock both mean
-                // "back off, try again", not "test is over". We record the
-                // failed attempt for accounting and yield so the kernel can
-                // drain. Any other errno (host unreachable, etc.) we record
-                // and keep going too.
-                let kind = e.kind();
-                let duration_us = send_start.elapsed().as_micros() as u64;
-                let s = Sample::failure(
-                    t_start_us,
-                    duration_us,
-                    ConnectionError::TransferFailed(format!("UDP send error: {e}")),
-                    0,
-                    is_warmup,
-                );
-                samples.push(s.clone());
-                let _ = tx.send(s);
-                if matches!(
-                    kind,
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
-                ) {
-                    tokio::task::yield_now().await;
-                } else {
-                    sleep(Duration::from_millis(1)).await;
+    // Each stream is its own socket (a separate server session), paced at its
+    // share of the target rate so the aggregate matches the request.
+    let per_stream_rate = split_rate(target_rate_bps, parallel_streams);
+
+    let mut tasks = Vec::with_capacity(parallel_streams);
+    for _ in 0..parallel_streams {
+        let server_addr = server_addr.to_string();
+        let tx = tx.clone();
+        tasks.push(tokio::spawn(async move {
+            let socket = UdpSocket::bind("0.0.0.0:0").await?;
+            socket.connect(&server_addr).await?;
+            send_start(
+                &socket,
+                Mode::Upload,
+                per_stream_rate,
+                payload_size as u32,
+                duration,
+            )
+            .await?;
+
+            let mut payload = vec![0u8; payload_size];
+            rand::rng().fill_bytes(&mut payload);
+            // One reusable packet buffer: the payload is constant for the
+            // session, so each send rewrites only seq + timestamp instead of
+            // reallocating and re-copying the payload.
+            let mut packet = DataPacketWriter::new(&payload);
+
+            let inter_packet_delay = if per_stream_rate > 0 {
+                let bps = per_stream_rate as f64 / 8.0;
+                Some(Duration::from_secs_f64(
+                    (payload_size as f64) / bps.max(1.0),
+                ))
+            } else {
+                None
+            };
+
+            let mut samples: Vec<Sample> = Vec::new();
+            let mut seq: u64 = 1;
+
+            while start_time.elapsed() < duration {
+                let is_warmup = start_time.elapsed() < warmup;
+                let send_instant = Instant::now();
+                let t_start_us = offset_us(start_time, send_instant);
+                let bytes = packet.frame(seq, now_us());
+                match socket.send(bytes).await {
+                    Ok(_) => {
+                        let duration_us = send_instant.elapsed().as_micros() as u64;
+                        let s = Sample::success(
+                            t_start_us,
+                            duration_us,
+                            payload_size as u64,
+                            is_warmup,
+                        );
+                        samples.push(s.clone());
+                        let _ = tx.send(s);
+                        seq += 1;
+                    }
+                    Err(e) => {
+                        // UDP send failures are *expected* at saturation:
+                        // ENOBUFS (kernel send queue full) and EAGAIN/WouldBlock
+                        // both mean "back off, try again", not "test is over".
+                        // We record the failed attempt for accounting and yield
+                        // so the kernel can drain. Any other errno (host
+                        // unreachable, etc.) we record and keep going too.
+                        let kind = e.kind();
+                        let duration_us = send_instant.elapsed().as_micros() as u64;
+                        let s = Sample::failure(
+                            t_start_us,
+                            duration_us,
+                            ConnectionError::TransferFailed(format!("UDP send error: {e}")),
+                            0,
+                            is_warmup,
+                        );
+                        samples.push(s.clone());
+                        let _ = tx.send(s);
+                        if matches!(
+                            kind,
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
+                        ) {
+                            tokio::task::yield_now().await;
+                        } else {
+                            sleep(Duration::from_millis(1)).await;
+                        }
+                        // Note: we deliberately do *not* increment `seq` here -
+                        // the packet was never put on the wire, so the receiver
+                        // shouldn't count it as a gap.
+                    }
                 }
-                // Note: we deliberately do *not* increment `seq` here -
-                // the packet was never put on the wire, so the receiver
-                // shouldn't count it as a gap.
+
+                if let Some(d) = inter_packet_delay {
+                    sleep(d).await;
+                } else if seq.is_multiple_of(256) {
+                    tokio::task::yield_now().await;
+                }
             }
-        }
 
-        if let Some(d) = inter_packet_delay {
-            sleep(d).await;
-        } else if seq.is_multiple_of(256) {
-            tokio::task::yield_now().await;
-        }
+            // FIN + REPORT collection for this stream's session.
+            let mut report: Option<BlasterPacket> = None;
+            for _ in 0..5 {
+                let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
+                let mut buf = vec![0u8; 4096];
+                if let Ok(Ok(n)) = timeout(Duration::from_millis(200), socket.recv(&mut buf)).await
+                    && let Some((p, _)) = BlasterPacket::decode(&buf[..n])
+                    && matches!(p, BlasterPacket::Report { .. })
+                {
+                    report = Some(p);
+                    break;
+                }
+            }
+            let stats = if let Some(BlasterPacket::Report {
+                received,
+                bytes_received,
+                lost,
+                out_of_order,
+                jitter_us,
+                duplicates,
+            }) = report
+            {
+                debug!(
+                    "server REPORT: received={} bytes={} lost={} oos={} dups={} jitter={}us",
+                    received, bytes_received, lost, out_of_order, duplicates, jitter_us
+                );
+                Some(UdpRunStats {
+                    observed_by: UdpStatsSide::Remote,
+                    received_packets: received,
+                    bytes_received,
+                    lost_packets: lost,
+                    out_of_order,
+                    duplicates,
+                    jitter_us,
+                })
+            } else {
+                tracing::warn!(
+                    "UDP upload stream: no REPORT received from server; loss/jitter unreported"
+                );
+                None
+            };
+            Ok::<UdpStreamOutput, eyre::Report>((samples, stats))
+        }));
     }
 
-    // FIN + REPORT collection.
-    let mut report: Option<BlasterPacket> = None;
-    for _ in 0..5 {
-        let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
-        let mut buf = vec![0u8; 4096];
-        if let Ok(Ok(n)) = timeout(Duration::from_millis(200), socket.recv(&mut buf)).await
-            && let Some((p, _)) = BlasterPacket::decode(&buf[..n])
-            && matches!(p, BlasterPacket::Report { .. })
-        {
-            report = Some(p);
-            break;
-        }
-    }
-    let udp_stats = if let Some(BlasterPacket::Report {
-        received,
-        bytes_received,
-        lost,
-        out_of_order,
-        jitter_us,
-        duplicates,
-    }) = report
-    {
-        debug!(
-            "server REPORT: received={} bytes={} lost={} oos={} dups={} jitter={}us",
-            received, bytes_received, lost, out_of_order, duplicates, jitter_us
-        );
-        Some(UdpRunStats {
-            observed_by: UdpStatsSide::Remote,
-            received_packets: received,
-            bytes_received,
-            lost_packets: lost,
-            out_of_order,
-            duplicates,
-            jitter_us,
-        })
-    } else {
-        tracing::warn!(
-            "UDP upload: no REPORT received from server; loss/jitter will be unreported"
-        );
-        None
-    };
-
+    let results = futures::future::join_all(tasks).await;
     drop(tx);
     let _ = stats_collector
         .finish(progress_bar, "Upload complete".to_string())
         .await;
-
     let end_time = Instant::now();
-    let start_offset_us = samples.first().map(|s| s.t_start_us).unwrap_or(0);
-    let streams = vec![StreamSamples {
-        stream_id: 0,
-        start_offset_us,
-        samples,
-    }];
+
+    let (streams, udp_stats) = collect_udp_streams(results, "upload");
+
     Ok(ThroughputResult {
         streams,
         total_duration_us: measurement_duration_us(start_time, end_time, warmup),

@@ -44,3 +44,13 @@ pub const HTTP2_STREAM_WINDOW: u32 = 8 * 1024 * 1024; // 8 MiB
 pub const HTTP2_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024; // 32 MiB
 /// Larger frames mean less per-frame framing/CPU overhead on bulk transfers.
 pub const HTTP2_MAX_FRAME_SIZE: u32 = 64 * 1024; // 64 KiB
+/// Per-connection send buffer for the HTTP/2 server. hyper's default is only
+/// 400 KB (`DEFAULT_MAX_SEND_BUF_SIZE`), which throttles h2c/HTTPS badly:
+/// because all multiplexed streams of a connection share one send buffer, a
+/// suite that runs N "parallel" downloads over a *single* h2 connection (h2
+/// multiplexes by default) repeatedly fills 400 KB, blocks the send task, and
+/// transfers in stop-and-go bursts — collapsing loopback throughput to tens of
+/// Mbps. HTTP/1 never hits this because it opens N independent TCP connections,
+/// each with its own kernel send buffer. Raising this to match the stream
+/// window keeps the single shared connection saturated.
+pub const HTTP2_MAX_SEND_BUF: usize = 8 * 1024 * 1024; // 8 MiB

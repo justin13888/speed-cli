@@ -17,7 +17,7 @@ use speed_cli::control::{
 use speed_cli::performance::http::HttpVersion;
 use speed_cli::performance::http::client::run_http_test;
 use speed_cli::performance::quic::client::run_quic_client;
-use speed_cli::performance::suite::{SuiteConfig, run_suite};
+use speed_cli::performance::suite::{SuiteConfig, default_connections, run_suite};
 use speed_cli::performance::tcp::client::run_tcp_client;
 use speed_cli::performance::udp::client::run_udp_client;
 use speed_cli::report::{
@@ -461,6 +461,8 @@ async fn main() -> Result<()> {
                     "--warmup ({warmup}s) must be less than per-phase --duration ({duration}s)"
                 ));
             }
+            // Unset → auto-derive from the client's core count (capped).
+            let connections = connections.unwrap_or_else(default_connections);
             let cfg = SuiteConfig {
                 control_port,
                 phase_duration: std::time::Duration::from_secs(duration),
