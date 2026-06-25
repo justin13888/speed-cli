@@ -36,17 +36,26 @@ const SUITE_HTTP_PAYLOAD: usize = 8 * 1024 * 1024;
 /// must stay below the path MTU to avoid IP fragmentation, which would
 /// make the UDP test measure something qualitatively different.
 const SUITE_UDP_DATAGRAM: usize = 1200;
-/// Upper bound on the auto-derived parallel-stream count. Beyond a handful
-/// of streams the suite stops measuring more parallelism and starts
-/// measuring scheduler/CPU contention, which hurts comparability.
+/// Sanity ceiling on the auto-derived parallel-stream count, so a high-core
+/// client doesn't spawn pathologically many flows. A handful of streams is
+/// enough to saturate almost any path; past that the marginal flow adds little
+/// and only inflates client-side bookkeeping.
 const MAX_AUTO_CONNECTIONS: usize = 8;
 
 /// Default parallel-stream count when the user doesn't pass `--connections`.
 ///
-/// There is no universal optimum (it depends on cores, NIC, RTT, and the
-/// client cannot see the server's hardware), so we scale with the client's
-/// available parallelism, capped at [`MAX_AUTO_CONNECTIONS`]. Falls back to
-/// 4 if the platform won't report a core count.
+/// Parallel streams exist to **saturate the network path** — the usual
+/// throughput bottleneck — by overcoming per-flow limits (congestion control,
+/// the bandwidth-delay product), not to exploit client/server compute. There
+/// is no universal optimum (it depends on the link, RTT, and the server's
+/// hardware, none of which the client can see), so we scale with the client's
+/// available parallelism as a coarse proxy, capped at [`MAX_AUTO_CONNECTIONS`].
+///
+/// We deliberately use **logical** cores ([`std::thread::available_parallelism`],
+/// which counts SMT siblings): the streams are async I/O-bound tasks, not
+/// CPU-pinned threads, so the extra flows cost essentially nothing on the CPU,
+/// and we'd rather over- than under-provision flows and under-measure the link.
+/// Falls back to 4 if the platform won't report a core count.
 pub fn default_connections() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
