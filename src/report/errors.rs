@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "message", rename_all = "snake_case")]
 pub enum ConnectionError {
     /// Error related to connection establishment
     ConnectionFailed(String),

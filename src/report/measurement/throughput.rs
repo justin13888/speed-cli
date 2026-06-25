@@ -120,4 +120,25 @@ mod tests {
         let rendered = format!("{s}");
         assert!(rendered.contains("0.50 ms"), "got: {rendered}");
     }
+
+    #[test]
+    fn failure_sample_round_trips_through_cbor() {
+        // Regression: `ConnectionError` was internally tagged (`tag = "type"`),
+        // which ciborium cannot serialize for newtype-string variants, so any
+        // export containing a failed sample blew up with
+        // "cannot serialize tagged newtype variant ... containing a string".
+        let s = Sample::failure(0, 1_000, ConnectionError::Unknown("boom".into()), 2, false);
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).expect("CBOR encode must succeed");
+        let back: Sample = ciborium::from_reader(buf.as_slice()).expect("CBOR decode");
+
+        match back.outcome {
+            Outcome::Failure { error, retry_count } => {
+                assert_eq!(retry_count, 2);
+                assert!(matches!(error, ConnectionError::Unknown(m) if m == "boom"));
+            }
+            Outcome::Success => panic!("expected a failure outcome"),
+        }
+    }
 }
