@@ -54,7 +54,20 @@ pub fn init(verbose: u8, quiet: bool, color: ColorChoice) {
         } else {
             "info"
         };
-        EnvFilter::new(level)
+        let mut filter = EnvFilter::new(level);
+        // reqwest's HTTP/3 pool logs the remote's graceful QUIC stream close
+        // (RemoteTerminate code 0x0) at ERROR on every normal request teardown.
+        // It is benign end-of-request behaviour, not a fault — real request
+        // failures still surface via the returned Result. Suppress the noise by
+        // default; `-vv` and RUST_LOG still reveal it.
+        if verbose < 2 {
+            filter = filter.add_directive(
+                "reqwest::async_impl::h3_client::pool=off"
+                    .parse()
+                    .expect("static EnvFilter directive is valid"),
+            );
+        }
+        filter
     });
 
     let base = tracing_subscriber::registry().with(filter);
