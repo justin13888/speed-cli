@@ -20,7 +20,13 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub const DEFAULT_HTTPS_PORT: u16 = 8443;
 
 pub const DEFAULT_TCP_PAYLOAD_SIZES: &[usize] = &[1024, 8192, 65536]; // 1KB, 8KB, 64KB
-pub const DEFAULT_UDP_PAYLOAD_SIZES: &[usize] = &[1024, 8192, 65536]; // 1KB, 8KB, 64KB
+/// Largest UDP DATA payload that fits in a single IPv4 datagram: the
+/// 65507-byte IPv4 UDP payload maximum minus the 24-byte blaster DATA
+/// header (see `DataPacketWriter::HEADER_LEN`). A larger payload makes the
+/// datagram exceed 65507 B, so the send fails with EMSGSIZE and no packets
+/// reach the wire.
+pub const MAX_UDP_PAYLOAD_SIZE: usize = 65_507 - 24; // 65483
+pub const DEFAULT_UDP_PAYLOAD_SIZES: &[usize] = &[1024, 8192, MAX_UDP_PAYLOAD_SIZE]; // 1 KiB, 8 KiB, max single datagram
 pub const DEFAULT_HTTP_PAYLOAD_SIZES: &[usize] =
     &[1024 * 1024, 10 * 1024 * 1024, 100 * 1024 * 1024]; // 1MB, 10MB, 100MB
 /// Maximum allowed upload size for HTTP requests.

@@ -13,6 +13,7 @@ use crate::{
     constants::{
         DEFAULT_HTTP_PAYLOAD_SIZES, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT,
         DEFAULT_TCP_PAYLOAD_SIZES, DEFAULT_TCP_PORT, DEFAULT_UDP_PAYLOAD_SIZES, DEFAULT_UDP_PORT,
+        MAX_UDP_PAYLOAD_SIZE,
     },
     performance::http::HttpVersion,
 };
@@ -236,17 +237,37 @@ impl UdpTestConfig {
         T: IntoIterator<Item = usize>,
     {
         let payload_sizes: IndexSet<usize> = payload_sizes.into_iter().collect();
+        // A UDP DATA payload above MAX_UDP_PAYLOAD_SIZE makes the datagram
+        // exceed the 65507 B IPv4 limit, so every send fails with EMSGSIZE and
+        // 0 packets reach the wire. Clamp any such size down to the max (the
+        // IndexSet dedups any collisions) and warn, rather than running a test
+        // that silently sends nothing.
+        let payload_sizes: IndexSet<usize> = if payload_sizes.is_empty() {
+            IndexSet::from_iter(DEFAULT_UDP_PAYLOAD_SIZES.iter().copied())
+        } else {
+            payload_sizes
+                .into_iter()
+                .map(|sz| {
+                    if sz > MAX_UDP_PAYLOAD_SIZE {
+                        tracing::warn!(
+                            "UDP payload size {sz} B exceeds the single-datagram maximum \
+                             ({MAX_UDP_PAYLOAD_SIZE} B = 65507 IPv4 UDP max − 24 B header); \
+                             clamping to {MAX_UDP_PAYLOAD_SIZE} B"
+                        );
+                        MAX_UDP_PAYLOAD_SIZE
+                    } else {
+                        sz
+                    }
+                })
+                .collect()
+        };
         Self {
             server,
             port: port.unwrap_or(DEFAULT_UDP_PORT), // Default UDP port
             duration,
             parallel_streams: parallel_streams.max(1),
             test_type,
-            payload_sizes: if payload_sizes.is_empty() {
-                IndexSet::from_iter(DEFAULT_UDP_PAYLOAD_SIZES.iter().copied())
-            } else {
-                payload_sizes
-            },
+            payload_sizes,
             warmup: DEFAULT_WARMUP,
             accounting: ThroughputAccounting::Goodput,
             target_rate_bps: 0,
@@ -558,5 +579,33 @@ impl Display for HttpTestConfig {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn udp_config(sizes: Vec<usize>) -> UdpTestConfig {
+        UdpTestConfig::new("host".into(), None, 1, 1, TestType::Download, sizes)
+    }
+
+    #[test]
+    fn udp_defaults_fit_a_single_datagram() {
+        let sizes = udp_config(vec![]).payload_sizes;
+        assert!(sizes.iter().all(|&s| s <= MAX_UDP_PAYLOAD_SIZE));
+        assert!(sizes.contains(&MAX_UDP_PAYLOAD_SIZE));
+        // The old 64 KiB default exceeded the datagram limit and must be gone.
+        assert!(!sizes.contains(&65536));
+    }
+
+    #[test]
+    fn udp_clamps_oversized_user_sizes() {
+        let sizes = udp_config(vec![1024, 65536, 70000]).payload_sizes;
+        // Valid size is untouched; both oversized values collapse onto the cap.
+        assert!(sizes.contains(&1024));
+        assert!(sizes.contains(&MAX_UDP_PAYLOAD_SIZE));
+        assert!(sizes.iter().all(|&s| s <= MAX_UDP_PAYLOAD_SIZE));
+        assert_eq!(sizes.len(), 2);
     }
 }
