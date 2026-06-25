@@ -7,6 +7,10 @@ use crate::utils::logging::ColorChoice;
 
 #[derive(Parser, Debug)]
 #[command(name = "speed-cli")]
+// `-V` / `--version` print the full build provenance (version, commit +
+// dirty state, profile, rustc, build time). Sourced from `build_info`,
+// the single source of truth shared with report metadata.
+#[command(version = crate::build_info::LONG_VERSION.as_str())]
 #[command(
     about = "A comprehensive network performance measurement tool for TCP-based, UDP-based, HTTP-based protocols"
 )]

@@ -5,6 +5,7 @@
 //! tests under `tests/` (and any external embedders) can drive the
 //! servers / clients / reporting types programmatically.
 
+pub mod build_info;
 pub mod cli;
 pub mod constants;
 pub mod control;

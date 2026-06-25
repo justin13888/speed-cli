@@ -54,7 +54,7 @@ fn make_sample_report() -> TestReport {
 }
 
 fn assert_reports_equivalent(original: &TestReport, decoded: &TestReport) {
-    assert_eq!(original.version, decoded.version);
+    assert_eq!(original.build, decoded.build);
     assert_eq!(original.schema_version, decoded.schema_version);
 
     let (orig_net, dec_net) = match (&original.result, &decoded.result) {

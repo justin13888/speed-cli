@@ -9,7 +9,15 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::build_info;
+
 /// Self-description of one endpoint: build-time identity + host info.
+///
+/// The build-provenance fields below come from [`build_info`]. The
+/// `profile` / `rustc` / `build_timestamp` fields were added after the
+/// original three, so they are `#[serde(default)]` — a peer that
+/// predates them simply leaves them `None` over the wire, keeping the
+/// CBOR/JSON handshake forward-compatible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerIdentity {
     /// `CARGO_PKG_VERSION` of the binary that was running.
@@ -20,6 +28,16 @@ pub struct PeerIdentity {
     /// Build-time dirty flag. `None` if the build environment couldn't
     /// determine it (no git, or `git status` failed).
     pub git_dirty: Option<bool>,
+    /// Cargo build profile (`debug` / `release`). `None` when decoded
+    /// from a peer that predates this field.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// `rustc --version` banner of the build. `None` from older peers.
+    #[serde(default)]
+    pub rustc: Option<String>,
+    /// RFC 3339 build timestamp (UTC). `None` from older peers.
+    #[serde(default)]
+    pub build_timestamp: Option<String>,
     pub hostname: Option<String>,
     pub os: String,
     pub arch: String,
@@ -29,21 +47,16 @@ impl PeerIdentity {
     /// Build a `PeerIdentity` describing the current process.
     pub fn local() -> Self {
         Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            git_commit: option_env!("GIT_COMMIT").map(|s| s.to_string()),
-            git_dirty: parse_dirty_env(option_env!("GIT_DIRTY")),
+            version: build_info::VERSION.to_string(),
+            git_commit: build_info::GIT_COMMIT.map(str::to_string),
+            git_dirty: build_info::git_dirty(),
+            profile: Some(build_info::PROFILE.to_string()),
+            rustc: Some(build_info::RUSTC.to_string()),
+            build_timestamp: Some(build_info::build_timestamp()),
             hostname: read_hostname(),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
         }
-    }
-}
-
-fn parse_dirty_env(s: Option<&str>) -> Option<bool> {
-    match s {
-        Some("true") => Some(true),
-        Some("false") => Some(false),
-        _ => None,
     }
 }
 
@@ -125,6 +138,9 @@ use std::fmt::{self, Display, Formatter};
 impl Display for PeerIdentity {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "speed-cli {}", self.version)?;
+        // Fold commit (+dirty) and build profile into one parenthetical,
+        // e.g. `(abcdef123456+dirty, release)`. Either part may be absent.
+        let mut tags: Vec<String> = Vec::new();
         if let Some(commit) = &self.git_commit {
             let short: String = commit.chars().take(12).collect();
             let dirty = match self.git_dirty {
@@ -132,7 +148,13 @@ impl Display for PeerIdentity {
                 Some(false) => "",
                 None => "?",
             };
-            write!(f, " ({short}{dirty})")?;
+            tags.push(format!("{short}{dirty}"));
+        }
+        if let Some(profile) = &self.profile {
+            tags.push(profile.clone());
+        }
+        if !tags.is_empty() {
+            write!(f, " ({})", tags.join(", "))?;
         }
         write!(
             f,

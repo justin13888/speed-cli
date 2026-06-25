@@ -10,7 +10,8 @@ use colored::*;
 use serde::{Deserialize, Serialize};
 
 use crate::TestType;
-use crate::report::{REPORT_SCHEMA_VERSION, TestReport};
+use crate::build_info::BuildInfo;
+use crate::report::{REPORT_SCHEMA_VERSION, TestReport, write_build_info};
 use crate::utils::env::Environment;
 use crate::utils::format::format_bytes;
 
@@ -19,8 +20,10 @@ pub struct SuiteReport {
     pub schema_version: u32,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
-    /// speed-cli version that produced this suite.
-    pub version: String,
+    /// Build provenance of the speed-cli binary that produced this
+    /// suite: version, git commit + dirty state, profile, rustc, and
+    /// build timestamp.
+    pub build: BuildInfo,
     /// Server address the suite ran against (informational; each
     /// inner [`TestReport`]'s config holds the canonical value).
     pub server: String,
@@ -82,7 +85,7 @@ impl SuiteReport {
             schema_version: REPORT_SCHEMA_VERSION,
             start_time: now,
             end_time: now,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            build: BuildInfo::current(),
             server,
             environment: Some(Environment::capture()),
             reports: Vec::new(),
@@ -140,12 +143,7 @@ impl Display for SuiteReport {
             "{}",
             "═══ Speed CLI Suite Report ═══".bright_cyan().bold()
         )?;
-        writeln!(
-            f,
-            "{}: {}",
-            "Version".bright_white().bold(),
-            self.version.green()
-        )?;
+        write_build_info(f, &self.build)?;
         writeln!(
             f,
             "{}: {}",

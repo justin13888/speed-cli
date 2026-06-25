@@ -1,3 +1,4 @@
+use crate::build_info::BuildInfo;
 use crate::performance::http::HttpVersion;
 use crate::report::*;
 use crate::utils::types::TestType;
@@ -5,6 +6,29 @@ use std::io::{self, Write};
 
 mod graph;
 use graph::latency_svg;
+
+/// Build provenance for the report header's "Version" cell: a one-line
+/// summary plus `<br>`-separated commit / rustc / build-time detail.
+/// Values are build-controlled (never user input), so no escaping.
+fn build_meta_html(build: &BuildInfo) -> String {
+    let commit = match &build.git_commit {
+        Some(c) => {
+            let dirty = match build.git_dirty {
+                Some(true) => " (dirty)",
+                Some(false) => "",
+                None => " (dirty: unknown)",
+            };
+            format!("{c}{dirty}")
+        }
+        None => "unknown".to_string(),
+    };
+    format!(
+        "{summary}<br>commit: {commit}<br>rustc: {rustc}<br>built: {built}",
+        summary = build.summary(),
+        rustc = build.rustc,
+        built = build.build_timestamp,
+    )
+}
 
 // TODO: Ensure correctness and performance of HTML generation from huge reports (10GB+)
 
@@ -241,7 +265,7 @@ impl ToHtml for TestReport {
             <div class="config-grid">
                 <div class="config-card">
                     "#,
-            self.version,
+            build_meta_html(&self.build),
             self.start_time.format("%Y-%m-%d %H:%M:%S UTC"),
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         )?;
@@ -389,7 +413,7 @@ impl ToHtml for TestReport {
     </div>
 </body>
 </html>"#,
-            self.version,
+            build_meta_html(&self.build),
             self.start_time.format("%Y-%m-%d %H:%M:%S UTC"),
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
             self.config.to_html(),
