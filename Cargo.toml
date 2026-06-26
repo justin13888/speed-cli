@@ -2,7 +2,15 @@
 name = "speed-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.96"
+authors = ["Justin Chung <noreply@justinchung.net>"]
+description = "Comprehensive multi-protocol network performance testing CLI (TCP, UDP, QUIC, HTTP/1.1, HTTP/2, h2c, HTTP/3)"
+repository = "https://github.com/justin13888/speed-cli"
+homepage = "https://github.com/justin13888/speed-cli"
+readme = "README.md"
 license = "Apache-2.0"
+keywords = ["network", "benchmark", "throughput", "latency", "iperf"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 clap = { version = "4.5.40", features = ["derive"] }
