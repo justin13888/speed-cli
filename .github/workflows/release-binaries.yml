@@ -37,3 +37,27 @@ jobs:
           checksum: sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Once binaries are uploaded, bump the formula in the external Homebrew tap.
+  # This no-ops cleanly until the maintainer provisions the HOMEBREW_TAP_TOKEN
+  # secret and seeds an initial Formula/speed-cli.rb in justin13888/homebrew-tap
+  # (one-time setup documented in CONTRIBUTING.md).
+  bump-homebrew:
+    name: Bump Homebrew tap
+    needs: upload
+    runs-on: ubuntu-latest
+    steps:
+      # secrets can't be used in a job-level `if:`, so gate on a step output.
+      - name: Check for tap token
+        id: gate
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: echo "enabled=${{ env.TAP_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+      - name: Bump formula
+        if: steps.gate.outputs.enabled == 'true'
+        uses: dawidd6/action-homebrew-bump-formula@v7
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          tap: justin13888/homebrew-tap
+          formula: speed-cli
+          tag: ${{ github.event.release.tag_name }}
