@@ -21,12 +21,16 @@ jobs:
       # Installs the tools pinned in mise.toml (nextest, machete, typos, ...).
       # Rust itself comes from rust-toolchain.toml via the runner's rustup.
       - uses: jdx/mise-action@v2
-      # `mise run check` fans fmt/clippy/machete out in parallel. On a cold
-      # runner each cargo proxy auto-installs the pinned toolchain at the same
-      # time and they race on rustup's shared download dir, corrupting each
-      # other's component downloads. Materialize the toolchain once, serially.
-      - name: Install Rust toolchain
-        run: cargo --version
+      # `mise run check` fans fmt-check/clippy/machete out in parallel. On a cold
+      # runner each cargo proxy lazily reconciles the pinned toolchain *and the
+      # components rust-toolchain.toml declares* (clippy, rustfmt) at the same
+      # time, racing on rustup's shared download dir and corrupting each other's
+      # downloads ("could not rename ... No such file or directory"). A bare
+      # `cargo --version` only materializes the base toolchain, leaving the
+      # clippy/rustfmt component downloads to still race — so install the
+      # toolchain *with* those components once, up front and serially.
+      - name: Install Rust toolchain + components (serial; avoids the rustup race)
+        run: rustup toolchain install --profile minimal --component clippy,rustfmt --no-self-update
       - name: fmt + clippy + typos + machete
         run: mise run check
 
