@@ -23,9 +23,23 @@ It's difficult to have one tool that tests your network conditions between two d
 brew install justin13888/tap/speed-cli
 ```
 
+### crates.io (`cargo install`)
+
+Requires a Rust toolchain (install via [rustup](https://rustup.rs/)).
+
+```sh
+RUSTFLAGS="--cfg reqwest_unstable" cargo install speed-cli
+```
+
+> The `RUSTFLAGS` is required and not optional: speed-cli enables reqwest's
+> HTTP/3 client, which reqwest gates behind the `reqwest_unstable` cfg. Without
+> it the build fails fast with a message telling you to set exactly this flag.
+> (When building from a clone the repo's `.cargo/config.toml` sets it for you —
+> see [From source](#from-source) — but `cargo install` doesn't read that file.)
+
 ### Prebuilt binaries
 
-Download a binary for your platform from the
+No toolchain needed. Download a binary for your platform from the
 [latest release](https://github.com/justin13888/speed-cli/releases/latest) —
 Linux/macOS tarballs and Windows zips, each with a SHA-256 checksum. Extract it
 and put `speed-cli` on your `PATH`.
@@ -33,12 +47,15 @@ and put `speed-cli` on your `PATH`.
 ### From source
 
 ```bash
-# Prerequisite: Rust installed via [rustup](https://rustup.rs/)
-cargo install --git https://github.com/justin13888/speed-cli
-# ...or clone and build locally:
+# Prerequisite: Rust installed via rustup (https://rustup.rs/).
+# Cloning and building from the repo picks up .cargo/config.toml automatically,
+# so no RUSTFLAGS is needed here:
 git clone https://github.com/justin13888/speed-cli
 cd speed-cli
 cargo install --path .
+
+# Installing straight from git does NOT read that config, so set the cfg yourself:
+RUSTFLAGS="--cfg reqwest_unstable" cargo install --git https://github.com/justin13888/speed-cli
 ```
 
 The binary name is `speed-cli`. Note, for the HTTPS server, you may provide your own TLS certificate and key files via `--cert` and `--key`, or else a dummy cert will be used. A convenience script `./gen-cert.sh` is provided to generate self-signed certificates for testing purposes. This is not suitable for production use.
