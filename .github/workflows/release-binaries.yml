@@ -1,9 +1,19 @@
 name: release-binaries
 
-# Fires when release-plz (or a manual tag) publishes a GitHub Release.
+# Builds cross-platform binaries and bumps the Homebrew tap for a release.
+# Two entry points:
+#   - `release: published` — a Release created in the UI (or by a PAT/App token).
+#   - `workflow_call` — release-plz.yml calls this right after it cuts a release,
+#     because a Release created with GITHUB_TOKEN doesn't fire `release: published`.
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag of the release to build binaries for and upload to.
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -27,7 +37,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
+      # On the workflow_call path the triggering event is a push, so check out
+      # the released tag explicitly; on the release path it's the release's tag.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
       # aws-lc-rs builds aws-lc-sys via CMake on Windows, which needs a
       # discoverable MSVC toolchain plus NASM (see ci.yml for the same setup).
       - name: Set up MSVC environment (Windows)
@@ -43,6 +57,8 @@ jobs:
           tar: unix
           zip: windows
           checksum: sha256
+          # Upload to this tag's Release regardless of which event triggered us.
+          ref: refs/tags/${{ inputs.tag || github.event.release.tag_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -68,4 +84,4 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           tap: justin13888/homebrew-tap
           formula: speed-cli
-          tag: ${{ github.event.release.tag_name }}
+          tag: ${{ inputs.tag || github.event.release.tag_name }}
