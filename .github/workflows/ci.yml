@@ -40,6 +40,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
+      # aws-lc-rs (the rustls/quinn crypto provider) builds aws-lc-sys via
+      # CMake, which needs a discoverable MSVC toolchain to choose a generator
+      # plus NASM to assemble. Neither is set up by default on the runner.
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
       - name: nextest + doctests
         run: mise run test
         env:

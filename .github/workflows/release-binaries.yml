@@ -28,6 +28,14 @@ jobs:
             os: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # aws-lc-rs builds aws-lc-sys via CMake on Windows, which needs a
+      # discoverable MSVC toolchain plus NASM (see ci.yml for the same setup).
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: speed-cli
