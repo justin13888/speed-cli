@@ -21,6 +21,12 @@ jobs:
       # Installs the tools pinned in mise.toml (nextest, machete, typos, ...).
       # Rust itself comes from rust-toolchain.toml via the runner's rustup.
       - uses: jdx/mise-action@v2
+      # `mise run check` fans fmt/clippy/machete out in parallel. On a cold
+      # runner each cargo proxy auto-installs the pinned toolchain at the same
+      # time and they race on rustup's shared download dir, corrupting each
+      # other's component downloads. Materialize the toolchain once, serially.
+      - name: Install Rust toolchain
+        run: cargo --version
       - name: fmt + clippy + typos + machete
         run: mise run check
 
@@ -34,6 +40,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
+      # aws-lc-rs (the rustls/quinn crypto provider) builds aws-lc-sys via
+      # CMake, which needs a discoverable MSVC toolchain to choose a generator
+      # plus NASM to assemble. Neither is set up by default on the runner.
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
       - name: nextest + doctests
         run: mise run test
         env:
