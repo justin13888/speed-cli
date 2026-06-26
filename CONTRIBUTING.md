@@ -45,32 +45,46 @@ Releases are automated by [release-plz](https://release-plz.dev):
 
 1. Merging Conventional Commits to `master` opens/updates a **release PR** that
    bumps the version and updates `CHANGELOG.md`.
-2. Merging that PR publishes the crate to **crates.io**, tags the commit, and
-   creates a **GitHub Release** — which in turn triggers cross-compiled binary
-   uploads and the Homebrew tap bump (`release-binaries.yml`).
+2. Merging that PR publishes the crate to **crates.io**, tags the commit, creates
+   a **GitHub Release**, and — in the *same* workflow run — cross-compiles
+   binaries and bumps the Homebrew tap (`release-binaries.yml`).
+
+Everything authenticates with the built-in `GITHUB_TOKEN` and crates.io OIDC —
+**no long-lived publish token and no GitHub App** are required.
 
 ### One-time setup (maintainers)
 
-**crates.io publishing.** Add a repo **secret** `CARGO_REGISTRY_TOKEN` — a
-crates.io API token with the publish scope, from
-<https://crates.io/settings/tokens>. The `release` job's `cargo publish` step
-needs it; without it the release fails at publish time.
+**crates.io Trusted Publishing.** Publishing uses
+[Trusted Publishing](https://crates.io/docs/trusted-publishing): the `release`
+job has `id-token: write`, and release-plz exchanges a GitHub OIDC token for a
+short-lived crates.io token at publish time. There is **no `CARGO_REGISTRY_TOKEN`
+secret**. Configure it once:
 
-**Triggering downstream workflows (recommended).** A release PR opened — or a
-release tagged — with the default `GITHUB_TOKEN` will *not* trigger other
-workflows (GitHub blocks that to prevent loops), so the release PR's CI and the
-on-release binary/Homebrew build wouldn't run. To fix that, create a **GitHub
-App** with `Contents: read & write` and `Pull requests: read & write`, install
-it on the repo, then add:
+1. A crate can't be *created* through Trusted Publishing, so the first version is
+   published manually — already done for `1.0.0` (`cargo publish` with a token in
+   `~/.cargo/credentials.toml`).
+2. On crates.io, open the crate's **Settings → Trusted Publishing → Add a new
+   GitHub publisher** and enter:
+   - **Repository owner:** `justin13888`
+   - **Repository name:** `speed-cli`
+   - **Workflow filename:** `release-plz.yml`
+   - **Environment:** *(leave blank)*
 
-- a repo **variable** `RELEASE_PLZ_APP_ID` — the app's ID. It's a *variable*,
-  not a secret, because the workflow gates on it in an `if:` and those can't read
-  secrets; the ID isn't sensitive.
-- a repo **secret** `RELEASE_PLZ_APP_PRIVATE_KEY` — the app's private key.
+   Every subsequent release then publishes with no stored token.
 
-When the variable is unset the workflow falls back to `GITHUB_TOKEN`, so releases
-still cut — they just won't auto-trigger the downstream jobs. (A fine-grained PAT
-with the same permissions works in place of the App.)
+**Let Actions open the release PR.** release-plz opens the PR with the default
+`GITHUB_TOKEN`, so enable **Settings → Actions → General → Workflow permissions →
+"Allow GitHub Actions to create and approve pull requests."** (You do *not* need
+to switch the default token to read/write — each job requests the scopes it needs
+via an explicit `permissions:` block.)
+
+> A PR opened by `GITHUB_TOKEN` does not itself start a `pull_request` CI run
+> (GitHub blocks token-triggered cascades). The release PR is a mechanical
+> version/changelog bump off code that already passed CI on `master`, so it's
+> safe to merge as-is; push an empty commit to it if you want a CI run. For the
+> same reason the on-release binary/Homebrew build is invoked *inside* the
+> release workflow run (see `release-plz.yml`) rather than via `release:
+> published`, so it fires without a PAT or App token.
 
 ### Homebrew tap
 
