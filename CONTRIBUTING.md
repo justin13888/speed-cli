@@ -45,20 +45,32 @@ Releases are automated by [release-plz](https://release-plz.dev):
 
 1. Merging Conventional Commits to `master` opens/updates a **release PR** that
    bumps the version and updates `CHANGELOG.md`.
-2. Merging that PR tags the commit and creates a **GitHub Release**, which
-   triggers cross-compiled binary uploads.
+2. Merging that PR publishes the crate to **crates.io**, tags the commit, and
+   creates a **GitHub Release** — which in turn triggers cross-compiled binary
+   uploads and the Homebrew tap bump (`release-binaries.yml`).
 
 ### One-time setup (maintainers)
 
-release-plz needs a token that can trigger downstream workflows (the default
-`GITHUB_TOKEN` cannot). Create a **GitHub App** with `Contents: read & write`
-and `Pull requests: read & write`, install it on the repo, and add two repo
-secrets:
+**crates.io publishing.** Add a repo **secret** `CARGO_REGISTRY_TOKEN` — a
+crates.io API token with the publish scope, from
+<https://crates.io/settings/tokens>. The `release` job's `cargo publish` step
+needs it; without it the release fails at publish time.
 
-- `RELEASE_PLZ_APP_ID`
-- `RELEASE_PLZ_APP_PRIVATE_KEY`
+**Triggering downstream workflows (recommended).** A release PR opened — or a
+release tagged — with the default `GITHUB_TOKEN` will *not* trigger other
+workflows (GitHub blocks that to prevent loops), so the release PR's CI and the
+on-release binary/Homebrew build wouldn't run. To fix that, create a **GitHub
+App** with `Contents: read & write` and `Pull requests: read & write`, install
+it on the repo, then add:
 
-(A fine-grained PAT with the same permissions works as a fallback.)
+- a repo **variable** `RELEASE_PLZ_APP_ID` — the app's ID. It's a *variable*,
+  not a secret, because the workflow gates on it in an `if:` and those can't read
+  secrets; the ID isn't sensitive.
+- a repo **secret** `RELEASE_PLZ_APP_PRIVATE_KEY` — the app's private key.
+
+When the variable is unset the workflow falls back to `GITHUB_TOKEN`, so releases
+still cut — they just won't auto-trigger the downstream jobs. (A fine-grained PAT
+with the same permissions works in place of the App.)
 
 ### Homebrew tap
 
@@ -77,9 +89,14 @@ Releases auto-update the formula in
      url "https://github.com/justin13888/speed-cli/archive/refs/tags/v1.0.0.tar.gz"
      sha256 "<sha256-of-the-tarball>"
      license "Apache-2.0"
+     depends_on "cmake" => :build # aws-lc-rs (TLS provider) builds aws-lc-sys via CMake
      depends_on "rust" => :build
 
      def install
+       # speed-cli enables reqwest's HTTP/3, which reqwest gates behind this cfg.
+       # The repo's .cargo/config.toml sets it, but `cargo install` ignores that
+       # file, so set it explicitly here.
+       ENV["RUSTFLAGS"] = "--cfg reqwest_unstable"
        system "cargo", "install", *std_cargo_args
      end
 
