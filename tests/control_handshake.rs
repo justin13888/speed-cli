@@ -65,10 +65,13 @@ async fn handshake_rejects_incompatible_protocol_version() -> Result<()> {
     };
     let (port, cancel) = serve(manifest).await?;
 
-    let result = perform_handshake("127.0.0.1", port).await;
+    let err = perform_handshake("127.0.0.1", port)
+        .await
+        .expect_err("handshake must reject a mismatched protocol_version");
+    // Assert it rejected *because of* the version, not some incidental error.
     assert!(
-        result.is_err(),
-        "handshake must reject a mismatched protocol_version"
+        err.to_string().contains("protocol version mismatch"),
+        "error should identify the protocol version mismatch, got: {err}"
     );
 
     cancel.cancel();
