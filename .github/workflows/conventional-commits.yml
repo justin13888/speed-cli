@@ -1,0 +1,36 @@
+name: Conventional Commits
+
+# The local commit-msg hook (hk.pkl) already enforces Conventional Commits, but a
+# contributor without hooks installed would bypass it. release-plz derives the
+# version bump and CHANGELOG from whatever lands on master, so the format is
+# enforced again here on every PR — both the title (what a squash-merge commits)
+# and each individual commit (what a merge/rebase commits).
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: conventional-commits-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  commits:
+    name: Commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: webiny/action-conventional-commits@v1.3.0
