@@ -49,7 +49,7 @@ pub fn git_dirty() -> Option<bool> {
 
 /// Build timestamp as a UTC `DateTime`, decoded from the compile-time
 /// Unix-seconds stamp. Falls back to the epoch if the stamp is somehow
-/// unparseable (it never should be).
+/// unparsable (it never should be).
 pub fn build_time() -> DateTime<Utc> {
     BUILD_UNIX_TIME
         .parse::<i64>()
