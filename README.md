@@ -1,7 +1,5 @@
 # speed-cli
 
-> Disclaimer: Tool is under active development. Some features are to be improved in correctness/performance and documentation. Open to contributions!
-
 This tool provides **comprehensive network performance measurements** across **TCP, UDP, and HTTP** protocols. Built with Rust, the test suite optimizes for **maximum throughput** to measure the network's available bandwidth.
 
 ## Why Another Network Testing Tool?
@@ -19,10 +17,25 @@ It's difficult to have one tool that tests your network conditions between two d
 
 ## Installation
 
-Build from source:
+### Homebrew (macOS / Linux)
+
+```sh
+brew install justin13888/tap/speed-cli
+```
+
+### Prebuilt binaries
+
+Download a binary for your platform from the
+[latest release](https://github.com/justin13888/speed-cli/releases/latest) —
+Linux/macOS tarballs and Windows zips, each with a SHA-256 checksum. Extract it
+and put `speed-cli` on your `PATH`.
+
+### From source
 
 ```bash
 # Prerequisite: Rust installed via [rustup](https://rustup.rs/)
+cargo install --git https://github.com/justin13888/speed-cli
+# ...or clone and build locally:
 git clone https://github.com/justin13888/speed-cli
 cd speed-cli
 cargo install --path .
