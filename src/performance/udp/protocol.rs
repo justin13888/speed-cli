@@ -15,6 +15,11 @@ pub const MAGIC: u32 = 0x424C5354;
 /// Fixed minimum header (magic + kind = 5 bytes). Bodies follow per kind.
 pub const MIN_HEADER_SIZE: usize = 5;
 
+/// Fixed DATA packet header length: magic(4) + kind(1) + pad(3) + seq(8) +
+/// send_ts_us(8). The trailing payload follows. Exposed so the send paths can
+/// size datagrams without reaching into [`DataPacketWriter`].
+pub const DATA_HEADER_LEN: usize = 24;
+
 /// Direction of a blaster session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -377,7 +382,7 @@ pub struct DataPacketWriter {
 
 impl DataPacketWriter {
     /// magic(4) + kind(1) + pad(3) + seq(8) + send_ts_us(8).
-    const HEADER_LEN: usize = 24;
+    const HEADER_LEN: usize = DATA_HEADER_LEN;
     const SEQ_OFFSET: usize = 8;
     const TS_OFFSET: usize = 16;
 
@@ -395,6 +400,64 @@ impl DataPacketWriter {
     pub fn frame(&mut self, seq: u64, send_ts_us: u64) -> &[u8] {
         self.buf[Self::SEQ_OFFSET..Self::SEQ_OFFSET + 8].copy_from_slice(&seq.to_be_bytes());
         self.buf[Self::TS_OFFSET..Self::TS_OFFSET + 8].copy_from_slice(&send_ts_us.to_be_bytes());
+        &self.buf
+    }
+}
+
+/// Reusable encoder for a contiguous batch of DATA packets, used by the GSO
+/// send path. Lays `segments` equally-sized DATA packets back-to-back in one
+/// buffer (each [`DataPacketWriter::HEADER_LEN`] + `payload.len()` bytes) so
+/// the kernel can split the whole buffer into that many datagrams in a single
+/// syscall. As with [`DataPacketWriter`], the payload is written once and only
+/// the per-segment `seq` / `send_ts_us` header bytes are rewritten per batch.
+/// Each segment is byte-for-byte what `DataPacketWriter::frame` would produce.
+pub struct DataBatchWriter {
+    buf: Vec<u8>,
+    seg_len: usize,
+    segments: usize,
+}
+
+impl DataBatchWriter {
+    /// Build a batch writer for `segments` datagrams, each carrying `payload`.
+    pub fn new(payload: &[u8], segments: usize) -> Self {
+        let segments = segments.max(1);
+        let seg_len = DataPacketWriter::HEADER_LEN + payload.len();
+        let mut buf = vec![0u8; seg_len * segments];
+        for i in 0..segments {
+            let off = i * seg_len;
+            buf[off..off + 4].copy_from_slice(&MAGIC.to_be_bytes());
+            buf[off + 4] = KIND_DATA;
+            buf[off + DataPacketWriter::HEADER_LEN..off + seg_len].copy_from_slice(payload);
+        }
+        Self {
+            buf,
+            seg_len,
+            segments,
+        }
+    }
+
+    /// Per-datagram size (header + payload) — i.e. the GSO segment size.
+    pub fn segment_size(&self) -> usize {
+        self.seg_len
+    }
+
+    /// Number of datagrams produced per [`frame_batch`](Self::frame_batch).
+    pub fn segments(&self) -> usize {
+        self.segments
+    }
+
+    /// Rewrite each segment's `seq` (`start_seq`, `start_seq + 1`, …) and
+    /// `send_ts_us`, returning the whole contiguous buffer ready to send.
+    pub fn frame_batch(&mut self, start_seq: u64, send_ts_us: u64) -> &[u8] {
+        let ts = send_ts_us.to_be_bytes();
+        for i in 0..self.segments {
+            let off = i * self.seg_len;
+            let seq = (start_seq + i as u64).to_be_bytes();
+            self.buf[off + DataPacketWriter::SEQ_OFFSET..off + DataPacketWriter::SEQ_OFFSET + 8]
+                .copy_from_slice(&seq);
+            self.buf[off + DataPacketWriter::TS_OFFSET..off + DataPacketWriter::TS_OFFSET + 8]
+                .copy_from_slice(&ts);
+        }
         &self.buf
     }
 }
@@ -638,5 +701,37 @@ mod tests {
         }
         .encode_to_vec(Some(&[]));
         assert_eq!(framed, reference.as_ref());
+    }
+
+    #[test]
+    fn data_batch_writer_segments_decode_with_incrementing_seq() {
+        let payload = vec![0x5Au8; 100];
+        let segments = 4;
+        let mut w = DataBatchWriter::new(&payload, segments);
+        assert_eq!(w.segments(), segments);
+        assert_eq!(w.segment_size(), 24 + payload.len());
+
+        let start_seq = 1000;
+        let ts = 7_654_321;
+        let batch = w.frame_batch(start_seq, ts).to_vec();
+        assert_eq!(batch.len(), w.segment_size() * segments);
+
+        // Each fixed-size slice must decode as a DATA packet whose seq counts
+        // up from start_seq, byte-identical to DataPacketWriter output.
+        for (i, seg) in batch.chunks(w.segment_size()).enumerate() {
+            let (decoded, plen) = BlasterPacket::decode(seg).expect("segment decodes");
+            assert_eq!(plen, payload.len());
+            match decoded {
+                BlasterPacket::Data { seq, send_ts_us } => {
+                    assert_eq!(seq, start_seq + i as u64);
+                    assert_eq!(send_ts_us, ts);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+            let reference = DataPacketWriter::new(&payload)
+                .frame(start_seq + i as u64, ts)
+                .to_vec();
+            assert_eq!(seg, reference.as_slice());
+        }
     }
 }
