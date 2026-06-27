@@ -66,6 +66,19 @@ fn latency_extras_html(result: &LatencyResult, overlay: Option<&LatencyResult>) 
 /// The "Latency Under Load" section for a `NetworkTestResult`: a bufferbloat
 /// headline, an idle-vs-loaded comparison chart, and the loaded numeric detail.
 /// Empty when no under-load series was captured.
+/// HTTP-only "requests/sec" row appended after a throughput result block.
+/// Empty for other protocols, where a sample is a read/packet, not a request.
+fn rps_html(result: &ThroughputResult, protocol: crate::report::NetworkProtocol) -> String {
+    if matches!(protocol, crate::report::NetworkProtocol::Http) {
+        format!(
+            r#"<div style="margin-top:6px;"><span style="color:#007acc;">Requests/sec:</span> {:.1}</div>"#,
+            result.requests_per_second()
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// Connection-establishment timings (handshake / TTFB) section, or empty
 /// when none were captured for this protocol.
 fn connection_html(result: &NetworkTestResult, prefix: &str) -> String {
@@ -828,6 +841,7 @@ impl ToHtml for NetworkTestResult {
                     format_bytes_usize(*size)
                 )?;
                 result.write_html(writer)?;
+                write!(writer, "{}", rps_html(result, self.protocol))?;
                 write!(writer, r#"</div></div>"#)?;
             }
             write!(writer, r#"</div></div>"#)?;
@@ -851,6 +865,7 @@ impl ToHtml for NetworkTestResult {
                     format_bytes_usize(*size)
                 )?;
                 result.write_html(writer)?;
+                write!(writer, "{}", rps_html(result, self.protocol))?;
                 write!(writer, r#"</div></div>"#)?;
             }
             write!(writer, r#"</div></div>"#)?;
@@ -899,10 +914,11 @@ impl ToHtml for NetworkTestResult {
                     .map(|(size, result)| format!(
                         r#"<div>
                             <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                            <div style="margin-left: 20px;">{}</div>
+                            <div style="margin-left: 20px;">{}{}</div>
                         </div>"#,
                         format_bytes_usize(*size),
-                        result.to_html()
+                        result.to_html(),
+                        rps_html(result, self.protocol)
                     ))
                     .collect::<Vec<_>>()
                     .join("")
@@ -922,10 +938,11 @@ impl ToHtml for NetworkTestResult {
                     .map(|(size, result)| format!(
                         r#"<div>
                             <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                            <div style="margin-left: 20px;">{}</div>
+                            <div style="margin-left: 20px;">{}{}</div>
                         </div>"#,
                         format_bytes_usize(*size),
-                        result.to_html()
+                        result.to_html(),
+                        rps_html(result, self.protocol)
                     ))
                     .collect::<Vec<_>>()
                     .join("")

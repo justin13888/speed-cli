@@ -312,6 +312,14 @@ impl Display for NetworkTestResult {
                 for line in result_str.lines() {
                     writeln!(f, "    {line}")?;
                 }
+                if matches!(self.protocol, NetworkProtocol::Http) {
+                    writeln!(
+                        f,
+                        "    {}: {}",
+                        "Requests/sec".bright_green().bold(),
+                        format!("{:.1}", result.requests_per_second()).magenta()
+                    )?;
+                }
                 if matches!(self.accounting, ThroughputAccounting::Wire) {
                     writeln!(f, "{}", self.render_wire_rate_line(result))?;
                 }
@@ -338,6 +346,14 @@ impl Display for NetworkTestResult {
                 let result_str = format!("{result}");
                 for line in result_str.lines() {
                     writeln!(f, "    {line}")?;
+                }
+                if matches!(self.protocol, NetworkProtocol::Http) {
+                    writeln!(
+                        f,
+                        "    {}: {}",
+                        "Requests/sec".bright_green().bold(),
+                        format!("{:.1}", result.requests_per_second()).magenta()
+                    )?;
                 }
                 if matches!(self.accounting, ThroughputAccounting::Wire) {
                     writeln!(f, "{}", self.render_wire_rate_line(result))?;
