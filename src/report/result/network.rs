@@ -36,6 +36,42 @@ pub struct NetworkTestResult {
     /// framing overhead added back in).
     #[serde(default = "default_accounting")]
     pub accounting: ThroughputAccounting,
+    /// One-off connection-establishment timings (handshake / TTFB), measured
+    /// once at the start of a test rather than per sample. `None` until the
+    /// protocol client records them.
+    #[serde(default)]
+    pub connection: Option<ConnectionTimings>,
+}
+
+/// Connection-establishment timings, measured once per test. Which fields are
+/// populated depends on the protocol: raw TCP records the TCP handshake; raw
+/// QUIC records the QUIC handshake (which subsumes the TLS 1.3 exchange);
+/// HTTP records time-to-first-byte of the preflight request. `reqwest` does
+/// not expose the TCP/TLS split or the HTTP/3 QUIC handshake, so the HTTP
+/// protocols carry only `ttfb_us`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ConnectionTimings {
+    /// TCP three-way-handshake (connect) time in microseconds. Raw TCP only.
+    #[serde(default)]
+    pub tcp_handshake_us: Option<u64>,
+    /// QUIC handshake time in microseconds, including the TLS 1.3 exchange.
+    /// Raw QUIC only.
+    #[serde(default)]
+    pub quic_handshake_us: Option<u64>,
+    /// Time to first byte (request sent → response headers received) in
+    /// microseconds. HTTP, all versions.
+    #[serde(default)]
+    pub ttfb_us: Option<u64>,
+}
+
+impl ConnectionTimings {
+    /// True when no timing was captured (so callers can avoid storing an
+    /// all-`None` value).
+    pub fn is_empty(&self) -> bool {
+        self.tcp_handshake_us.is_none()
+            && self.quic_handshake_us.is_none()
+            && self.ttfb_us.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -56,6 +92,7 @@ impl NetworkTestResult {
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Http,
             accounting: ThroughputAccounting::Goodput,
+            connection: None,
         }
     }
 
@@ -67,6 +104,7 @@ impl NetworkTestResult {
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Tcp,
             accounting: ThroughputAccounting::Goodput,
+            connection: None,
         }
     }
 
@@ -78,6 +116,7 @@ impl NetworkTestResult {
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Udp,
             accounting: ThroughputAccounting::Goodput,
+            connection: None,
         }
     }
 
@@ -89,6 +128,7 @@ impl NetworkTestResult {
             upload: IndexMap::new(),
             protocol: NetworkProtocol::Quic,
             accounting: ThroughputAccounting::Goodput,
+            connection: None,
         }
     }
 
@@ -179,6 +219,32 @@ impl Display for NetworkTestResult {
             NetworkProtocol::Udp => "UDP ",
             NetworkProtocol::Quic => "QUIC ",
         };
+
+        // Connection-establishment timings (handshake / TTFB), when captured.
+        if let Some(conn) = &self.connection {
+            let ms = |us: u64| format!("{:.2} ms", us as f64 / 1000.0);
+            let mut lines: Vec<(&str, String)> = Vec::new();
+            if let Some(us) = conn.tcp_handshake_us {
+                lines.push(("TCP handshake", ms(us)));
+            }
+            if let Some(us) = conn.quic_handshake_us {
+                lines.push(("QUIC handshake (incl. TLS)", ms(us)));
+            }
+            if let Some(us) = conn.ttfb_us {
+                lines.push(("Time to first byte", ms(us)));
+            }
+            if !lines.is_empty() {
+                writeln!(
+                    f,
+                    "  {}",
+                    format!("{protocol_prefix}Connection:").bright_green().bold()
+                )?;
+                for (label, value) in lines {
+                    writeln!(f, "    {}: {}", label.bright_blue(), value.cyan())?;
+                }
+                writeln!(f)?;
+            }
+        }
 
         // Display latency if available
         if let Some(latency) = &self.latency {

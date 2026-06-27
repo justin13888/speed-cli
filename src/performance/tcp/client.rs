@@ -17,8 +17,8 @@ use crate::{
     },
     performance::tcp::handshake::client_hello,
     report::{
-        ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
-        Sample, StreamSamples, TcpTestConfig, TestReport, ThroughputResult,
+        ConnectionError, ConnectionTimings, LatencyMeasurement, LatencyResult, NetworkTestResult,
+        PeerIdentity, Sample, StreamSamples, TcpTestConfig, TestReport, ThroughputResult,
     },
     utils::format::format_bytes,
 };
@@ -275,6 +275,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     // The pre-flight socket also carries the addresses we record on the
     // report's local view, so the report knows which client/server pair
     // it describes.
+    let connect_start = Instant::now();
     let (preflight_local, preflight_peer) = match tokio::time::timeout(
         Duration::from_secs(5),
         TcpStream::connect(&server_addr),
@@ -296,6 +297,9 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
             ));
         }
     };
+    // The pre-flight connect is a clean TCP three-way handshake to the test
+    // endpoint, so its wall-clock time is the TCP handshake time.
+    let tcp_handshake_us = connect_start.elapsed().as_micros() as u64;
 
     // Identity handshake on a fresh connection. Best-effort — older
     // servers / partial deployments simply return None and we record
@@ -305,6 +309,10 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let start_time = Utc::now();
 
     let mut result = NetworkTestResult::new_tcp().with_accounting(config.accounting);
+    result.connection = Some(ConnectionTimings {
+        tcp_handshake_us: Some(tcp_handshake_us),
+        ..Default::default()
+    });
 
     match config.test_type {
         TestType::LatencyOnly => {

@@ -28,8 +28,8 @@ use crate::performance::engine::{
 use crate::performance::handshake::client_hello_io;
 use crate::performance::quic::QUIC_RAW_ALPN;
 use crate::report::{
-    ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
-    QuicTestConfig, Sample, StreamSamples, TestReport, ThroughputResult,
+    ConnectionError, ConnectionTimings, LatencyMeasurement, LatencyResult, NetworkTestResult,
+    PeerIdentity, QuicTestConfig, Sample, StreamSamples, TestReport, ThroughputResult,
 };
 
 /// Certificate verifier that accepts any server certificate. This
@@ -135,7 +135,11 @@ pub async fn run_quic_client(config: QuicTestConfig) -> Result<TestReport> {
         .bold()
     );
 
+    // Time the connection establishment: `connect().await` resolves once the
+    // QUIC handshake completes, which subsumes the TLS 1.3 exchange.
+    let handshake_start = Instant::now();
     let (endpoint, conn) = connect(&config.server, config.port).await?;
+    let quic_handshake_us = handshake_start.elapsed().as_micros() as u64;
     let remote_addr = conn.remote_address();
 
     // Best-effort identity handshake on a dedicated bidi stream.
@@ -143,6 +147,10 @@ pub async fn run_quic_client(config: QuicTestConfig) -> Result<TestReport> {
 
     let start_time = Utc::now();
     let mut result = NetworkTestResult::new_quic().with_accounting(config.accounting);
+    result.connection = Some(ConnectionTimings {
+        quic_handshake_us: Some(quic_handshake_us),
+        ..Default::default()
+    });
 
     match config.test_type {
         TestType::LatencyOnly => {

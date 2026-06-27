@@ -66,6 +66,36 @@ fn latency_extras_html(result: &LatencyResult, overlay: Option<&LatencyResult>) 
 /// The "Latency Under Load" section for a `NetworkTestResult`: a bufferbloat
 /// headline, an idle-vs-loaded comparison chart, and the loaded numeric detail.
 /// Empty when no under-load series was captured.
+/// Connection-establishment timings (handshake / TTFB) section, or empty
+/// when none were captured for this protocol.
+fn connection_html(result: &NetworkTestResult, prefix: &str) -> String {
+    let Some(conn) = &result.connection else {
+        return String::new();
+    };
+    let ms = |us: u64| format!("{:.2} ms", us as f64 / 1000.0);
+    let mut rows = String::new();
+    let mut row = |label: &str, us: Option<u64>| {
+        if let Some(us) = us {
+            rows.push_str(&format!(
+                r#"<div><span style="color:#007acc;">{label}:</span> {}</div>"#,
+                ms(us)
+            ));
+        }
+    };
+    row("TCP handshake", conn.tcp_handshake_us);
+    row("QUIC handshake (incl. TLS)", conn.quic_handshake_us);
+    row("Time to first byte", conn.ttfb_us);
+    if rows.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"<div class="result-section" style="margin-bottom: 30px;">
+            <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{prefix}Connection</h3>
+            <div style="margin-left: 20px;">{rows}</div>
+        </div>"#
+    )
+}
+
 fn under_load_html(result: &NetworkTestResult, prefix: &str) -> String {
     let Some(loaded) = &result.latency_under_load else {
         return String::new();
@@ -761,6 +791,9 @@ impl ToHtml for NetworkTestResult {
             crate::report::NetworkProtocol::Quic => "QUIC ",
         };
 
+        // Connection-establishment timings (handshake / TTFB).
+        write!(writer, "{}", connection_html(self, protocol_prefix))?;
+
         // Latency results
         if let Some(latency) = &self.latency {
             write!(
@@ -834,6 +867,9 @@ impl ToHtml for NetworkTestResult {
             crate::report::NetworkProtocol::Udp => "UDP ",
             crate::report::NetworkProtocol::Quic => "QUIC ",
         };
+
+        // Connection-establishment timings (handshake / TTFB).
+        html.push_str(&connection_html(self, protocol_prefix));
 
         // Latency results
         if let Some(latency) = &self.latency {

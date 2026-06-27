@@ -24,8 +24,8 @@ use crate::{
     performance::http::HttpVersion,
     performance::http::server::decode_base64_urlsafe,
     report::{
-        ConnectionError, HttpTestConfig, LatencyMeasurement, LatencyResult, NetworkTestResult,
-        PeerIdentity, Sample, StreamSamples, TestReport, ThroughputResult,
+        ConnectionError, ConnectionTimings, HttpTestConfig, LatencyMeasurement, LatencyResult,
+        NetworkTestResult, PeerIdentity, Sample, StreamSamples, TestReport, ThroughputResult,
     },
     utils::format::format_bytes,
 };
@@ -136,6 +136,27 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
             ));
         }
     };
+
+    // Time to first byte on a warmed connection: the pre-flight above already
+    // established the TCP/TLS (or QUIC) connection, so this probe's
+    // request-sent → response-headers time isolates request→first-byte without
+    // connection-setup cost. `reqwest` doesn't expose the underlying TCP/TLS
+    // split or the HTTP/3 QUIC handshake, so TTFB is the handshake metric we
+    // can report for HTTP. Best-effort — a failed probe just leaves it unset.
+    {
+        let probe_start = Instant::now();
+        let latency_url = format!("{}/latency", config.server_url);
+        if apply_version(client.head(&latency_url), config.http_version)
+            .send()
+            .await
+            .is_ok()
+        {
+            result.connection = Some(ConnectionTimings {
+                ttfb_us: Some(probe_start.elapsed().as_micros() as u64),
+                ..Default::default()
+            });
+        }
+    }
 
     match config.test_type {
         TestType::LatencyOnly => {
