@@ -59,6 +59,7 @@ pub struct BlasterServer {
 impl BlasterServer {
     pub async fn new(addr: impl ToSocketAddrs) -> Result<Self> {
         let socket = UdpSocket::bind(&addr).await?;
+        super::tune_socket_buffers(&socket);
         Ok(Self {
             socket: Arc::new(socket),
             sessions: Arc::new(Mutex::new(HashMap::new())),

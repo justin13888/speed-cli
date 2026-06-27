@@ -29,6 +29,7 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, trace};
 
 use super::protocol::{BlasterPacket, DataPacketWriter, Mode, ReceiveStats, now_us};
+use super::tune_socket_buffers;
 use crate::{
     TestType,
     performance::engine::{
@@ -322,6 +323,7 @@ async fn run_latency(
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(server_addr).await?;
+    tune_socket_buffers(&socket);
 
     let start = Instant::now();
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
@@ -518,6 +520,7 @@ async fn run_download(
         tasks.push(tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await?;
             socket.connect(&server_addr).await?;
+            tune_socket_buffers(&socket);
             send_start(
                 &socket,
                 Mode::Download,
@@ -668,6 +671,7 @@ async fn run_upload(
         tasks.push(tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await?;
             socket.connect(&server_addr).await?;
+            tune_socket_buffers(&socket);
             send_start(
                 &socket,
                 Mode::Upload,
