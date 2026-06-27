@@ -3,6 +3,7 @@ use colored::Colorize as _;
 use eyre::Result;
 
 use rand::{prelude::*, rng};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -669,10 +670,13 @@ async fn run_upload_test(
     let progress_bar = create_progress_bar(ProgressBarType::Upload, duration);
     let start_time = Instant::now();
 
-    let upload_data = {
+    // Shared, immutable payload: every connection sends the same bytes, so
+    // hold it behind an Arc and hand each task a refcount-bumped handle rather
+    // than copying `payload_size` bytes per connection.
+    let upload_data: Arc<[u8]> = {
         let mut data = vec![0u8; payload_size];
         rng().fill_bytes(&mut data);
-        data
+        Arc::from(data)
     };
 
     let (stats_collector, tx) =
