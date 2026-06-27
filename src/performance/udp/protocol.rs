@@ -211,11 +211,17 @@ impl BlasterPacket {
     /// Decode a packet. For DATA, the trailing payload is everything
     /// after the fixed 24-byte header; we return its length here, the
     /// raw payload is read by the caller from the original buffer.
+    ///
+    /// Zero-copy: we parse straight off the borrowed slice via
+    /// `impl Buf for &[u8]`, which advances the slice reference in place
+    /// instead of allocating. The hot DATA / PING / PONG paths never copy
+    /// the datagram; only the rare `Hello`/`HelloAck` control packets copy
+    /// their small CBOR blobs out into owned `Vec`s.
     pub fn decode(data: &[u8]) -> Option<(Self, usize)> {
         if data.len() < MIN_HEADER_SIZE {
             return None;
         }
-        let mut buf = Bytes::copy_from_slice(data);
+        let mut buf: &[u8] = data;
         let magic = buf.get_u32();
         if magic != MAGIC {
             return None;
