@@ -61,13 +61,28 @@ impl PeerIdentity {
 }
 
 fn read_hostname() -> Option<String> {
+    // /etc/hostname exists on most Linux distros, but not on macOS, where the
+    // hostname lives in the system configuration store. $HOSTNAME is only
+    // exported by interactive shells, so it is unreliable in a spawned process.
+    // Fall back to the `hostname` command, which is present on both platforms.
     if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
         let trimmed = s.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
     }
-    std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty())
+    if let Ok(s) = std::env::var("HOSTNAME") {
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// What this process observed about itself when it set up the test.

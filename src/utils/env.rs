@@ -61,12 +61,31 @@ impl Environment {
 }
 
 fn read_hostname() -> Option<String> {
-    // /etc/hostname is the most portable way without pulling in libc.
-    // Falls back to $HOSTNAME, then None.
+    // /etc/hostname exists on most Linux distros, but not on macOS, where the
+    // hostname lives in the system configuration store. $HOSTNAME is only
+    // exported by interactive shells, so it is unreliable in a spawned process.
+    // Fall back to the `hostname` command, which is present on both platforms.
     if let Some(h) = read_str("/etc/hostname") {
         return Some(h);
     }
-    std::env::var("HOSTNAME").ok()
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        if !h.is_empty() {
+            return Some(h);
+        }
+    }
+    hostname_cmd()
+}
+
+/// Query the `hostname` binary. Works on macOS and Linux without unsafe libc
+/// calls (we `forbid(unsafe_code)`).
+fn hostname_cmd() -> Option<String> {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn read_kernel() -> Option<String> {
