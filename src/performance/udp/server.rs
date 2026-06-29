@@ -45,10 +45,22 @@ struct Session {
     /// populate it incidentally on Download sessions too in case the
     /// client sends ACKs or similar in a future protocol extension.
     rx: ReceiveStats,
-    /// For download sessions only: the configuration handed to us via
-    /// START. The send loop runs in a background task keyed off the
-    /// session.
+    /// For download sessions only: the background send task.
     download_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Cooperative stop signal for the background download sender. The sender
+    /// polls this once per packet (a relaxed atomic load) instead of locking
+    /// the whole session map every packet, which used to serialize all
+    /// concurrent download streams on one mutex in the hot path.
+    cancel: CancellationToken,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // However the session leaves the map — FIN, LRU eviction, idle reap,
+        // re-START, or shutdown drain — cancelling here stops its background
+        // download sender without each removal site having to remember to.
+        self.cancel.cancel();
+    }
 }
 
 pub struct BlasterServer {
@@ -59,6 +71,7 @@ pub struct BlasterServer {
 impl BlasterServer {
     pub async fn new(addr: impl ToSocketAddrs) -> Result<Self> {
         let socket = UdpSocket::bind(&addr).await?;
+        super::tune_socket_buffers(&socket);
         Ok(Self {
             socket: Arc::new(socket),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -127,7 +140,7 @@ impl BlasterServer {
         // hammering closed sockets.
         let mut sessions = self.sessions.lock();
         for (_, sess) in sessions.drain() {
-            if let Some(h) = sess.download_handle {
+            if let Some(h) = &sess.download_handle {
                 h.abort();
             }
         }
@@ -204,11 +217,13 @@ impl BlasterServer {
         duration_ms: u64,
     ) {
         // Admit-or-evict. We also reset any prior session for this peer
-        // so a re-tested client gets fresh stats.
+        // so a re-tested client gets fresh stats. Dropping the removed
+        // sessions cancels their download senders (see `impl Drop for Session`).
+        let cancel = CancellationToken::new();
         {
             let mut sessions = self.sessions.lock();
             if let Some(prev) = sessions.remove(&peer)
-                && let Some(h) = prev.download_handle
+                && let Some(h) = &prev.download_handle
             {
                 h.abort();
             }
@@ -221,7 +236,7 @@ impl BlasterServer {
             {
                 debug!("session cap reached, evicting LRU {} for {}", victim, peer);
                 if let Some(s) = sessions.remove(&victim)
-                    && let Some(h) = s.download_handle
+                    && let Some(h) = &s.download_handle
                 {
                     h.abort();
                 }
@@ -233,6 +248,7 @@ impl BlasterServer {
                     last_seen: Instant::now(),
                     rx: ReceiveStats::default(),
                     download_handle: None,
+                    cancel: cancel.clone(),
                 },
             );
         }
@@ -249,14 +265,13 @@ impl BlasterServer {
         if mode == Mode::Download {
             // Spawn a sender task that runs for the requested duration.
             let socket = self.socket.clone();
-            let sessions = self.sessions.clone();
             let handle = tokio::spawn(download_sender(
                 socket,
                 peer,
                 target_rate_bps,
                 payload_size as usize,
                 Duration::from_millis(duration_ms),
-                sessions.clone(),
+                cancel,
             ));
             if let Some(s) = self.sessions.lock().get_mut(&peer) {
                 s.download_handle = Some(handle);
@@ -289,7 +304,7 @@ impl BlasterServer {
             let Some(sess) = sessions.remove(&peer) else {
                 return;
             };
-            if let Some(h) = sess.download_handle {
+            if let Some(h) = &sess.download_handle {
                 h.abort();
             }
             BlasterPacket::Report {
@@ -318,7 +333,7 @@ async fn download_sender(
     target_rate_bps: u64,
     payload_size: usize,
     duration: Duration,
-    sessions: Arc<Mutex<HashMap<SocketAddr, Session>>>,
+    cancel: CancellationToken,
 ) {
     use rand::RngCore as _;
     let mut payload = vec![0u8; payload_size];
@@ -340,8 +355,9 @@ async fn download_sender(
     let start = Instant::now();
     let mut seq: u64 = 1;
     while start.elapsed() < duration {
-        // Bail if the session was evicted (e.g., FIN received).
-        if !sessions.lock().contains_key(&peer) {
+        // Bail if the session was evicted (FIN, idle reap, re-START, shutdown).
+        // A relaxed atomic load — no per-packet mutex on the session map.
+        if cancel.is_cancelled() {
             break;
         }
 

@@ -23,12 +23,17 @@ use chrono::Utc;
 use colored::Colorize as _;
 use eyre::{Result, eyre};
 use rand::RngCore;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, trace};
 
-use super::protocol::{BlasterPacket, DataPacketWriter, Mode, ReceiveStats, now_us};
+use super::batch::{BatchIo, MAX_OFFLOAD_DATAGRAM, split_datagrams};
+use super::protocol::{
+    BlasterPacket, DATA_HEADER_LEN, DataBatchWriter, DataPacketWriter, Mode, ReceiveStats, now_us,
+};
+use super::tune_socket_buffers;
 use crate::{
     TestType,
     performance::engine::{
@@ -322,6 +327,7 @@ async fn run_latency(
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(server_addr).await?;
+    tune_socket_buffers(&socket);
 
     let start = Instant::now();
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
@@ -378,11 +384,23 @@ async fn run_latency(
     }))
 }
 
-/// Helper: send a START packet and wait briefly for the server to be
-/// ready. The server doesn't ACK START; we just give the kernel a tick
-/// to deliver it.
+/// Resolve a `host:port` string to a single socket address. The throughput
+/// sockets are left unconnected (so the GSO send path can supply an explicit
+/// destination — `sendmsg` with a destination on a *connected* socket fails
+/// with `EISCONN`), so we resolve the peer address once up front.
+async fn resolve_addr(server_addr: &str) -> Result<SocketAddr> {
+    tokio::net::lookup_host(server_addr)
+        .await?
+        .next()
+        .ok_or_else(|| eyre!("UDP: no address for {server_addr}"))
+}
+
+/// Helper: send a START packet to `dest` and wait briefly for the server to be
+/// ready. The server doesn't ACK START; we just give the kernel a tick to
+/// deliver it.
 async fn send_start(
     socket: &UdpSocket,
+    dest: SocketAddr,
     mode: Mode,
     target_rate_bps: u64,
     payload_size: u32,
@@ -394,7 +412,7 @@ async fn send_start(
         payload_size,
         duration_ms: duration.as_millis() as u64,
     };
-    socket.send(&p.encode_to_vec(None)).await?;
+    socket.send_to(&p.encode_to_vec(None), dest).await?;
     sleep(Duration::from_millis(20)).await;
     Ok(())
 }
@@ -510,16 +528,22 @@ async fn run_download(
     // Each stream is an independent socket (unique source port ⇒ a separate
     // server session) paced at its share of the target rate.
     let per_stream_rate = split_rate(target_rate_bps, parallel_streams);
+    let server = resolve_addr(server_addr).await?;
 
     let mut tasks = Vec::with_capacity(parallel_streams);
     for _ in 0..parallel_streams {
-        let server_addr = server_addr.to_string();
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await?;
-            socket.connect(&server_addr).await?;
+            tune_socket_buffers(&socket);
+            // GRO: the kernel coalesces several arriving datagrams into one
+            // recv, slashing per-packet syscall overhead. The socket only ever
+            // *sends* small control packets here, so the don't-fragment bit
+            // quinn-udp sets is harmless.
+            let batch = BatchIo::new(&socket)?;
             send_start(
                 &socket,
+                server,
                 Mode::Download,
                 per_stream_rate,
                 payload_size as u32,
@@ -527,7 +551,9 @@ async fn run_download(
             )
             .await?;
 
-            let mut buf = vec![0u8; payload_size + 64];
+            // Big enough to hold one GRO batch (up to 64 KiB) or a single
+            // oversized (fragmented) datagram, whichever is larger.
+            let mut buf = vec![0u8; (payload_size + DATA_HEADER_LEN).max(u16::MAX as usize)];
             let mut samples: Vec<Sample> = Vec::new();
             let mut rx_stats = ReceiveStats::default();
             // A transient recv error (e.g. an ICMP port-unreachable surfaced on
@@ -540,23 +566,33 @@ async fn run_download(
                 let is_warmup = start_time.elapsed() < warmup;
                 let recv_start = Instant::now();
                 let t_start_us = offset_us(start_time, recv_start);
-                match timeout(Duration::from_millis(200), socket.recv(&mut buf)).await {
-                    Ok(Ok(n)) => {
+                match timeout(
+                    Duration::from_millis(200),
+                    batch.recv_coalesced(&socket, &mut buf),
+                )
+                .await
+                {
+                    Ok(Ok((len, stride, _src))) => {
                         consecutive_errors = 0;
                         let recv_ts = now_us();
-                        if let Some((BlasterPacket::Data { seq, send_ts_us }, payload_len)) =
-                            BlasterPacket::decode(&buf[..n])
-                        {
-                            rx_stats.record(seq, payload_len as u64, send_ts_us, recv_ts);
-                            let duration_us = recv_start.elapsed().as_micros() as u64;
-                            let s = Sample::success(
-                                t_start_us,
-                                duration_us,
-                                payload_len as u64,
-                                is_warmup,
-                            );
-                            samples.push(s.clone());
-                            let _ = tx.send(s);
+                        let duration_us = recv_start.elapsed().as_micros() as u64;
+                        // A GRO buffer may carry several datagrams back to back.
+                        for dgram in split_datagrams(&buf[..len], stride) {
+                            if let Some((
+                                BlasterPacket::Data { seq, send_ts_us },
+                                payload_len,
+                            )) = BlasterPacket::decode(dgram)
+                            {
+                                rx_stats.record(seq, payload_len as u64, send_ts_us, recv_ts);
+                                let s = Sample::success(
+                                    t_start_us,
+                                    duration_us,
+                                    payload_len as u64,
+                                    is_warmup,
+                                );
+                                samples.push(s.clone());
+                                let _ = tx.send(s);
+                            }
                         }
                     }
                     Ok(Err(e)) => {
@@ -582,7 +618,9 @@ async fn run_download(
                 }
             }
 
-            let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
+            let _ = socket
+                .send_to(&BlasterPacket::Fin.encode_to_vec(None), server)
+                .await;
 
             let stats = UdpRunStats {
                 observed_by: UdpStatsSide::Local,
@@ -660,16 +698,17 @@ async fn run_upload(
     // Each stream is its own socket (a separate server session), paced at its
     // share of the target rate so the aggregate matches the request.
     let per_stream_rate = split_rate(target_rate_bps, parallel_streams);
+    let server = resolve_addr(server_addr).await?;
 
     let mut tasks = Vec::with_capacity(parallel_streams);
     for _ in 0..parallel_streams {
-        let server_addr = server_addr.to_string();
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await?;
-            socket.connect(&server_addr).await?;
+            tune_socket_buffers(&socket);
             send_start(
                 &socket,
+                server,
                 Mode::Upload,
                 per_stream_rate,
                 payload_size as u32,
@@ -679,10 +718,6 @@ async fn run_upload(
 
             let mut payload = vec![0u8; payload_size];
             rand::rng().fill_bytes(&mut payload);
-            // One reusable packet buffer: the payload is constant for the
-            // session, so each send rewrites only seq + timestamp instead of
-            // reallocating and re-copying the payload.
-            let mut packet = DataPacketWriter::new(&payload);
 
             let inter_packet_delay = if per_stream_rate > 0 {
                 let bps = per_stream_rate as f64 / 8.0;
@@ -694,71 +729,129 @@ async fn run_upload(
             };
 
             let mut samples: Vec<Sample> = Vec::new();
-            let mut seq: u64 = 1;
 
-            while start_time.elapsed() < duration {
-                let is_warmup = start_time.elapsed() < warmup;
-                let send_instant = Instant::now();
-                let t_start_us = offset_us(start_time, send_instant);
-                let bytes = packet.frame(seq, now_us());
-                match socket.send(bytes).await {
-                    Ok(_) => {
-                        let duration_us = send_instant.elapsed().as_micros() as u64;
-                        let s = Sample::success(
-                            t_start_us,
-                            duration_us,
-                            payload_size as u64,
-                            is_warmup,
-                        );
-                        samples.push(s.clone());
-                        let _ = tx.send(s);
-                        seq += 1;
-                    }
-                    Err(e) => {
-                        // UDP send failures are *expected* at saturation:
-                        // ENOBUFS (kernel send queue full) and EAGAIN/WouldBlock
-                        // both mean "back off, try again", not "test is over".
-                        // We record the failed attempt for accounting and yield
-                        // so the kernel can drain. Any other errno (host
-                        // unreachable, etc.) we record and keep going too.
-                        let kind = e.kind();
-                        let duration_us = send_instant.elapsed().as_micros() as u64;
-                        let s = Sample::failure(
-                            t_start_us,
-                            duration_us,
-                            ConnectionError::TransferFailed(format!("UDP send error: {e}")),
-                            0,
-                            is_warmup,
-                        );
-                        samples.push(s.clone());
-                        let _ = tx.send(s);
-                        if matches!(
-                            kind,
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
-                        ) {
-                            tokio::task::yield_now().await;
-                        } else {
-                            sleep(Duration::from_millis(1)).await;
+            let seg_len = DATA_HEADER_LEN + payload_size;
+            if seg_len <= MAX_OFFLOAD_DATAGRAM {
+                // GSO path: frame several datagrams contiguously and hand the
+                // whole buffer to the kernel in one syscall. Only taken for
+                // MTU-sized datagrams, so the don't-fragment bit quinn-udp sets
+                // never bites. send_segmented awaits writability internally, so
+                // it provides natural backpressure at saturation.
+                let batch = BatchIo::new(&socket)?;
+                let segments = batch.segments_for(seg_len);
+                let mut writer = DataBatchWriter::new(&payload, segments);
+                let seg_size = writer.segment_size();
+                let batch_bytes = (segments * payload_size) as u64;
+                let mut seq: u64 = 1;
+                while start_time.elapsed() < duration {
+                    let is_warmup = start_time.elapsed() < warmup;
+                    let send_instant = Instant::now();
+                    let t_start_us = offset_us(start_time, send_instant);
+                    let bytes = writer.frame_batch(seq, now_us());
+                    match batch.send_segmented(&socket, server, bytes, seg_size).await {
+                        Ok(()) => {
+                            let duration_us = send_instant.elapsed().as_micros() as u64;
+                            // One sample per batch, carrying the batch's bytes.
+                            let s =
+                                Sample::success(t_start_us, duration_us, batch_bytes, is_warmup);
+                            samples.push(s.clone());
+                            let _ = tx.send(s);
+                            seq += segments as u64;
                         }
-                        // Note: we deliberately do *not* increment `seq` here -
-                        // the packet was never put on the wire, so the receiver
-                        // shouldn't count it as a gap.
+                        Err(e) => {
+                            // send_segmented only surfaces errors when the socket
+                            // itself is unusable (it retries WouldBlock and
+                            // swallows transient errnos); record and back off.
+                            let duration_us = send_instant.elapsed().as_micros() as u64;
+                            let s = Sample::failure(
+                                t_start_us,
+                                duration_us,
+                                ConnectionError::TransferFailed(format!("UDP GSO send: {e}")),
+                                0,
+                                is_warmup,
+                            );
+                            samples.push(s.clone());
+                            let _ = tx.send(s);
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    if let Some(d) = inter_packet_delay {
+                        sleep(d.saturating_mul(segments as u32)).await;
                     }
                 }
+            } else {
+                // Plain per-packet path for datagrams larger than the MTU: they
+                // require IP fragmentation, so this socket is left without the
+                // quinn-udp PMTU/don't-fragment setup.
+                let mut packet = DataPacketWriter::new(&payload);
+                let mut seq: u64 = 1;
+                while start_time.elapsed() < duration {
+                    let is_warmup = start_time.elapsed() < warmup;
+                    let send_instant = Instant::now();
+                    let t_start_us = offset_us(start_time, send_instant);
+                    let bytes = packet.frame(seq, now_us());
+                    match socket.send_to(bytes, server).await {
+                        Ok(_) => {
+                            let duration_us = send_instant.elapsed().as_micros() as u64;
+                            let s = Sample::success(
+                                t_start_us,
+                                duration_us,
+                                payload_size as u64,
+                                is_warmup,
+                            );
+                            samples.push(s.clone());
+                            let _ = tx.send(s);
+                            seq += 1;
+                        }
+                        Err(e) => {
+                            // UDP send failures are *expected* at saturation:
+                            // ENOBUFS (kernel send queue full) and EAGAIN/WouldBlock
+                            // both mean "back off, try again", not "test is over".
+                            // We record the failed attempt for accounting and yield
+                            // so the kernel can drain. Any other errno (host
+                            // unreachable, etc.) we record and keep going too.
+                            let kind = e.kind();
+                            let duration_us = send_instant.elapsed().as_micros() as u64;
+                            let s = Sample::failure(
+                                t_start_us,
+                                duration_us,
+                                ConnectionError::TransferFailed(format!("UDP send error: {e}")),
+                                0,
+                                is_warmup,
+                            );
+                            samples.push(s.clone());
+                            let _ = tx.send(s);
+                            if matches!(
+                                kind,
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
+                            ) {
+                                tokio::task::yield_now().await;
+                            } else {
+                                sleep(Duration::from_millis(1)).await;
+                            }
+                            // Note: we deliberately do *not* increment `seq` here -
+                            // the packet was never put on the wire, so the receiver
+                            // shouldn't count it as a gap.
+                        }
+                    }
 
-                if let Some(d) = inter_packet_delay {
-                    sleep(d).await;
-                } else if seq.is_multiple_of(256) {
-                    tokio::task::yield_now().await;
+                    if let Some(d) = inter_packet_delay {
+                        sleep(d).await;
+                    } else if seq.is_multiple_of(256) {
+                        tokio::task::yield_now().await;
+                    }
                 }
             }
 
             // FIN + REPORT collection for this stream's session.
             let mut report: Option<BlasterPacket> = None;
             for _ in 0..5 {
-                let _ = socket.send(&BlasterPacket::Fin.encode_to_vec(None)).await;
+                let _ = socket
+                    .send_to(&BlasterPacket::Fin.encode_to_vec(None), server)
+                    .await;
                 let mut buf = vec![0u8; 4096];
-                if let Ok(Ok(n)) = timeout(Duration::from_millis(200), socket.recv(&mut buf)).await
+                if let Ok(Ok((n, _))) =
+                    timeout(Duration::from_millis(200), socket.recv_from(&mut buf)).await
                     && let Some((p, _)) = BlasterPacket::decode(&buf[..n])
                     && matches!(p, BlasterPacket::Report { .. })
                 {

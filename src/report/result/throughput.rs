@@ -556,6 +556,20 @@ impl ThroughputResult {
         self.connection_success_rate()
     }
 
+    /// Successful application-level requests per second.
+    ///
+    /// For HTTP every sample is exactly one request (`download_chunk` is one
+    /// GET, `upload_chunk` is one POST), so this is the request rate. For
+    /// TCP/UDP/QUIC a sample is a read/packet rather than a request, so the
+    /// figure is not meaningful — callers gate its display on the protocol.
+    pub fn requests_per_second(&self) -> f64 {
+        if self.total_duration_us == 0 {
+            return 0.0;
+        }
+        let ok = self.non_warmup_iter().filter(|s| s.is_success()).count();
+        (ok as f64) / (self.total_duration_us as f64 / 1_000_000.0)
+    }
+
     /// `(total_retries, failed_after_retry)`. Retries are observable only on
     /// the failure path — `Outcome::Success` carries no retry count — so the
     /// previous "successful after retry" figure was always zero. Reporting it
@@ -686,5 +700,28 @@ mod tests {
         let r = result_from(Vec::new(), 1_000_000);
         assert!(r.min_throughput_bps().is_none());
         assert!(r.max_throughput_bps().is_none());
+    }
+
+    #[test]
+    fn requests_per_second_counts_successful_samples_over_duration() {
+        // 20 successful requests over a 2s measurement window -> 10 req/s. A
+        // warmup sample and a failed sample must not count.
+        let mut samples: Vec<Sample> = (0..20).map(|i| Sample::success(i * 1000, 100, 4096, false)).collect();
+        samples.push(Sample::success(0, 100, 4096, true)); // warmup, excluded
+        samples.push(Sample::failure(
+            0,
+            100,
+            ConnectionError::Timeout("x".into()),
+            0,
+            false,
+        )); // failure, excluded
+        let r = result_from(samples, 2_000_000);
+        assert!((r.requests_per_second() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn requests_per_second_zero_duration_is_zero() {
+        let r = result_from(vec![Sample::success(0, 100, 4096, false)], 0);
+        assert_eq!(r.requests_per_second(), 0.0);
     }
 }

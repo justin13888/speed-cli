@@ -66,6 +66,49 @@ fn latency_extras_html(result: &LatencyResult, overlay: Option<&LatencyResult>) 
 /// The "Latency Under Load" section for a `NetworkTestResult`: a bufferbloat
 /// headline, an idle-vs-loaded comparison chart, and the loaded numeric detail.
 /// Empty when no under-load series was captured.
+/// HTTP-only "requests/sec" row appended after a throughput result block.
+/// Empty for other protocols, where a sample is a read/packet, not a request.
+fn rps_html(result: &ThroughputResult, protocol: crate::report::NetworkProtocol) -> String {
+    if matches!(protocol, crate::report::NetworkProtocol::Http) {
+        format!(
+            r#"<div style="margin-top:6px;"><span style="color:#007acc;">Requests/sec:</span> {:.1}</div>"#,
+            result.requests_per_second()
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// Connection-establishment timings (handshake / TTFB) section, or empty
+/// when none were captured for this protocol.
+fn connection_html(result: &NetworkTestResult, prefix: &str) -> String {
+    let Some(conn) = &result.connection else {
+        return String::new();
+    };
+    let ms = |us: u64| format!("{:.2} ms", us as f64 / 1000.0);
+    let mut rows = String::new();
+    let mut row = |label: &str, us: Option<u64>| {
+        if let Some(us) = us {
+            rows.push_str(&format!(
+                r#"<div><span style="color:#007acc;">{label}:</span> {}</div>"#,
+                ms(us)
+            ));
+        }
+    };
+    row("TCP handshake", conn.tcp_handshake_us);
+    row("QUIC handshake (incl. TLS)", conn.quic_handshake_us);
+    row("Time to first byte", conn.ttfb_us);
+    if rows.is_empty() {
+        return String::new();
+    }
+    format!(
+        r#"<div class="result-section" style="margin-bottom: 30px;">
+            <h3 style="color: #28a745; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{prefix}Connection</h3>
+            <div style="margin-left: 20px;">{rows}</div>
+        </div>"#
+    )
+}
+
 fn under_load_html(result: &NetworkTestResult, prefix: &str) -> String {
     let Some(loaded) = &result.latency_under_load else {
         return String::new();
@@ -761,6 +804,9 @@ impl ToHtml for NetworkTestResult {
             crate::report::NetworkProtocol::Quic => "QUIC ",
         };
 
+        // Connection-establishment timings (handshake / TTFB).
+        write!(writer, "{}", connection_html(self, protocol_prefix))?;
+
         // Latency results
         if let Some(latency) = &self.latency {
             write!(
@@ -795,6 +841,7 @@ impl ToHtml for NetworkTestResult {
                     format_bytes_usize(*size)
                 )?;
                 result.write_html(writer)?;
+                write!(writer, "{}", rps_html(result, self.protocol))?;
                 write!(writer, r#"</div></div>"#)?;
             }
             write!(writer, r#"</div></div>"#)?;
@@ -818,6 +865,7 @@ impl ToHtml for NetworkTestResult {
                     format_bytes_usize(*size)
                 )?;
                 result.write_html(writer)?;
+                write!(writer, "{}", rps_html(result, self.protocol))?;
                 write!(writer, r#"</div></div>"#)?;
             }
             write!(writer, r#"</div></div>"#)?;
@@ -834,6 +882,9 @@ impl ToHtml for NetworkTestResult {
             crate::report::NetworkProtocol::Udp => "UDP ",
             crate::report::NetworkProtocol::Quic => "QUIC ",
         };
+
+        // Connection-establishment timings (handshake / TTFB).
+        html.push_str(&connection_html(self, protocol_prefix));
 
         // Latency results
         if let Some(latency) = &self.latency {
@@ -863,10 +914,11 @@ impl ToHtml for NetworkTestResult {
                     .map(|(size, result)| format!(
                         r#"<div>
                             <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                            <div style="margin-left: 20px;">{}</div>
+                            <div style="margin-left: 20px;">{}{}</div>
                         </div>"#,
                         format_bytes_usize(*size),
-                        result.to_html()
+                        result.to_html(),
+                        rps_html(result, self.protocol)
                     ))
                     .collect::<Vec<_>>()
                     .join("")
@@ -886,10 +938,11 @@ impl ToHtml for NetworkTestResult {
                     .map(|(size, result)| format!(
                         r#"<div>
                             <h4 style="color: #007acc; margin-bottom: 10px;">Payload Size: {}</h4>
-                            <div style="margin-left: 20px;">{}</div>
+                            <div style="margin-left: 20px;">{}{}</div>
                         </div>"#,
                         format_bytes_usize(*size),
-                        result.to_html()
+                        result.to_html(),
+                        rps_html(result, self.protocol)
                     ))
                     .collect::<Vec<_>>()
                     .join("")

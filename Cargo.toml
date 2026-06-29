@@ -64,6 +64,13 @@ rcgen = "0.14.2"
 parking_lot = "0.12"
 clap_complete = "4.6.5"
 clap_mangen = "0.3.0"
+# Raw socket tuning (SO_SNDBUF/SO_RCVBUF) for the UDP blaster. Safe API; the
+# version is already in the tree transitively via quinn/tokio.
+socket2 = "0.5"
+# GSO/GRO batched UDP I/O for the blaster — the same kernel offload `quinn`
+# uses. Safe API; pulled in transitively by quinn already. The `tracing`
+# feature routes its internal logs through our subscriber.
+quinn-udp = { version = "0.5", features = ["tracing"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

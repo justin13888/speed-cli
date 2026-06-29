@@ -7,23 +7,28 @@
 //! 1 MB is small enough to generate in ~ms yet large enough that the
 //! repeat path below rarely runs more than a few iterations.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt as _};
 
-/// Process-wide random download buffer.
-pub static RAND_BUFFER: LazyLock<Arc<Bytes>> = LazyLock::new(|| {
+/// Process-wide random download buffer. `Bytes` is itself a cheap-to-clone
+/// reference-counted buffer, so no extra `Arc` wrapper is needed.
+pub static RAND_BUFFER: LazyLock<Bytes> = LazyLock::new(|| {
     use rand::RngCore as _;
     let mut buf = vec![0u8; 1024 * 1024]; // 1 MB
     rand::rng().fill_bytes(&mut buf);
-    Arc::new(Bytes::from(buf))
+    Bytes::from(buf)
 });
 
 /// Produce one download chunk of exactly `len` bytes drawn from
 /// [`RAND_BUFFER`], repeating the buffer when `len` exceeds its size.
+///
+/// The common case (`len <= 1 MB`) is zero-copy: `Bytes::slice` returns a view
+/// into the shared buffer, just bumping its refcount. Only the rare oversized
+/// chunk allocates and copies.
 pub fn chunk_of(len: usize) -> Bytes {
-    let buf = RAND_BUFFER.clone();
+    let buf = &*RAND_BUFFER;
     if len <= buf.len() {
         buf.slice(0..len)
     } else {
