@@ -9,4 +9,4 @@ pub mod sampler;
 
 pub use collector::{LatencyStatsCollector, ThroughputStatsCollector};
 pub use progress::{ProgressBarType, create_progress_bar};
-pub use sampler::{measurement_duration_us, offset_us};
+pub use sampler::{measurement_duration_us, offset_us, sample_is_warmup};

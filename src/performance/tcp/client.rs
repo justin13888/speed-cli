@@ -14,7 +14,7 @@ use crate::{
     TestType,
     performance::engine::{
         LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        measurement_duration_us, offset_us,
+        measurement_duration_us, offset_us, sample_is_warmup,
     },
     performance::tcp::handshake::client_hello,
     report::{
@@ -96,17 +96,20 @@ async fn run_full_duplex_test(
                 while start_time.elapsed() < duration {
                     let read_start = Instant::now();
                     let t_start_us = offset_us(start_time, read_start);
-                    let is_warmup = start_time.elapsed() < warmup;
                     match read_half.read(&mut read_buf).await {
                         Ok(0) => break,
                         Ok(n) => {
                             let duration_us = read_start.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::success(t_start_us, duration_us, n as u64, is_warmup);
                             dl_local.push(s.clone());
                             let _ = dl_tx.send(s);
                         }
                         Err(e) => {
                             let duration_us = read_start.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::failure(
                                 t_start_us,
                                 duration_us,
@@ -126,10 +129,11 @@ async fn run_full_duplex_test(
                 while start_time.elapsed() < duration {
                     let write_start = Instant::now();
                     let t_start_us = offset_us(start_time, write_start);
-                    let is_warmup = start_time.elapsed() < warmup;
                     match write_half.write_all(&upload_data).await {
                         Ok(()) => {
                             let duration_us = write_start.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::success(
                                 t_start_us,
                                 duration_us,
@@ -141,6 +145,8 @@ async fn run_full_duplex_test(
                         }
                         Err(e) => {
                             let duration_us = write_start.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::failure(
                                 t_start_us,
                                 duration_us,
@@ -595,7 +601,6 @@ async fn run_download_test(
                     while start_time.elapsed() < duration {
                         let read_start = Instant::now();
                         let t_start_us = offset_us(start_time, read_start);
-                        let is_warmup = start_time.elapsed() < warmup;
                         match stream.read(&mut buffer).await {
                             Ok(0) => {
                                 tracing::debug!("Server closed connection {i} (might be normal)");
@@ -603,6 +608,8 @@ async fn run_download_test(
                             }
                             Ok(n) => {
                                 let duration_us = read_start.elapsed().as_micros() as u64;
+                                let is_warmup =
+                                    sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                                 let s =
                                     Sample::success(t_start_us, duration_us, n as u64, is_warmup);
                                 local_samples.push(s.clone());
@@ -610,6 +617,8 @@ async fn run_download_test(
                             }
                             Err(e) => {
                                 let duration_us = read_start.elapsed().as_micros() as u64;
+                                let is_warmup =
+                                    sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                                 let s = Sample::failure(
                                     t_start_us,
                                     duration_us,
@@ -737,10 +746,11 @@ async fn run_upload_test(
                 while start_time.elapsed() < duration {
                     let write_start = Instant::now();
                     let t_start_us = offset_us(start_time, write_start);
-                    let is_warmup = start_time.elapsed() < warmup;
                     match stream.write_all(&data).await {
                         Ok(_) => {
                             let duration_us = write_start.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::success(
                                 t_start_us,
                                 duration_us,
@@ -752,6 +762,8 @@ async fn run_upload_test(
                         }
                         Err(e) => {
                             let duration_us = write_start.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::failure(
                                 t_start_us,
                                 duration_us,

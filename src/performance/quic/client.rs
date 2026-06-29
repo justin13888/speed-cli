@@ -23,7 +23,7 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use crate::TestType;
 use crate::performance::engine::{
     LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-    measurement_duration_us, offset_us,
+    measurement_duration_us, offset_us, sample_is_warmup,
 };
 use crate::performance::handshake::client_hello_io;
 use crate::performance::quic::QUIC_RAW_ALPN;
@@ -269,23 +269,23 @@ async fn run_download(conn: &Connection, config: &QuicTestConfig) -> Result<Thro
             while start.elapsed() < duration {
                 let op_start = Instant::now();
                 let t_start_us = offset_us(start, op_start);
-                let is_warmup = start.elapsed() < warmup;
                 match recv.read(&mut buf).await {
                     Ok(Some(n)) => {
-                        let s = Sample::success(
-                            t_start_us,
-                            op_start.elapsed().as_micros() as u64,
-                            n as u64,
-                            is_warmup,
-                        );
+                        let duration_us = op_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
+                        let s = Sample::success(t_start_us, duration_us, n as u64, is_warmup);
                         samples.push(s.clone());
                         let _ = tx.send(s);
                     }
                     Ok(None) => break,
                     Err(e) => {
+                        let duration_us = op_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         let s = Sample::failure(
                             t_start_us,
-                            op_start.elapsed().as_micros() as u64,
+                            duration_us,
                             ConnectionError::Unknown(e.to_string()),
                             0,
                             is_warmup,
@@ -356,22 +356,23 @@ async fn run_upload(
             while start.elapsed() < duration {
                 let op_start = Instant::now();
                 let t_start_us = offset_us(start, op_start);
-                let is_warmup = start.elapsed() < warmup;
                 match send.write_all(&payload).await {
                     Ok(()) => {
-                        let s = Sample::success(
-                            t_start_us,
-                            op_start.elapsed().as_micros() as u64,
-                            payload.len() as u64,
-                            is_warmup,
-                        );
+                        let duration_us = op_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
+                        let s =
+                            Sample::success(t_start_us, duration_us, payload.len() as u64, is_warmup);
                         samples.push(s.clone());
                         let _ = tx.send(s);
                     }
                     Err(e) => {
+                        let duration_us = op_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         let s = Sample::failure(
                             t_start_us,
-                            op_start.elapsed().as_micros() as u64,
+                            duration_us,
                             ConnectionError::TransferFailed(e.to_string()),
                             0,
                             is_warmup,
