@@ -19,7 +19,7 @@ use crate::{
     constants::{HTTP2_CONNECTION_WINDOW, HTTP2_MAX_FRAME_SIZE, HTTP2_STREAM_WINDOW},
     performance::engine::{
         LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        measurement_duration_us, offset_us,
+        measurement_duration_us, offset_us, sample_is_warmup,
     },
     performance::http::HttpVersion,
     performance::http::server::decode_base64_urlsafe,
@@ -423,18 +423,21 @@ async fn run_download_test(
             while start_time.elapsed() < duration {
                 let download_start = Instant::now();
                 let t_start_us = offset_us(start_time, download_start);
-                let is_warmup = start_time.elapsed() < warmup;
                 match download_chunk(&client, &server_url, i, payload_size, chunk_size, version)
                     .await
                 {
                     Ok(bytes) => {
                         let duration_us = download_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         let s = Sample::success(t_start_us, duration_us, bytes, is_warmup);
                         local_samples.push(s.clone());
                         let _ = tx.send(s);
                     }
                     Err(e) => {
                         let duration_us = download_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         let s = Sample::failure(
                             t_start_us,
                             duration_us,
@@ -520,17 +523,20 @@ async fn run_upload_test(
             while start_time.elapsed() < duration {
                 let upload_start = Instant::now();
                 let t_start_us = offset_us(start_time, upload_start);
-                let is_warmup = start_time.elapsed() < warmup;
                 match upload_chunk(&client, &server_url, payload_size, chunk.clone(), version).await
                 {
                     Ok(bytes) => {
                         let duration_us = upload_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         let s = Sample::success(t_start_us, duration_us, bytes, is_warmup);
                         local_samples.push(s.clone());
                         let _ = tx.send(s);
                     }
                     Err(e) => {
                         let duration_us = upload_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         let s = Sample::failure(
                             t_start_us,
                             duration_us,

@@ -38,7 +38,7 @@ use crate::{
     TestType,
     performance::engine::{
         LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
-        measurement_duration_us, offset_us,
+        measurement_duration_us, offset_us, sample_is_warmup,
     },
     report::{
         ConnectionError, LatencyMeasurement, LatencyResult, NetworkTestResult, PeerIdentity,
@@ -563,7 +563,6 @@ async fn run_download(
             const MAX_CONSECUTIVE_RECV_ERRORS: u32 = 8;
 
             while start_time.elapsed() < duration {
-                let is_warmup = start_time.elapsed() < warmup;
                 let recv_start = Instant::now();
                 let t_start_us = offset_us(start_time, recv_start);
                 match timeout(
@@ -576,6 +575,8 @@ async fn run_download(
                         consecutive_errors = 0;
                         let recv_ts = now_us();
                         let duration_us = recv_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         // A GRO buffer may carry several datagrams back to back.
                         for dgram in split_datagrams(&buf[..len], stride) {
                             if let Some((
@@ -597,6 +598,8 @@ async fn run_download(
                     }
                     Ok(Err(e)) => {
                         let duration_us = recv_start.elapsed().as_micros() as u64;
+                        let is_warmup =
+                            sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                         let s = Sample::failure(
                             t_start_us,
                             duration_us,
@@ -744,13 +747,14 @@ async fn run_upload(
                 let batch_bytes = (segments * payload_size) as u64;
                 let mut seq: u64 = 1;
                 while start_time.elapsed() < duration {
-                    let is_warmup = start_time.elapsed() < warmup;
                     let send_instant = Instant::now();
                     let t_start_us = offset_us(start_time, send_instant);
                     let bytes = writer.frame_batch(seq, now_us());
                     match batch.send_segmented(&socket, server, bytes, seg_size).await {
                         Ok(()) => {
                             let duration_us = send_instant.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             // One sample per batch, carrying the batch's bytes.
                             let s =
                                 Sample::success(t_start_us, duration_us, batch_bytes, is_warmup);
@@ -763,6 +767,8 @@ async fn run_upload(
                             // itself is unusable (it retries WouldBlock and
                             // swallows transient errnos); record and back off.
                             let duration_us = send_instant.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::failure(
                                 t_start_us,
                                 duration_us,
@@ -786,13 +792,14 @@ async fn run_upload(
                 let mut packet = DataPacketWriter::new(&payload);
                 let mut seq: u64 = 1;
                 while start_time.elapsed() < duration {
-                    let is_warmup = start_time.elapsed() < warmup;
                     let send_instant = Instant::now();
                     let t_start_us = offset_us(start_time, send_instant);
                     let bytes = packet.frame(seq, now_us());
                     match socket.send_to(bytes, server).await {
                         Ok(_) => {
                             let duration_us = send_instant.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::success(
                                 t_start_us,
                                 duration_us,
@@ -812,6 +819,8 @@ async fn run_upload(
                             // unreachable, etc.) we record and keep going too.
                             let kind = e.kind();
                             let duration_us = send_instant.elapsed().as_micros() as u64;
+                            let is_warmup =
+                                sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
                             let s = Sample::failure(
                                 t_start_us,
                                 duration_us,
