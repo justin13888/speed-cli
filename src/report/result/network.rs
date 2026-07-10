@@ -237,7 +237,9 @@ impl Display for NetworkTestResult {
                 writeln!(
                     f,
                     "  {}",
-                    format!("{protocol_prefix}Connection:").bright_green().bold()
+                    format!("{protocol_prefix}Connection:")
+                        .bright_green()
+                        .bold()
                 )?;
                 for (label, value) in lines {
                     writeln!(f, "    {}: {}", label.bright_blue(), value.cyan())?;

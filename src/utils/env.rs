@@ -68,10 +68,10 @@ fn read_hostname() -> Option<String> {
     if let Some(h) = read_str("/etc/hostname") {
         return Some(h);
     }
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return Some(h);
-        }
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return Some(h);
     }
     hostname_cmd()
 }

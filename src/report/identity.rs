@@ -71,10 +71,10 @@ fn read_hostname() -> Option<String> {
             return Some(trimmed.to_string());
         }
     }
-    if let Ok(s) = std::env::var("HOSTNAME") {
-        if !s.is_empty() {
-            return Some(s);
-        }
+    if let Ok(s) = std::env::var("HOSTNAME")
+        && !s.is_empty()
+    {
+        return Some(s);
     }
     std::process::Command::new("hostname")
         .output()

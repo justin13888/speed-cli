@@ -108,7 +108,8 @@ impl BatchIo {
             socket.readable().await?;
             let mut bufs = [IoSliceMut::new(buf)];
             match socket.try_io(Interest::READABLE, || {
-                self.state.recv(UdpSockRef::from(socket), &mut bufs, &mut meta)
+                self.state
+                    .recv(UdpSockRef::from(socket), &mut bufs, &mut meta)
             }) {
                 Ok(0) => continue,
                 Ok(_) => {

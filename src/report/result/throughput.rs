@@ -706,7 +706,9 @@ mod tests {
     fn requests_per_second_counts_successful_samples_over_duration() {
         // 20 successful requests over a 2s measurement window -> 10 req/s. A
         // warmup sample and a failed sample must not count.
-        let mut samples: Vec<Sample> = (0..20).map(|i| Sample::success(i * 1000, 100, 4096, false)).collect();
+        let mut samples: Vec<Sample> = (0..20)
+            .map(|i| Sample::success(i * 1000, 100, 4096, false))
+            .collect();
         samples.push(Sample::success(0, 100, 4096, true)); // warmup, excluded
         samples.push(Sample::failure(
             0,

@@ -23,11 +23,7 @@ fn server_config() -> HttpServerConfig {
     }
 }
 
-fn client_config_with_type(
-    port: u16,
-    version: HttpVersion,
-    test_type: TestType,
-) -> HttpTestConfig {
+fn client_config_with_type(port: u16, version: HttpVersion, test_type: TestType) -> HttpTestConfig {
     HttpTestConfig::new(
         "127.0.0.1".to_string(),
         Some(port),

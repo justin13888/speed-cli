@@ -608,8 +608,10 @@ async fn run_download_test(
                             }
                             Ok(n) => {
                                 let duration_us = read_start.elapsed().as_micros() as u64;
-                                let is_warmup =
-                                    sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
+                                let is_warmup = sample_is_warmup(
+                                    t_start_us.saturating_add(duration_us),
+                                    warmup,
+                                );
                                 let s =
                                     Sample::success(t_start_us, duration_us, n as u64, is_warmup);
                                 local_samples.push(s.clone());
@@ -617,8 +619,10 @@ async fn run_download_test(
                             }
                             Err(e) => {
                                 let duration_us = read_start.elapsed().as_micros() as u64;
-                                let is_warmup =
-                                    sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
+                                let is_warmup = sample_is_warmup(
+                                    t_start_us.saturating_add(duration_us),
+                                    warmup,
+                                );
                                 let s = Sample::failure(
                                     t_start_us,
                                     duration_us,

@@ -361,8 +361,12 @@ async fn run_upload(
                         let duration_us = op_start.elapsed().as_micros() as u64;
                         let is_warmup =
                             sample_is_warmup(t_start_us.saturating_add(duration_us), warmup);
-                        let s =
-                            Sample::success(t_start_us, duration_us, payload.len() as u64, is_warmup);
+                        let s = Sample::success(
+                            t_start_us,
+                            duration_us,
+                            payload.len() as u64,
+                            is_warmup,
+                        );
                         samples.push(s.clone());
                         let _ = tx.send(s);
                     }
