@@ -1,7 +1,9 @@
 use crate::build_info::BuildInfo;
 use crate::performance::http::HttpVersion;
 use crate::report::*;
+use crate::utils::env::Environment;
 use crate::utils::types::TestType;
+use indexmap::IndexMap;
 use std::io::{self, Write};
 
 mod graph;
@@ -30,7 +32,168 @@ fn build_meta_html(build: &BuildInfo) -> String {
     )
 }
 
-// TODO: Ensure correctness and performance of HTML generation from huge reports (10GB+)
+/// Shared stylesheet for every HTML report. Injected exactly once per
+/// document by [`write_document_start`], so embedding a `TestReport`'s
+/// sections inside a suite page never duplicates it.
+const REPORT_CSS: &str = r#"
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        .header {
+            text-align: center;
+            border-bottom: 3px solid #007acc;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #007acc;
+            margin: 0;
+            font-size: 2.5em;
+        }
+        .meta-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 6px;
+        }
+        .meta-item {
+            display: flex;
+            justify-content: space-between;
+        }
+        .meta-label {
+            font-weight: 600;
+            color: #495057;
+        }
+        .meta-value {
+            color: #007acc;
+            font-weight: 500;
+        }
+        .section {
+            margin-bottom: 30px;
+        }
+        .section-title {
+            color: #495057;
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            font-weight: 600;
+        }
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .config-card {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 6px;
+            border-left: 4px solid #007acc;
+        }
+        .phase-section {
+            margin-top: 40px;
+            border-top: 3px solid #e9ecef;
+            padding-top: 20px;
+        }
+        .params-card {
+            background-color: #f8f9fa;
+            padding: 12px 20px;
+            border-radius: 6px;
+            border-left: 4px solid #6f42c1;
+            margin-bottom: 20px;
+        }
+        .overview-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .overview-table th, .overview-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #e9ecef;
+            text-align: left;
+        }
+        .overview-table th {
+            color: #495057;
+        }
+        .overview-table a {
+            color: #007acc;
+            text-decoration: none;
+        }
+        .skip-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .skip-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #e9ecef;
+        }
+        .banner {
+            padding: 20px;
+            background-color: #fff3cd;
+            border-radius: 6px;
+            color: #856404;
+        }
+"#;
+
+/// Open an HTML document: doctype, head with [`REPORT_CSS`], and the
+/// page container. Pair every call with [`write_document_end`].
+fn write_document_start<W: Write>(writer: &mut W, title: &str) -> io::Result<()> {
+    write!(
+        writer,
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>{REPORT_CSS}    </style>
+</head>
+<body>
+    <div class="container">
+"#
+    )
+}
+
+fn write_document_end<W: Write>(writer: &mut W) -> io::Result<()> {
+    write!(
+        writer,
+        r#"
+    </div>
+</body>
+</html>"#
+    )
+}
+
+/// Minimal HTML escaper for user- or remote-derived strings (phase
+/// labels, hostnames, skip reasons, deviation notes). Build- and
+/// config-controlled values skip this.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
 /// Tail percentiles, spike verdict, and the time-vs-latency SVG chart, rendered
 /// below a `LatencyResult`'s numeric grid. `overlay`, when present, is drawn as
@@ -157,6 +320,7 @@ fn under_load_html(result: &NetworkTestResult, prefix: &str) -> String {
 ///
 /// This trait is implemented for all major types in the speed-cli reporting system:
 /// - `TestReport` - The main test report structure
+/// - `SuiteReport` - The composite suite report (embeds each phase's `TestReport`)
 /// - `TestConfig` and its variants (`TcpTestConfig`, `UdpTestConfig`, `HttpTestConfig`)
 /// - `TestResult` and its variants (`ThroughputResult`, `NetworkTestResult`)
 /// - `LatencyResult` and `LatencyMeasurement`
@@ -202,92 +366,13 @@ pub trait ToHtml {
 // Implementation for TestReport
 impl ToHtml for TestReport {
     fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        write_document_start(writer, "Speed CLI Test Report")?;
         write!(
             writer,
-            r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Speed CLI Test Report</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 30px;
-        }}
-        .header {{
-            text-align: center;
-            border-bottom: 3px solid #007acc;
-            padding-bottom: 20px;
-            margin-bottom: 30px;
-        }}
-        .header h1 {{
-            color: #007acc;
-            margin: 0;
-            font-size: 2.5em;
-        }}
-        .meta-info {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 15px;
-            margin-bottom: 30px;
-            padding: 20px;
-            background-color: #f8f9fa;
-            border-radius: 6px;
-        }}
-        .meta-item {{
-            display: flex;
-            justify-content: space-between;
-        }}
-        .meta-label {{
-            font-weight: 600;
-            color: #495057;
-        }}
-        .meta-value {{
-            color: #007acc;
-            font-weight: 500;
-        }}
-        .section {{
-            margin-bottom: 30px;
-        }}
-        .section-title {{
-            color: #495057;
-            border-bottom: 2px solid #e9ecef;
-            padding-bottom: 10px;
-            margin-bottom: 20px;
-            font-size: 1.5em;
-            font-weight: 600;
-        }}
-        .config-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-        }}
-        .config-card {{
-            background-color: #f8f9fa;
-            padding: 20px;
-            border-radius: 6px;
-            border-left: 4px solid #007acc;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
+            r#"        <div class="header">
             <h1>═══ Speed CLI Test Report ═══</h1>
         </div>
-        
+
         <div class="meta-info">
             <div class="meta-item">
                 <span class="meta-label">Version:</span>
@@ -302,22 +387,39 @@ impl ToHtml for TestReport {
                 <span class="meta-value">{}</span>
             </div>
         </div>
-
-        <div class="section">
-            <h2 class="section-title">Configuration</h2>
-            <div class="config-grid">
-                <div class="config-card">
-                    "#,
+"#,
             build_meta_html(&self.build),
             self.start_time.format("%Y-%m-%d %H:%M:%S UTC"),
             self.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         )?;
 
-        self.config.write_html(writer)?;
+        write_report_sections(self, writer)?;
+        write_document_end(writer)
+    }
+}
 
-        write!(
-            writer,
-            r#"
+/// The Configuration and Results sections of a single [`TestReport`],
+/// without the document shell. Shared by the standalone report page and
+/// each phase of a suite page.
+pub(crate) fn write_report_sections<W: Write>(
+    report: &TestReport,
+    writer: &mut W,
+) -> io::Result<()> {
+    write!(
+        writer,
+        r#"
+        <div class="section">
+            <h2 class="section-title">Configuration</h2>
+            <div class="config-grid">
+                <div class="config-card">
+                    "#
+    )?;
+
+    report.config.write_html(writer)?;
+
+    write!(
+        writer,
+        r#"
                 </div>
             </div>
         </div>
@@ -325,144 +427,11 @@ impl ToHtml for TestReport {
         <div class="section">
             <h2 class="section-title">Results</h2>
             "#
-        )?;
+    )?;
 
-        self.result.write_html(writer)?;
+    report.result.write_html(writer)?;
 
-        write!(
-            writer,
-            r#"
-        </div>
-    </div>
-</body>
-</html>"#
-        )
-    }
-
-    fn to_html(&self) -> String {
-        format!(
-            r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Speed CLI Test Report</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 30px;
-        }}
-        .header {{
-            text-align: center;
-            border-bottom: 3px solid #007acc;
-            padding-bottom: 20px;
-            margin-bottom: 30px;
-        }}
-        .header h1 {{
-            color: #007acc;
-            margin: 0;
-            font-size: 2.5em;
-        }}
-        .meta-info {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 15px;
-            margin-bottom: 30px;
-            padding: 20px;
-            background-color: #f8f9fa;
-            border-radius: 6px;
-        }}
-        .meta-item {{
-            display: flex;
-            justify-content: space-between;
-        }}
-        .meta-label {{
-            font-weight: 600;
-            color: #495057;
-        }}
-        .meta-value {{
-            color: #007acc;
-            font-weight: 500;
-        }}
-        .section {{
-            margin-bottom: 30px;
-        }}
-        .section-title {{
-            color: #495057;
-            border-bottom: 2px solid #e9ecef;
-            padding-bottom: 10px;
-            margin-bottom: 20px;
-            font-size: 1.5em;
-            font-weight: 600;
-        }}
-        .config-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-        }}
-        .config-card {{
-            background-color: #f8f9fa;
-            padding: 20px;
-            border-radius: 6px;
-            border-left: 4px solid #007acc;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>═══ Speed CLI Test Report ═══</h1>
-        </div>
-        
-        <div class="meta-info">
-            <div class="meta-item">
-                <span class="meta-label">Version:</span>
-                <span class="meta-value">{}</span>
-            </div>
-            <div class="meta-item">
-                <span class="meta-label">Start Time:</span>
-                <span class="meta-value">{}</span>
-            </div>
-            <div class="meta-item">
-                <span class="meta-label">Report Time:</span>
-                <span class="meta-value">{}</span>
-            </div>
-        </div>
-
-        <div class="section">
-            <h2 class="section-title">Configuration</h2>
-            <div class="config-grid">
-                <div class="config-card">
-                    {}
-                </div>
-            </div>
-        </div>
-
-        <div class="section">
-            <h2 class="section-title">Results</h2>
-            {}
-        </div>
-    </div>
-</body>
-</html>"#,
-            build_meta_html(&self.build),
-            self.start_time.format("%Y-%m-%d %H:%M:%S UTC"),
-            self.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-            self.config.to_html(),
-            self.result.to_html()
-        )
-    }
+    write!(writer, "\n        </div>")
 }
 
 // Implementation for TestConfig
@@ -1263,6 +1232,293 @@ impl ToHtml for HttpVersion {
             HttpVersion::HTTP2 => "HTTP/2 with TLS".to_string(),
             HttpVersion::HTTP3 => "HTTP/3 (QUIC)".to_string(),
         }
+    }
+}
+
+/// Environment snapshot as a meta grid; mirrors `Environment`'s
+/// `Display` impl so terminal and HTML output agree.
+fn environment_html(env: &Environment) -> String {
+    let mut items = String::new();
+    let mut item = |label: &str, value: String| {
+        items.push_str(&format!(
+            r#"
+            <div class="meta-item">
+                <span class="meta-label">{label}:</span>
+                <span class="meta-value">{value}</span>
+            </div>"#,
+        ));
+    };
+    item("Host", escape_html(env.hostname.as_deref().unwrap_or("?")));
+    item(
+        "OS",
+        format!("{} ({})", escape_html(&env.os), escape_html(&env.arch)),
+    );
+    if let Some(k) = &env.kernel {
+        item("Kernel", escape_html(k));
+    }
+    item("CPUs", env.cpu_count.to_string());
+    if let Some(linux) = &env.linux {
+        if let Some(cc) = &linux.tcp_congestion_control {
+            item("TCP congestion control", escape_html(cc));
+        }
+        if let (Some(r), Some(w)) = (linux.rmem_max, linux.wmem_max) {
+            item("rmem_max / wmem_max", format!("{r} / {w}"));
+        }
+        if let Some(b) = linux.netdev_max_backlog {
+            item("netdev_max_backlog", b.to_string());
+        }
+    }
+    format!(
+        r#"
+        <div class="section">
+            <h2 class="section-title">Environment</h2>
+            <div class="meta-info">{items}
+            </div>
+        </div>"#
+    )
+}
+
+/// Headline numbers for one row of the suite overview table. Anything a
+/// phase did not measure stays `None` and renders as an em dash.
+struct PhaseHeadline {
+    down_bps: Option<f64>,
+    up_bps: Option<f64>,
+    p50_ms: Option<f64>,
+    loss_pct: Option<f64>,
+}
+
+/// Best per-payload-size average, in bits/sec.
+fn best_avg_bps(results: &IndexMap<usize, ThroughputResult>) -> Option<f64> {
+    results
+        .values()
+        .map(|r| r.avg_throughput() * 8.0)
+        .max_by(f64::total_cmp)
+}
+
+fn phase_headline(report: &TestReport) -> PhaseHeadline {
+    match &report.result {
+        // A bare throughput result carries no direction; surface it in
+        // the download column rather than dropping it.
+        TestResult::Simple(t) => PhaseHeadline {
+            down_bps: Some(t.avg_throughput() * 8.0),
+            up_bps: None,
+            p50_ms: None,
+            loss_pct: None,
+        },
+        TestResult::Network(net) => {
+            let latency = net.latency.as_ref();
+            PhaseHeadline {
+                down_bps: best_avg_bps(&net.download),
+                up_bps: best_avg_bps(&net.upload),
+                p50_ms: latency.and_then(|l| l.percentile_rtt(50.0)),
+                loss_pct: latency.and_then(|l| {
+                    let total = l.count();
+                    (total > 0).then(|| l.dropped_count() as f64 / total as f64 * 100.0)
+                }),
+            }
+        }
+    }
+}
+
+impl ToHtml for PhaseParams {
+    fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        let payload = match self.payload_size {
+            Some(n) => format_bytes_usize(n),
+            None => "n/a".to_string(),
+        };
+        write!(
+            writer,
+            r#"<div class="params-card">
+                <strong>Parameters:</strong>
+                payload {payload} &middot; io-unit {io} &middot; connections {conns} &middot; duration {dur}s &middot; type {ty}"#,
+            io = format_bytes_usize(self.io_unit),
+            conns = self.connections,
+            dur = self.duration.as_secs(),
+            ty = self.test_type.to_html(),
+        )?;
+        for note in &self.deviations {
+            write!(
+                writer,
+                r#"
+                <div style="color: #fd7e14; margin-top: 4px;">note: {}</div>"#,
+                escape_html(note)
+            )?;
+        }
+        write!(writer, "</div>")
+    }
+}
+
+// Implementation for SuiteReport: a single self-contained document that
+// embeds every phase's sections. Streams phase by phase, so a huge
+// suite never has to fit in one intermediate String.
+impl ToHtml for SuiteReport {
+    fn write_html<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        write_document_start(writer, "Speed CLI Suite Report")?;
+
+        // Clamps to zero for a never-finalized report (end <= start).
+        let duration = (self.end_time - self.start_time)
+            .to_std()
+            .unwrap_or_default();
+        write!(
+            writer,
+            r#"        <div class="header">
+            <h1>═══ Speed CLI Suite Report ═══</h1>
+        </div>
+
+        <div class="meta-info">
+            <div class="meta-item">
+                <span class="meta-label">Version:</span>
+                <span class="meta-value">{version}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Server:</span>
+                <span class="meta-value">{server}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Start:</span>
+                <span class="meta-value">{start}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">End:</span>
+                <span class="meta-value">{end}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Duration:</span>
+                <span class="meta-value">{dur:.1}s</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Phases:</span>
+                <span class="meta-value">{phases} completed, {skipped} skipped</span>
+            </div>
+        </div>
+"#,
+            version = build_meta_html(&self.build),
+            server = escape_html(&self.server),
+            start = self.start_time.format("%Y-%m-%d %H:%M:%S UTC"),
+            end = self.end_time.format("%Y-%m-%d %H:%M:%S UTC"),
+            dur = duration.as_secs_f64(),
+            phases = self.reports.len(),
+            skipped = self.skipped.len(),
+        )?;
+
+        if let Some(env) = &self.environment {
+            write!(writer, "{}", environment_html(env))?;
+        }
+
+        // Overview: one row per phase, linking to its detail section.
+        write!(
+            writer,
+            r#"
+        <div class="section">
+            <h2 class="section-title">Overview</h2>"#
+        )?;
+        if self.reports.is_empty() {
+            write!(
+                writer,
+                r#"
+            <div class="banner">No phases completed.</div>"#
+            )?;
+        } else {
+            let dash = "&mdash;".to_string();
+            write!(
+                writer,
+                r#"
+            <table class="overview-table">
+                <tr><th>Phase</th><th>Type</th><th>Download</th><th>Upload</th><th>p50 RTT</th><th>Loss</th></tr>"#
+            )?;
+            for (i, nr) in self.reports.iter().enumerate() {
+                let h = phase_headline(&nr.report);
+                let fmt_bps =
+                    |v: Option<f64>| v.map(format_throughput).unwrap_or_else(|| dash.clone());
+                let fmt_ms = |v: Option<f64>| {
+                    v.map(|m| format!("{m:.2} ms"))
+                        .unwrap_or_else(|| dash.clone())
+                };
+                let fmt_pct = |v: Option<f64>| {
+                    v.map(|p| format!("{p:.2}%"))
+                        .unwrap_or_else(|| dash.clone())
+                };
+                write!(
+                    writer,
+                    r##"
+                <tr>
+                    <td><a href="#phase-{i}">{label}</a></td>
+                    <td>{ty}</td>
+                    <td>{down}</td>
+                    <td>{up}</td>
+                    <td>{p50}</td>
+                    <td>{loss}</td>
+                </tr>"##,
+                    label = escape_html(&nr.label),
+                    ty = nr.params.test_type.to_html(),
+                    down = fmt_bps(h.down_bps),
+                    up = fmt_bps(h.up_bps),
+                    p50 = fmt_ms(h.p50_ms),
+                    loss = fmt_pct(h.loss_pct),
+                )?;
+            }
+            write!(
+                writer,
+                r#"
+            </table>"#
+            )?;
+        }
+        write!(
+            writer,
+            r#"
+        </div>"#
+        )?;
+
+        // Per-phase detail, reusing the single-report sections verbatim.
+        // Anchor ids use the index: labels repeat patterns and contain
+        // characters that make poor fragment identifiers.
+        for (i, nr) in self.reports.iter().enumerate() {
+            write!(
+                writer,
+                r#"
+        <div class="phase-section" id="phase-{i}">
+            <h2 class="section-title">Phase: {label}</h2>
+            "#,
+                label = escape_html(&nr.label),
+            )?;
+            nr.params.write_html(writer)?;
+            write_report_sections(&nr.report, writer)?;
+            write!(
+                writer,
+                r#"
+        </div>"#
+            )?;
+        }
+
+        if !self.skipped.is_empty() {
+            write!(
+                writer,
+                r#"
+        <div class="section" style="margin-top: 30px;">
+            <h2 class="section-title">Skipped Phases</h2>
+            <table class="skip-table">"#
+            )?;
+            for s in &self.skipped {
+                write!(
+                    writer,
+                    r#"
+                <tr>
+                    <td><strong>{}</strong></td>
+                    <td style="color: #dc3545;">{}</td>
+                </tr>"#,
+                    escape_html(&s.label),
+                    escape_html(&s.reason)
+                )?;
+            }
+            write!(
+                writer,
+                r#"
+            </table>
+        </div>"#
+            )?;
+        }
+
+        write_document_end(writer)
     }
 }
 

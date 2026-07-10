@@ -24,9 +24,9 @@ use speed_cli::report::{
     DEFAULT_TCP_READ_BUFFER, HttpTestConfig, QuicTestConfig, TcpTestConfig, TestReport,
     UdpTestConfig,
 };
-use speed_cli::utils::export::{export_report, export_report_html};
+use speed_cli::utils::export::{export_extension_supported, export_report, export_report_html};
 use speed_cli::utils::file::can_write;
-use speed_cli::utils::import::import_report_cbor;
+use speed_cli::utils::import::{LoadedReport, import_any_report_cbor};
 use speed_cli::utils::progress::with_progress_counter;
 use speed_cli::utils::tls::TlsMaterial;
 
@@ -401,22 +401,34 @@ async fn main() -> Result<()> {
                     ));
                 }
                 Some("cbor") | None => {
-                    let report = with_progress_counter(
+                    // Single-test and suite CBOR files share the same
+                    // extension; the importer detects which this is.
+                    let loaded = with_progress_counter(
                         "Loading report from CBOR file",
-                        import_report_cbor(&file),
+                        import_any_report_cbor(&file),
                     )
                     .await?;
                     match export_html {
-                        None => println!("{report:#}"),
+                        None => match &loaded {
+                            LoadedReport::Single(report) => println!("{report:#}"),
+                            LoadedReport::Suite(suite) => println!("{suite}"),
+                        },
                         Some(html_file) => {
-                            with_progress_counter(
-                                "Exporting report to HTML",
-                                export_report_html(&report, &html_file),
-                            )
-                            .await
-                            .wrap_err_with(|| {
-                                format!("exporting HTML report to {}", html_file.display())
-                            })?;
+                            let export = async {
+                                match &loaded {
+                                    LoadedReport::Single(report) => {
+                                        export_report_html(report.as_ref(), &html_file).await
+                                    }
+                                    LoadedReport::Suite(suite) => {
+                                        export_report_html(suite.as_ref(), &html_file).await
+                                    }
+                                }
+                            };
+                            with_progress_counter("Exporting report to HTML", export)
+                                .await
+                                .wrap_err_with(|| {
+                                    format!("exporting HTML report to {}", html_file.display())
+                                })?;
                             println!(
                                 "{}",
                                 format!("HTML report exported to {}", html_file.display()).cyan()
@@ -471,6 +483,8 @@ async fn main() -> Result<()> {
             };
 
             if let Some(export) = &export {
+                // Reject a typo'd extension now, not after a multi-minute run.
+                export_extension_supported(export)?;
                 if let Some(parent) = export.parent()
                     && !parent.as_os_str().is_empty()
                 {
@@ -490,10 +504,9 @@ async fn main() -> Result<()> {
             println!("{suite}");
 
             if let Some(export) = &export {
-                let mut buf = Vec::new();
-                ciborium::into_writer(&suite, &mut buf)
-                    .map_err(|e| eyre::eyre!("CBOR encode: {e}"))?;
-                tokio::fs::write(export, &buf).await?;
+                export_report(&suite, export)
+                    .await
+                    .wrap_err_with(|| format!("exporting suite report to {}", export.display()))?;
                 println!(
                     "{}",
                     format!("Suite report exported to {}", export.display()).cyan()

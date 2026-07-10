@@ -143,7 +143,8 @@ pub enum Commands {
 
     /// Print previously saved results
     Report {
-        /// Path to the results file (CBOR).
+        /// Path to a saved results file: a single-test or suite CBOR
+        /// export (auto-detected).
         #[arg(short, long)]
         file: PathBuf,
 
@@ -192,7 +193,9 @@ pub enum Commands {
         #[arg(long, value_enum, default_value_t = AccountingArg::Goodput)]
         accounting: AccountingArg,
 
-        /// Export the suite report to a CBOR file.
+        /// Export the suite report to file. `.cbor` (or no extension)
+        /// writes the raw CBOR data report; `.html` writes a rendered
+        /// single-file report. Other extensions are rejected.
         #[arg(short, long)]
         export: Option<PathBuf>,
     },

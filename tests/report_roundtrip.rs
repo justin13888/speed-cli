@@ -1,57 +1,14 @@
 //! Verify that a `TestReport` survives a CBOR round-trip
 //! (export → file → import) without losing per-sample data.
 
-use chrono::Utc;
+mod common;
+
+use common::make_sample_report;
 use eyre::Result;
 use indexmap::IndexSet;
-use speed_cli::TestType;
-use speed_cli::performance::http::HttpVersion;
-use speed_cli::report::{
-    HttpTestConfig, NetworkTestResult, Sample, StreamSamples, TestConfig, TestReport, TestResult,
-    ThroughputResult,
-};
+use speed_cli::report::{TestReport, TestResult};
 use speed_cli::utils::export::export_report_cbor;
 use speed_cli::utils::import::import_report_cbor;
-
-fn make_sample_report() -> TestReport {
-    let mut net = NetworkTestResult::new_http();
-    let samples: Vec<Sample> = (0..5)
-        .map(|i| Sample::success(i * 10_000, 10_000, 1024, false))
-        .collect();
-    let stream_start = samples.first().map(|s| s.t_start_us).unwrap_or(0);
-    let throughput = ThroughputResult {
-        streams: vec![StreamSamples {
-            stream_id: 0,
-            start_offset_us: stream_start,
-            samples,
-        }],
-        total_duration_us: 1_000_000,
-        timestamp: Utc::now(),
-        udp_stats: None,
-        udp_series: Vec::new(),
-        udp_series_window_us: 0,
-    };
-    net.download.insert(1024, throughput.clone());
-    net.upload.insert(1024, throughput);
-
-    let config = HttpTestConfig::new(
-        "127.0.0.1".to_string(),
-        Some(8080),
-        1,
-        1,
-        TestType::Bidirectional,
-        Vec::<usize>::new(),
-        Some(1024),
-        HttpVersion::HTTP1,
-    );
-
-    TestReport::new(
-        Utc::now(),
-        TestConfig::Http(config),
-        TestResult::Network(net),
-        Utc::now(),
-    )
-}
 
 fn assert_reports_equivalent(original: &TestReport, decoded: &TestReport) {
     assert_eq!(original.build, decoded.build);
