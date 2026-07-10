@@ -20,17 +20,17 @@ use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
-use crate::TestType;
 use crate::performance::engine::{
     LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
     measurement_duration_us, offset_us, sample_is_warmup,
 };
 use crate::performance::handshake::client_hello_io;
-use crate::performance::quic::QUIC_RAW_ALPN;
+use crate::performance::quic::{QUIC_RAW_ALPN, quic_transport_config};
 use crate::report::{
     ConnectionError, ConnectionTimings, LatencyMeasurement, LatencyResult, NetworkTestResult,
     PeerIdentity, QuicTestConfig, Sample, StreamSamples, TestReport, ThroughputResult,
 };
+use crate::{CongestionAlgorithm, TestType};
 
 /// Certificate verifier that accepts any server certificate. This
 /// mirrors `reqwest`'s `danger_accept_invalid_certs(true)` used
@@ -84,7 +84,7 @@ impl ServerCertVerifier for AcceptAnyServerCert {
     }
 }
 
-fn client_config() -> Result<ClientConfig> {
+fn client_config(congestion: CongestionAlgorithm) -> Result<ClientConfig> {
     let mut crypto =
         rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -96,10 +96,19 @@ fn client_config() -> Result<ClientConfig> {
 
     let quic = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|e| eyre!("raw-QUIC client crypto config: {e}"))?;
-    Ok(ClientConfig::new(Arc::new(quic)))
+    let mut config = ClientConfig::new(Arc::new(quic));
+    // The client's controller governs upload; the server-side listener
+    // (selected by port) governs download. Both sides use the same
+    // algorithm because the client dials the matching listener.
+    config.transport_config(quic_transport_config(congestion));
+    Ok(config)
 }
 
-async fn connect(server: &str, port: u16) -> Result<(Endpoint, Connection)> {
+async fn connect(
+    server: &str,
+    port: u16,
+    congestion: CongestionAlgorithm,
+) -> Result<(Endpoint, Connection)> {
     let addr: SocketAddr = tokio::net::lookup_host((server, port))
         .await
         .map_err(|e| eyre!("raw-QUIC: resolving {server}:{port}: {e}"))?
@@ -113,7 +122,7 @@ async fn connect(server: &str, port: u16) -> Result<(Endpoint, Connection)> {
     };
     let mut endpoint =
         Endpoint::client(bind).map_err(|e| eyre!("raw-QUIC: client endpoint: {e}"))?;
-    endpoint.set_default_client_config(client_config()?);
+    endpoint.set_default_client_config(client_config(congestion)?);
 
     let conn = endpoint
         .connect(addr, "localhost")
@@ -138,7 +147,7 @@ pub async fn run_quic_client(config: QuicTestConfig) -> Result<TestReport> {
     // Time the connection establishment: `connect().await` resolves once the
     // QUIC handshake completes, which subsumes the TLS 1.3 exchange.
     let handshake_start = Instant::now();
-    let (endpoint, conn) = connect(&config.server, config.port).await?;
+    let (endpoint, conn) = connect(&config.server, config.port, config.congestion).await?;
     let quic_handshake_us = handshake_start.elapsed().as_micros() as u64;
     let remote_addr = conn.remote_address();
 

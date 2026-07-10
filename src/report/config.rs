@@ -9,7 +9,7 @@ use crate::constants::DEFAULT_CHUNK_SIZE;
 use crate::report::ThroughputAccounting;
 use crate::utils::format::format_bytes;
 use crate::{
-    TestType,
+    CongestionAlgorithm, TestType,
     constants::{
         DEFAULT_HTTP_PAYLOAD_SIZES, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT,
         DEFAULT_TCP_PAYLOAD_SIZES, DEFAULT_TCP_PORT, DEFAULT_UDP_PAYLOAD_SIZES, DEFAULT_UDP_PORT,
@@ -156,6 +156,11 @@ pub struct QuicTestConfig {
     pub warmup: Duration,
     #[serde(default = "default_accounting")]
     pub accounting: ThroughputAccounting,
+    /// Congestion controller the QUIC transport ran with. Recorded so
+    /// reports are comparable; back-fills to cubic for reports written
+    /// before the knob existed (correct — cubic was the only option).
+    #[serde(default)]
+    pub congestion: CongestionAlgorithm,
 }
 
 impl QuicTestConfig {
@@ -185,6 +190,7 @@ impl QuicTestConfig {
             read_buffer_size: DEFAULT_TCP_READ_BUFFER,
             warmup: DEFAULT_WARMUP,
             accounting: ThroughputAccounting::Goodput,
+            congestion: CongestionAlgorithm::default(),
         }
     }
 
@@ -195,6 +201,11 @@ impl QuicTestConfig {
 
     pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
         self.accounting = accounting;
+        self
+    }
+
+    pub fn with_congestion(mut self, congestion: CongestionAlgorithm) -> Self {
+        self.congestion = congestion;
         self
     }
 }
@@ -310,6 +321,11 @@ pub struct HttpTestConfig {
     /// Goodput vs wire-rate accounting.
     #[serde(default = "default_accounting")]
     pub accounting: ThroughputAccounting,
+    /// Congestion controller for the QUIC transport. Meaningful for
+    /// HTTP/3 only; TCP-backed versions always use the OS controller
+    /// and ignore this. Back-fills to cubic for old reports.
+    #[serde(default)]
+    pub congestion: CongestionAlgorithm,
 }
 
 impl HttpTestConfig {
@@ -351,6 +367,7 @@ impl HttpTestConfig {
             http_version,
             warmup: DEFAULT_WARMUP,
             accounting: ThroughputAccounting::Goodput,
+            congestion: CongestionAlgorithm::default(),
         }
     }
 
@@ -361,6 +378,11 @@ impl HttpTestConfig {
 
     pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
         self.accounting = accounting;
+        self
+    }
+
+    pub fn with_congestion(mut self, congestion: CongestionAlgorithm) -> Self {
+        self.congestion = congestion;
         self
     }
 }
@@ -407,6 +429,12 @@ impl Display for QuicTestConfig {
             "  {}: {}",
             "Parallel Streams".bright_blue().bold(),
             self.parallel_connections.to_string().green()
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Congestion Control".bright_blue().bold(),
+            self.congestion.to_string().yellow()
         )?;
 
         let sizes: Vec<String> = self
@@ -565,6 +593,16 @@ impl Display for HttpTestConfig {
             "HTTP Version".bright_blue().bold(),
             format!("{:?}", self.http_version).yellow()
         )?;
+        // Congestion control is a QUIC property; showing it for
+        // TCP-backed versions would imply a knob that does not exist.
+        if matches!(self.http_version, HttpVersion::HTTP3) {
+            writeln!(
+                f,
+                "  {}: {}",
+                "Congestion Control".bright_blue().bold(),
+                self.congestion.to_string().yellow()
+            )?;
+        }
 
         let sizes: Vec<String> = self
             .payload_sizes

@@ -12,7 +12,6 @@ use std::time::Duration;
 use colored::Colorize as _;
 use eyre::Result;
 
-use crate::TestType;
 use crate::control::{Handshake, TestTransport, perform_handshake};
 use crate::performance::http::HttpVersion;
 use crate::performance::http::client::run_http_test;
@@ -23,6 +22,7 @@ use crate::report::{
     HttpTestConfig, PhaseParams, QuicTestConfig, SuiteReport, TcpTestConfig, ThroughputAccounting,
     UdpTestConfig,
 };
+use crate::{CongestionAlgorithm, TestType};
 
 /// Shared I/O unit for the suite: the TCP/QUIC per-operation throughput
 /// payload *and* the HTTP chunk size. Unifying these is what makes the
@@ -85,6 +85,11 @@ pub struct SuiteConfig {
     /// When false, TLS phases (HTTP/2-TLS, HTTP/3) are force-skipped
     /// even if the server advertises them.
     pub include_tls: bool,
+    /// Congestion controller for the raw-QUIC and HTTP/3 phases. A
+    /// single knob, deliberately not a matrix dimension: the phase
+    /// count is identical for cubic and bbr. TCP-based phases always
+    /// use the OS controller.
+    pub congestion: CongestionAlgorithm,
 }
 
 impl SuiteConfig {
@@ -100,6 +105,7 @@ impl SuiteConfig {
             http_payload: SUITE_HTTP_PAYLOAD,
             accounting: ThroughputAccounting::Goodput,
             include_tls: true,
+            congestion: CongestionAlgorithm::default(),
         }
     }
 }
@@ -415,7 +421,7 @@ async fn run_quic_phase(
     cfg: &SuiteConfig,
     params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
-    let (host, port) = handshake.endpoint(TestTransport::QuicRaw)?;
+    let (host, port) = handshake.endpoint_with(TestTransport::QuicRaw, cfg.congestion)?;
     let payload_sizes: Vec<usize> = params.payload_size.into_iter().collect();
     let conf = QuicTestConfig::new(
         host,
@@ -426,7 +432,8 @@ async fn run_quic_phase(
         payload_sizes,
     )
     .with_warmup(cfg.warmup)
-    .with_accounting(cfg.accounting);
+    .with_accounting(cfg.accounting)
+    .with_congestion(cfg.congestion);
     run_quic_client(conf).await
 }
 
@@ -437,7 +444,13 @@ async fn run_http_phase(
     transport: TestTransport,
     params: PhaseParams,
 ) -> Result<crate::report::TestReport> {
-    let (host, port) = handshake.endpoint(transport)?;
+    // Only HTTP/3 rides QUIC; the TCP-backed versions have no
+    // congestion listener variants to choose between.
+    let (host, port) = if transport == TestTransport::Http3 {
+        handshake.endpoint_with(transport, cfg.congestion)?
+    } else {
+        handshake.endpoint(transport)?
+    };
     // For latency phases `payload_size` is `None`; `HttpTestConfig::new`
     // backfills DEFAULT_HTTP_PAYLOAD_SIZES on an empty set, so pass the
     // I/O unit explicitly to keep the recorded config honest. The HTTP
@@ -454,6 +467,11 @@ async fn run_http_phase(
         version,
     )
     .with_warmup(cfg.warmup)
-    .with_accounting(cfg.accounting);
+    .with_accounting(cfg.accounting)
+    .with_congestion(if transport == TestTransport::Http3 {
+        cfg.congestion
+    } else {
+        CongestionAlgorithm::default()
+    });
     run_http_test(conf).await
 }

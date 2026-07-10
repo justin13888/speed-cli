@@ -15,5 +15,25 @@
 pub mod client;
 pub mod server;
 
+use std::sync::Arc;
+
+use crate::CongestionAlgorithm;
+
 /// ALPN identifier for the raw-QUIC test protocol.
 pub const QUIC_RAW_ALPN: &[u8] = b"speedcli-quic-raw";
+
+/// Build the quinn transport config for the requested congestion
+/// controller. CUBIC is quinn's default; it is set explicitly anyway so
+/// the two arms stay symmetric and the choice is visible in one place.
+/// Shared by the raw-QUIC client/server and the HTTP/3 server (the
+/// HTTP/3 *client* is reqwest, which has its own BBR toggle).
+pub fn quic_transport_config(congestion: CongestionAlgorithm) -> Arc<quinn::TransportConfig> {
+    let mut transport = quinn::TransportConfig::default();
+    match congestion {
+        CongestionAlgorithm::Cubic => transport
+            .congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default())),
+        CongestionAlgorithm::Bbr => transport
+            .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default())),
+    };
+    Arc::new(transport)
+}

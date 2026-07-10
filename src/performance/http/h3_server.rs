@@ -14,9 +14,11 @@ use bytes::{Buf, Bytes};
 use eyre::{Result, eyre};
 use tokio_util::sync::CancellationToken;
 
+use crate::CongestionAlgorithm;
 use crate::constants::DEFAULT_CHUNK_SIZE;
 use crate::performance::http::payload;
 use crate::performance::http::server::{SERVER_ID_HEADER, server_identity_header_value};
+use crate::performance::quic::quic_transport_config;
 use crate::utils::tls::TlsMaterial;
 
 /// Configuration for the HTTP/3 server.
@@ -25,6 +27,10 @@ pub struct Http3ServerConfig {
     pub max_upload_size: usize,
     /// Shared TLS material. HTTP/3 mandates TLS.
     pub tls: TlsMaterial,
+    /// Congestion controller for this listener. The server binds one
+    /// listener per algorithm; clients choose by dialing the matching
+    /// advertised port.
+    pub congestion: CongestionAlgorithm,
 }
 
 /// Bind a QUIC endpoint for HTTP/3 on `addr` (port `0` => OS-assigned).
@@ -33,7 +39,8 @@ pub fn bind_h3(addr: SocketAddr, cfg: &Http3ServerConfig) -> Result<(quinn::Endp
     let server_config = cfg.tls.server_config(&[b"h3"])?;
     let quic = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
         .map_err(|e| eyre!("HTTP/3 QUIC crypto config: {e}"))?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
+    server_config.transport_config(quic_transport_config(cfg.congestion));
     let endpoint = quinn::Endpoint::server(server_config, addr)
         .map_err(|e| eyre!("HTTP/3 endpoint bind on {addr}: {e}"))?;
     let port = endpoint

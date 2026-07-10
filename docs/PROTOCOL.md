@@ -10,9 +10,33 @@ The server exposes one control endpoint on `--control-port` (default `9000`):
 
 - `GET /manifest` (also `GET /`) → the **manifest** as JSON: the protocol
   version, the report schema version, and one entry per enabled listener
-  (`{ transport, host, port }`). The client uses this to discover the real
-  (usually ephemeral) per-protocol ports and to verify compatibility.
+  (`{ transport, host, port, congestion }`). The client uses this to discover
+  the real (usually ephemeral) per-protocol ports and to verify compatibility.
 - `GET /health` → `ok`.
+
+### The `congestion` listener field
+
+`congestion` (`"cubic"` or `"bbr"`) names the congestion controller a listener
+runs with. It only matters for the QUIC transports (`quic-raw`, `http3`): a
+server binds **one endpoint per algorithm** for each of those and advertises
+the same transport twice with different `congestion` values and ports. A client
+picks the algorithm by dialing the matching port (and configures its own QUIC
+transport to match), so both directions of a test use the same controller
+without any per-connection negotiation.
+
+Compatibility rules (why this needs no protocol-version bump):
+
+- A missing `congestion` field means `cubic` — manifests from old servers stay
+  valid.
+- For a given transport, the `cubic` entry is always listed **before** any
+  `bbr` entry. Old clients resolve listeners first-match, so they keep landing
+  on cubic. This ordering is a compatibility guarantee, not an implementation
+  detail.
+- A client that wants `bbr` from a server that does not advertise it gets a
+  hard error before any test runs, never a silent cubic test.
+
+TCP-based transports carry `"cubic"` as an inert placeholder; there is no
+portable per-socket TCP congestion knob, so no TCP listener variants exist.
 
 ## Identity handshake (`'H'`)
 

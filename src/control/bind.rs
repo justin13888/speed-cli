@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::CongestionAlgorithm;
 use crate::control::manifest::{ListenerEntry, TestTransport};
 use crate::performance::http::h3_server::{Http3ServerConfig, bind_h3, run_h3_server};
 use crate::performance::http::server::{
@@ -43,6 +44,10 @@ pub struct PortOverrides {
     pub https: Option<u16>,
     pub http3: Option<u16>,
     pub quic: Option<u16>,
+    /// The BBR variants of the two QUIC listeners (each QUIC protocol
+    /// binds one endpoint per congestion controller).
+    pub http3_bbr: Option<u16>,
+    pub quic_bbr: Option<u16>,
 }
 
 /// Shared runtime knobs every test listener needs once it starts
@@ -56,14 +61,16 @@ pub struct ServerRuntime {
 }
 
 /// A test listener whose socket is already bound but not yet serving.
+/// The QUIC variants remember which congestion controller was baked
+/// into the endpoint at bind time, for labels and server config.
 enum BoundListener {
     TcpRaw(TcpListener),
     UdpBlaster(Box<BlasterServer>),
     Http1(TcpListener),
     H2c(TcpListener),
     Http2Tls(std::net::TcpListener),
-    Http3(quinn::Endpoint),
-    QuicRaw(quinn::Endpoint),
+    Http3(quinn::Endpoint, CongestionAlgorithm),
+    QuicRaw(quinn::Endpoint, CongestionAlgorithm),
 }
 
 /// The result of [`bind_all`]: spawn-ready listeners plus the manifest
@@ -89,6 +96,7 @@ pub async fn bind_all(
 
     let push = |transport: TestTransport,
                 port: u16,
+                congestion: CongestionAlgorithm,
                 bound: BoundListener,
                 listeners: &mut Vec<(TestTransport, BoundListener)>,
                 entries: &mut Vec<ListenerEntry>| {
@@ -96,6 +104,7 @@ pub async fn bind_all(
             transport,
             host: host.clone(),
             port,
+            congestion,
         });
         listeners.push((transport, bound));
     };
@@ -108,6 +117,7 @@ pub async fn bind_all(
         push(
             TestTransport::TcpRaw,
             port,
+            CongestionAlgorithm::default(),
             BoundListener::TcpRaw(l),
             &mut listeners,
             &mut entries,
@@ -122,6 +132,7 @@ pub async fn bind_all(
         push(
             TestTransport::UdpBlaster,
             port,
+            CongestionAlgorithm::default(),
             BoundListener::UdpBlaster(Box::new(server)),
             &mut listeners,
             &mut entries,
@@ -136,6 +147,7 @@ pub async fn bind_all(
         push(
             TestTransport::Http1,
             h1_port,
+            CongestionAlgorithm::default(),
             BoundListener::Http1(h1),
             &mut listeners,
             &mut entries,
@@ -148,6 +160,7 @@ pub async fn bind_all(
         push(
             TestTransport::H2c,
             h2c_port,
+            CongestionAlgorithm::default(),
             BoundListener::H2c(h2c),
             &mut listeners,
             &mut entries,
@@ -161,40 +174,58 @@ pub async fn bind_all(
         push(
             TestTransport::Http2Tls,
             port,
+            CongestionAlgorithm::default(),
             BoundListener::Http2Tls(l),
             &mut listeners,
             &mut entries,
         );
     }
 
+    // The QUIC protocols bind one endpoint per congestion controller
+    // and advertise both. Ordering contract: the cubic entry is pushed
+    // first, so legacy first-match clients keep resolving cubic.
     if enabled.http3 {
-        let cfg = Http3ServerConfig {
-            max_upload_size: rt.max_upload_size,
-            tls: rt.tls.clone(),
-        };
-        let (endpoint, port) = bind_h3(addr(rt.bind, overrides.http3), &cfg)?;
-        push(
-            TestTransport::Http3,
-            port,
-            BoundListener::Http3(endpoint),
-            &mut listeners,
-            &mut entries,
-        );
+        for (congestion, port_override) in [
+            (CongestionAlgorithm::Cubic, overrides.http3),
+            (CongestionAlgorithm::Bbr, overrides.http3_bbr),
+        ] {
+            let cfg = Http3ServerConfig {
+                max_upload_size: rt.max_upload_size,
+                tls: rt.tls.clone(),
+                congestion,
+            };
+            let (endpoint, port) = bind_h3(addr(rt.bind, port_override), &cfg)?;
+            push(
+                TestTransport::Http3,
+                port,
+                congestion,
+                BoundListener::Http3(endpoint, congestion),
+                &mut listeners,
+                &mut entries,
+            );
+        }
     }
 
     if enabled.quic {
-        let cfg = QuicServerConfig {
-            tls: rt.tls.clone(),
-            buffer_size: rt.buffer_size,
-        };
-        let (endpoint, port) = bind_quic(addr(rt.bind, overrides.quic), &cfg)?;
-        push(
-            TestTransport::QuicRaw,
-            port,
-            BoundListener::QuicRaw(endpoint),
-            &mut listeners,
-            &mut entries,
-        );
+        for (congestion, port_override) in [
+            (CongestionAlgorithm::Cubic, overrides.quic),
+            (CongestionAlgorithm::Bbr, overrides.quic_bbr),
+        ] {
+            let cfg = QuicServerConfig {
+                tls: rt.tls.clone(),
+                buffer_size: rt.buffer_size,
+                congestion,
+            };
+            let (endpoint, port) = bind_quic(addr(rt.bind, port_override), &cfg)?;
+            push(
+                TestTransport::QuicRaw,
+                port,
+                congestion,
+                BoundListener::QuicRaw(endpoint, congestion),
+                &mut listeners,
+                &mut entries,
+            );
+        }
     }
 
     Ok(BoundListeners { listeners, entries })
@@ -252,22 +283,33 @@ impl BoundListeners {
                         run_https_server(l, rustls, enable_cors, max_upload_size, cancel).await
                     }),
                 ),
-                BoundListener::Http3(endpoint) => (
-                    "HTTP/3",
+                BoundListener::Http3(endpoint, congestion) => (
+                    match congestion {
+                        CongestionAlgorithm::Cubic => "HTTP/3",
+                        CongestionAlgorithm::Bbr => "HTTP/3 (bbr)",
+                    },
                     tokio::spawn(run_h3_server(
                         endpoint,
                         Http3ServerConfig {
                             max_upload_size,
                             tls,
+                            congestion,
                         },
                         cancel,
                     )),
                 ),
-                BoundListener::QuicRaw(endpoint) => (
-                    "QUIC",
+                BoundListener::QuicRaw(endpoint, congestion) => (
+                    match congestion {
+                        CongestionAlgorithm::Cubic => "QUIC",
+                        CongestionAlgorithm::Bbr => "QUIC (bbr)",
+                    },
                     tokio::spawn(run_quic_server(
                         endpoint,
-                        QuicServerConfig { tls, buffer_size },
+                        QuicServerConfig {
+                            tls,
+                            buffer_size,
+                            congestion,
+                        },
                         cancel,
                     )),
                 ),

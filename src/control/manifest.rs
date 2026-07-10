@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::CongestionAlgorithm;
 use crate::constants::PROTOCOL_VERSION;
 use crate::report::{PeerIdentity, REPORT_SCHEMA_VERSION};
 
@@ -60,6 +61,13 @@ pub struct ListenerEntry {
     pub host: String,
     /// The real (often ephemeral) port the listener is bound to.
     pub port: u16,
+    /// Congestion controller of this listener. Only meaningful for the
+    /// QUIC transports, where the server binds one listener per
+    /// algorithm and a client chooses by port. Absent (old servers) =>
+    /// cubic. For a given transport the cubic entry is always listed
+    /// before any bbr entry, so first-match clients keep getting cubic.
+    #[serde(default)]
+    pub congestion: CongestionAlgorithm,
 }
 
 /// JSON document served at `GET /` and `GET /manifest`.
@@ -89,7 +97,22 @@ impl ServerManifest {
     }
 
     /// Look up the listener for a given transport, if advertised.
+    /// First match — for the QUIC transports that is the cubic entry
+    /// (the manifest guarantees cubic-before-bbr ordering).
     pub fn listener(&self, transport: TestTransport) -> Option<&ListenerEntry> {
         self.listeners.iter().find(|l| l.transport == transport)
+    }
+
+    /// Look up the listener for a given transport *and* congestion
+    /// controller. Entries from old servers carry the serde-default
+    /// (cubic), so a cubic lookup always behaves like [`Self::listener`].
+    pub fn listener_with(
+        &self,
+        transport: TestTransport,
+        congestion: CongestionAlgorithm,
+    ) -> Option<&ListenerEntry> {
+        self.listeners
+            .iter()
+            .find(|l| l.transport == transport && l.congestion == congestion)
     }
 }

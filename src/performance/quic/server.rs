@@ -11,9 +11,10 @@ use eyre::{Result, eyre};
 use quinn::{RecvStream, SendStream};
 use tokio_util::sync::CancellationToken;
 
+use crate::CongestionAlgorithm;
 use crate::performance::handshake::server_hello_io;
 use crate::performance::http::payload::chunk_of;
-use crate::performance::quic::QUIC_RAW_ALPN;
+use crate::performance::quic::{QUIC_RAW_ALPN, quic_transport_config};
 use crate::utils::tls::TlsMaterial;
 
 /// Configuration for the raw-QUIC server.
@@ -22,6 +23,10 @@ pub struct QuicServerConfig {
     pub tls: TlsMaterial,
     /// Per-write chunk size for download/full-duplex sends.
     pub buffer_size: usize,
+    /// Congestion controller for this listener. The server binds one
+    /// listener per algorithm; clients choose by dialing the matching
+    /// advertised port.
+    pub congestion: CongestionAlgorithm,
 }
 
 /// Bind a QUIC endpoint for the raw-QUIC test on `addr` (port `0` =>
@@ -30,7 +35,8 @@ pub fn bind_quic(addr: SocketAddr, cfg: &QuicServerConfig) -> Result<(quinn::End
     let server_config = cfg.tls.server_config(&[QUIC_RAW_ALPN])?;
     let quic = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
         .map_err(|e| eyre!("raw-QUIC crypto config: {e}"))?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
+    server_config.transport_config(quic_transport_config(cfg.congestion));
     let endpoint = quinn::Endpoint::server(server_config, addr)
         .map_err(|e| eyre!("raw-QUIC endpoint bind on {addr}: {e}"))?;
     let port = endpoint

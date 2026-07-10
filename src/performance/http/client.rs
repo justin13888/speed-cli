@@ -15,7 +15,7 @@ use tokio::time::sleep;
 use tracing::trace;
 
 use crate::{
-    TestType,
+    CongestionAlgorithm, TestType,
     constants::{HTTP2_CONNECTION_WINDOW, HTTP2_MAX_FRAME_SIZE, HTTP2_STREAM_WINDOW},
     performance::engine::{
         LatencyStatsCollector, ProgressBarType, ThroughputStatsCollector, create_progress_bar,
@@ -100,7 +100,7 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
 
     let mut result = NetworkTestResult::new_http().with_accounting(config.accounting);
 
-    let client = create_http_client(&config.http_version).await?;
+    let client = create_http_client(&config.http_version, config.congestion).await?;
 
     let info_url = format!("{}/info", config.server_url);
     let server_identity: Option<PeerIdentity>;
@@ -287,7 +287,10 @@ pub async fn run_http_test(config: HttpTestConfig) -> Result<TestReport> {
     Ok(report)
 }
 
-async fn create_http_client(version: &HttpVersion) -> Result<Client> {
+async fn create_http_client(
+    version: &HttpVersion,
+    congestion: CongestionAlgorithm,
+) -> Result<Client> {
     ensure_crypto_provider();
 
     let mut builder = ClientBuilder::new()
@@ -325,6 +328,12 @@ async fn create_http_client(version: &HttpVersion) -> Result<Client> {
         }
         HttpVersion::HTTP3 => {
             builder = builder.http3_prior_knowledge();
+            // Client-side controller governs upload; the server's
+            // BBR-configured listener (chosen by port during the
+            // handshake) governs download.
+            if congestion == CongestionAlgorithm::Bbr {
+                builder = builder.http3_congestion_bbr();
+            }
         }
     }
 

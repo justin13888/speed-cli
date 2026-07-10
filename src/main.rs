@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
             chunk_size,
             accounting,
             target_rate_mbps,
+            congestion,
         } => {
             if warmup >= duration {
                 return Err(eyre::eyre!(
@@ -69,6 +70,17 @@ async fn main() -> Result<()> {
             let target_rate_bps: u64 = target_rate_mbps.saturating_mul(1_000_000);
 
             let mode = protocol;
+
+            // Congestion control is a QUIC knob; rejecting it for TCP
+            // protocols beats silently testing something else.
+            if congestion == speed_cli::CongestionAlgorithm::Bbr
+                && !matches!(mode, ClientMode::QUIC | ClientMode::HTTP3)
+            {
+                return Err(eyre::eyre!(
+                    "--congestion bbr only applies to the QUIC-based protocols (-p quic, -p http3); \
+                     TCP-based protocols use the OS congestion controller"
+                ));
+            }
 
             // Report rows are keyed by payload size in insertion order; sort the
             // user-supplied sizes ascending so the report is deterministic
@@ -104,7 +116,14 @@ async fn main() -> Result<()> {
                 ClientMode::HTTP2 => TestTransport::Http2Tls,
                 ClientMode::HTTP3 => TestTransport::Http3,
             };
-            let (host, port) = handshake.endpoint(transport)?;
+            // QUIC transports resolve the listener matching the chosen
+            // congestion controller; the rest use the first match.
+            let (host, port) = match mode {
+                ClientMode::QUIC | ClientMode::HTTP3 => {
+                    handshake.endpoint_with(transport, congestion)?
+                }
+                _ => handshake.endpoint(transport)?,
+            };
 
             let report: TestReport = match mode {
                 ClientMode::TCP => {
@@ -144,7 +163,8 @@ async fn main() -> Result<()> {
                         test_sizes,
                     )
                     .with_warmup(warmup)
-                    .with_accounting(accounting);
+                    .with_accounting(accounting)
+                    .with_congestion(congestion);
                     run_quic_client(config).await?
                 }
                 ClientMode::HTTP1 | ClientMode::HTTP2 | ClientMode::H2C | ClientMode::HTTP3 => {
@@ -166,7 +186,8 @@ async fn main() -> Result<()> {
                         http_version,
                     )
                     .with_warmup(warmup)
-                    .with_accounting(accounting);
+                    .with_accounting(accounting)
+                    .with_congestion(congestion);
                     run_http_test(config).await?
                 }
             };
@@ -197,6 +218,8 @@ async fn main() -> Result<()> {
             https_port,
             http3_port,
             quic_port,
+            http3_bbr_port,
+            quic_bbr_port,
             cert,
             key,
         } => {
@@ -260,6 +283,8 @@ async fn main() -> Result<()> {
                 https: https_port,
                 http3: http3_port,
                 quic: quic_port,
+                http3_bbr: http3_bbr_port,
+                quic_bbr: quic_bbr_port,
             };
 
             // Bind every test listener up front so the manifest carries
@@ -274,9 +299,15 @@ async fn main() -> Result<()> {
                     .bold()
             );
             for entry in &manifest.listeners {
+                let label = match entry.congestion {
+                    speed_cli::CongestionAlgorithm::Cubic => entry.transport.label().to_string(),
+                    speed_cli::CongestionAlgorithm::Bbr => {
+                        format!("{} (bbr)", entry.transport.label())
+                    }
+                };
                 println!(
-                    "  {:<7} -> {}:{}",
-                    entry.transport.label().bright_white().bold(),
+                    "  {:<12} -> {}:{}",
+                    label.bright_white().bold(),
                     bind,
                     entry.port.to_string().yellow()
                 );
@@ -454,6 +485,7 @@ async fn main() -> Result<()> {
             udp_target_rate_mbps,
             no_tls,
             accounting,
+            congestion,
             export,
         } => {
             if warmup >= duration {
@@ -478,6 +510,7 @@ async fn main() -> Result<()> {
                     }
                 },
                 include_tls: !no_tls,
+                congestion,
                 // `server` plus the shared I/O-size defaults come from `new`.
                 ..SuiteConfig::new(server)
             };

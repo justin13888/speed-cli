@@ -1,7 +1,7 @@
 use std::{net::IpAddr, path::PathBuf};
 
 use crate::constants::DEFAULT_CONTROL_PORT;
-use crate::{ClientMode, TestType};
+use crate::{ClientMode, CongestionAlgorithm, TestType};
 use clap::{Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -86,6 +86,13 @@ pub enum Commands {
         /// (the default) means "saturate".
         #[arg(long, default_value = "0")]
         target_rate_mbps: u64,
+
+        /// Congestion controller for the QUIC-based protocols (`-p quic`,
+        /// `-p http3`), applied on both sides via the server's matching
+        /// listener. TCP-based protocols always use the OS controller
+        /// and reject `bbr`.
+        #[arg(long, value_enum, default_value_t = CongestionAlgorithm::Cubic)]
+        congestion: CongestionAlgorithm,
     },
 
     /// Run as server.
@@ -129,6 +136,13 @@ pub enum Commands {
         http3_port: Option<u16>,
         #[arg(long)]
         quic_port: Option<u16>,
+        /// The QUIC protocols each bind a second, BBR-configured
+        /// listener alongside the default CUBIC one; these pin those
+        /// extra ports.
+        #[arg(long)]
+        http3_bbr_port: Option<u16>,
+        #[arg(long)]
+        quic_bbr_port: Option<u16>,
 
         /// TLS certificate file path (*.pem). Shared by the HTTPS,
         /// HTTP/3 and raw-QUIC listeners. A self-signed certificate is
@@ -192,6 +206,13 @@ pub enum Commands {
         /// Goodput vs wire-rate accounting.
         #[arg(long, value_enum, default_value_t = AccountingArg::Goodput)]
         accounting: AccountingArg,
+
+        /// Congestion controller for the raw-QUIC and HTTP/3 phases.
+        /// One knob, not an extra matrix dimension: the suite runs the
+        /// same phase count either way. TCP-based phases always use the
+        /// OS controller.
+        #[arg(long, value_enum, default_value_t = CongestionAlgorithm::Cubic)]
+        congestion: CongestionAlgorithm,
 
         /// Export the suite report to file. `.cbor` (or no extension)
         /// writes the raw CBOR data report; `.html` writes a rendered

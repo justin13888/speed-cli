@@ -11,6 +11,7 @@ use std::time::Duration;
 use colored::Colorize as _;
 use eyre::{Result, eyre};
 
+use crate::CongestionAlgorithm;
 use crate::constants::PROTOCOL_VERSION;
 use crate::control::manifest::{ServerManifest, TestTransport};
 
@@ -27,13 +28,35 @@ pub struct Handshake {
 
 impl Handshake {
     /// Resolve the `(host, port)` a client should dial for `transport`.
-    /// Errors if the server did not advertise that transport.
+    /// Errors if the server did not advertise that transport. Resolves
+    /// the cubic listener for QUIC transports (manifest ordering makes
+    /// first-match == cubic).
     pub fn endpoint(&self, transport: TestTransport) -> Result<(String, u16)> {
         match self.manifest.listener(transport) {
             Some(entry) => Ok((self.server_host.clone(), entry.port)),
             None => Err(eyre!(
                 "server does not expose the {} test listener (not in manifest)",
                 transport.label()
+            )),
+        }
+    }
+
+    /// Resolve the `(host, port)` for `transport` with a specific
+    /// congestion controller. Only the QUIC transports advertise more
+    /// than one; asking an old (or non-QUIC) listener for bbr yields a
+    /// clear error rather than silently testing cubic.
+    pub fn endpoint_with(
+        &self,
+        transport: TestTransport,
+        congestion: CongestionAlgorithm,
+    ) -> Result<(String, u16)> {
+        match self.manifest.listener_with(transport, congestion) {
+            Some(entry) => Ok((self.server_host.clone(), entry.port)),
+            None => Err(eyre!(
+                "server does not expose the {} test listener with {} congestion control \
+                 (server too old, protocol not enabled, or algorithm not offered)",
+                transport.label(),
+                congestion
             )),
         }
     }

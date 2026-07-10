@@ -45,6 +45,31 @@ pub enum TestType {
     LatencyUnderLoad,
 }
 
+/// Congestion-control algorithm for the QUIC-based transports (raw QUIC
+/// and HTTP/3). TCP-based protocols always use the OS default — there
+/// is no portable per-socket TCP knob — so this never applies to them.
+/// CUBIC is quinn's (and the internet's) default; BBR is the opt-in
+/// alternative for high-BDP or lossy paths.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
+pub enum CongestionAlgorithm {
+    #[default]
+    Cubic,
+    Bbr,
+}
+
+impl fmt::Display for CongestionAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CongestionAlgorithm::Cubic => write!(f, "cubic"),
+            CongestionAlgorithm::Bbr => write!(f, "bbr"),
+        }
+    }
+}
+
 use std::fmt;
 impl fmt::Display for TestType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
