@@ -22,9 +22,11 @@ All common commands are mise tasks (run `mise tasks` to list them):
 | `mise run fmt` | format all code |
 | `mise run lint` | `cargo clippy --all-targets -- -D warnings` |
 | `mise run lint-fix` | apply clippy autofixes |
-| `mise run check` | fmt-check + lint + typos + machete (the static gate) |
+| `mise run check` | fmt-check + lint + typos + machete + no-default-features check (the static gate) |
 | `mise run ci` | `check` + `test` (what CI runs) |
 | `mise run bench` | criterion benchmarks |
+| `mise run bench-loopback` | sustained loopback suite run for A/B comparisons ([docs/PROFILING.md](docs/PROFILING.md)) |
+| `mise run flamegraph-server` / `flamegraph-client` | profile a loopback run with cargo-flamegraph |
 
 ## Git hooks
 

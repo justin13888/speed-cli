@@ -1,7 +1,8 @@
 //! UDP blaster: a fixed-rate, no-retransmit UDP test protocol with
 //! receiver-side loss / OOO / jitter accounting. See `protocol` for the
 //! wire format. The previous STP / BBR implementation has been retired
-//! - see the Phase 3 entry in the project plan for context.
+//! — see ROADMAP.md ("Retired: STP / BBR UDP implementation") for
+//! context.
 
 pub mod batch;
 pub mod client;

@@ -240,8 +240,8 @@ pub struct UdpTestConfig {
     /// Target send rate in bits per second. Zero means "saturate" (the
     /// blaster will send as fast as the runtime allows). For accurate
     /// pacing above ~100 Mbps the kernel sleep granularity becomes the
-    /// limiting factor; this is a known issue called out in the
-    /// roadmap.
+    /// limiting factor — a known limitation tracked in ROADMAP.md
+    /// ("UDP pacing granularity").
     #[serde(default)]
     pub target_rate_bps: u64,
     /// Per-direction UDP socket buffer size override, in bytes. `None`

@@ -37,6 +37,12 @@ RUSTFLAGS="--cfg reqwest_unstable" cargo install speed-cli
 > (When building from a clone the repo's `.cargo/config.toml` sets it for you —
 > see [From source](#from-source) — but `cargo install` doesn't read that file.)
 
+> Builds use [mimalloc](https://github.com/microsoft/mimalloc) as the global
+> allocator by default (a `mimalloc` cargo feature). Add
+> `--no-default-features` to any `cargo install`/`cargo build` to use the
+> system allocator instead — see [docs/PROFILING.md](docs/PROFILING.md) for
+> the allocator A/B methodology.
+
 ### Prebuilt binaries
 
 No toolchain needed. Download a binary for your platform from the
@@ -97,9 +103,19 @@ speed-cli client --protocol http1 -s 192.168.1.100 -d 60 -c 4 -e results.cbor
 # Run the full multi-protocol suite (drives every advertised protocol)
 speed-cli suite -s <server-ip>
 speed-cli suite -s <server-ip> --control-port 9100 -e suite.cbor
+speed-cli suite -s <server-ip> -e suite.html           # rendered HTML report
 
-# Print a previously saved result
+# QUIC/HTTP3 with BBR congestion control (both directions; default is CUBIC)
+speed-cli client --protocol quic  -s <server-ip> --congestion bbr
+speed-cli client --protocol http3 -s <server-ip> --congestion bbr
+speed-cli suite -s <server-ip> --congestion bbr        # applies to QUIC phases only
+
+# Pin SO_RCVBUF/SO_SNDBUF instead of kernel autotuning (TCP/UDP tests)
+speed-cli client --protocol tcp -s <server-ip> --socket-buffer 8388608
+
+# Print a previously saved result (single-test or suite CBOR, auto-detected)
 speed-cli report -f results.cbor
+speed-cli report -f suite.cbor --export-html suite.html
 ```
 
 For more advanced usage, refer to help:
@@ -117,15 +133,16 @@ speed-cli man --out-dir ./man
 
 ### Exporting Results
 
-Add a `-e` or `--export` flag to `client` commands to save results.
-The data format is CBOR — there is no JSON export. HTML is available
-as a rendered single-file report for visual inspection.
+Add a `-e` or `--export` flag to `client` or `suite` commands to save
+results. The data format is CBOR — there is no JSON export. HTML is
+available as a rendered single-file report (inline SVG charts, no
+external assets) for visual inspection.
 
 ```bash
 # Export raw data (re-importable)
 speed-cli client --protocol <p> -s <server-ip> -e results.cbor
 
-# Export rendered HTML report
+# Export rendered HTML report (works for `suite` too)
 speed-cli client --protocol <p> -s <server-ip> -e results.html
 
 # No extension implies CBOR
@@ -133,6 +150,8 @@ speed-cli client --protocol <p> -s <server-ip> -e results
 ```
 
 Other extensions (`.json`, `.txt`, …) are rejected with a clear error.
+`speed-cli report -f <file>` re-opens any CBOR export — single-test or
+suite, auto-detected — and can render it with `--export-html`.
 
 ## WiFi / Latency-Under-Load Stress Test
 
@@ -185,19 +204,20 @@ When running server with HTTP, the following endpoints are available:
 
 The UDP test uses a small, iperf3-u-style "blaster" protocol: a fixed-rate sender, no retransmissions, server-side counting of received / lost / out-of-order packets and RFC 3550 interarrival jitter. Use `--target-rate-mbps <N>` to pace at a specific rate, or leave it at the default `0` to saturate. Pacing uses `tokio::time::sleep` and is therefore approximate above ~100 Mbps; for higher rates either accept the bursting or shape externally with `tc fq`. A QUIC-based congestion-controlled UDP mode is on the roadmap.
 
-## Future Improvements
+### Congestion Control
 
-*There are several features/improvements that are planned.*
+TCP tests always use the OS congestion controller (recorded in every
+report's environment snapshot) — there is no portable per-socket TCP knob.
+The QUIC-based tests (`quic`, `http3`) accept `--congestion {cubic,bbr}`:
+the server binds one listener per algorithm and the client dials the
+matching one, so both directions use the chosen controller. See
+[docs/PROTOCOL.md](docs/PROTOCOL.md) and [ROADMAP.md](ROADMAP.md) for the
+design rationale.
 
-- [ ] OCI Container images using all popular base images (necessary for representative performance testing)
-- [ ] Kubernetes support (for server)
-- [x] QUIC support (HTTP/3 and raw QUIC streams)
-- [ ] gRPC support?
-- [ ] Rich HTML report generation
-- [ ] Support for more niche protocols (e.g. SFTP, SMB)
-- [ ] Remove SSH server spin-up (remote SSH server downloads binary, or through client, and runs server based on what's specified by client)
-- [ ] Mobile app support (iOS/Android)
-- [ ] Firm up IPV6 support (which has different NAT characteristics)
+## Roadmap
+
+Planned work and deliberately-deferred decisions (io_uring, kTLS, musl
+targets, TCP BBR, …) live in [ROADMAP.md](ROADMAP.md), with rationale.
 
 ## Development
 
@@ -209,7 +229,11 @@ mise install && mise run setup   # install pinned tools + git hooks
 mise run check                   # fmt, clippy -D warnings, typos, unused-deps
 mise run test                    # nextest + doctests
 mise run bench                   # criterion benchmarks
+mise run bench-loopback          # sustained loopback suite run (A/B harness)
 ```
+
+For profiling (flamegraphs) and benchmarking methodology, see
+[docs/PROFILING.md](docs/PROFILING.md).
 
 ## Contributing
 
