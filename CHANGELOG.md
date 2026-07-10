@@ -8,6 +8,38 @@ From v1.0.0 onward, releases are automated by
 [release-plz](https://release-plz.dev) from Conventional Commit messages; this
 first entry is hand-written because the pre-1.0 history predates that convention.
 
+## [2.0.0](https://github.com/justin13888/speed-cli/compare/v1.0.0...v2.0.0) - 2026-07-10
+
+### Added
+
+- use mimalloc as the global allocator (default feature)
+- *(net)* SO_REUSEADDR on TCP listeners, opt-in --socket-buffer, kernel clamp hints
+- *(quic)* optional BBR congestion control for QUIC and HTTP/3 tests
+- *(report)* render suite reports to HTML and auto-detect report type on import
+- *(report)* report requests-per-second for HTTP bandwidth tests
+- *(report)* record per-protocol handshake and TTFB timings
+- *(udp)* size socket send/receive buffers
+
+### Fixed
+
+- *(perf)* tag throughput warmup at request completion, not start
+- detect hostname on macOS via hostname command fallback
+
+### Other
+
+- add ROADMAP.md and PROFILING.md links; fix dangling roadmap references
+- add profiling profile, flamegraph tasks, and loopback bench harness
+- satisfy rustfmt and clippy on Rust 1.96
+- *(perf)* cover the simultaneous HTTP full-duplex path
+- remove remaining buffer copies
+- bump schema-version tripwire to 9
+- *(udp)* batch send via GSO and receive via GRO
+- *(udp)* drop per-packet session lock in download sender
+- *(udp)* decode packets without copying the datagram
+- *(contributing)* document trusted publishing and the Actions PR setting
+- *(release-plz)* publish via crates.io trusted publishing, drop publish tokens
+- *(release-binaries)* allow invocation via workflow_call with a tag input
+
 ## [1.0.0] - 2026-06-25
 
 First stable release.
