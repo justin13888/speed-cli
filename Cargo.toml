@@ -106,3 +106,12 @@ codegen-units = 1
 panic = "abort"
 # opt-level = 3
 strip = true
+
+# Release-identical codegen but with symbols + debuginfo, for
+# cargo-flamegraph and perf (the release binary is stripped). Note:
+# build.rs's BUILD_PROFILE reports "release" here — cargo's PROFILE env
+# follows the inherits chain — which is fine for a profiling build.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

@@ -30,3 +30,11 @@ check-no-default = { run = "cargo check --no-default-features --all-targets", de
 check         = { depends = ["fmt-check", "lint", "spell", "machete", "check-no-default"], description = "All static checks" }
 ci            = { depends = ["check", "test"], description = "Full CI gate (checks + tests)" }
 setup         = { run = "hk install", description = "Install git hooks" }
+
+# Profiling / benchmarking (see docs/PROFILING.md). flamegraph is a per-task
+# tool so CI never builds it; needs `perf` on Linux (or run with --root),
+# dtrace on macOS. Pass extra args after `--`, e.g.
+# `mise run flamegraph-client -- -d 30`.
+flamegraph-server = { tools = { "cargo:flamegraph" = "latest" }, run = "cargo flamegraph --profile profiling --bin speed-cli -- server --all -b 127.0.0.1", description = "Flamegraph the server under a loopback run" }
+flamegraph-client = { tools = { "cargo:flamegraph" = "latest" }, run = "cargo flamegraph --profile profiling --bin speed-cli -- suite -s 127.0.0.1", description = "Flamegraph the client/suite (expects a running server)" }
+bench-loopback    = { run = "bash scripts/loopback-bench.sh", description = "Sustained loopback suite run (env: LABEL, DURATION, CONTROL_PORT; extra args -> cargo build)" }
