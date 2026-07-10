@@ -201,8 +201,12 @@ impl TcpServer {
 
     #[instrument(skip(self, addr), fields(addr = ?addr))]
     pub async fn run(&self, addr: impl ToSocketAddrs + std::fmt::Debug + Clone) -> Result<()> {
-        let listener = TcpListener::bind(&addr)
+        let sockaddr = tokio::net::lookup_host(&addr)
             .await
+            .wrap_err("Failed to resolve TCP listener address")?
+            .next()
+            .ok_or_else(|| eyre::eyre!("no address resolved for TCP listener"))?;
+        let listener = crate::utils::net::bind_tcp_listener(sockaddr, None)
             .wrap_err("Failed to bind TCP listener")?;
         self.run_on(listener).await
     }

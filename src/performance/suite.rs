@@ -90,6 +90,9 @@ pub struct SuiteConfig {
     /// count is identical for cubic and bbr. TCP-based phases always
     /// use the OS controller.
     pub congestion: CongestionAlgorithm,
+    /// Fixed SO_RCVBUF/SO_SNDBUF for the TCP/UDP phases, in bytes.
+    /// `None` = kernel autotuning for TCP, the enlarged default for UDP.
+    pub socket_buffer: Option<usize>,
 }
 
 impl SuiteConfig {
@@ -106,6 +109,7 @@ impl SuiteConfig {
             accounting: ThroughputAccounting::Goodput,
             include_tls: true,
             congestion: CongestionAlgorithm::default(),
+            socket_buffer: None,
         }
     }
 }
@@ -391,7 +395,8 @@ async fn run_tcp_phase(
         payload_sizes,
     )
     .with_warmup(cfg.warmup)
-    .with_accounting(cfg.accounting);
+    .with_accounting(cfg.accounting)
+    .with_socket_buffer(cfg.socket_buffer);
     run_tcp_client(conf).await
 }
 
@@ -412,7 +417,8 @@ async fn run_udp_phase(
     )
     .with_warmup(cfg.warmup)
     .with_accounting(cfg.accounting)
-    .with_target_rate_bps(cfg.udp_target_rate_mbps.saturating_mul(1_000_000));
+    .with_target_rate_bps(cfg.udp_target_rate_mbps.saturating_mul(1_000_000))
+    .with_socket_buffer(cfg.socket_buffer);
     run_udp_client(conf).await
 }
 

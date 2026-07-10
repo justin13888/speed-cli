@@ -90,6 +90,11 @@ pub struct TcpTestConfig {
     /// Goodput vs wire-rate accounting.
     #[serde(default = "default_accounting")]
     pub accounting: ThroughputAccounting,
+    /// Fixed SO_RCVBUF/SO_SNDBUF, in bytes, applied before connect.
+    /// `None` (default) keeps kernel autotuning, which is usually
+    /// better for TCP — a fixed size disables Linux receive autotuning.
+    #[serde(default)]
+    pub socket_buffer: Option<usize>,
 }
 
 fn default_tcp_read_buffer() -> usize {
@@ -123,6 +128,7 @@ impl TcpTestConfig {
             read_buffer_size: DEFAULT_TCP_READ_BUFFER,
             warmup: DEFAULT_WARMUP,
             accounting: ThroughputAccounting::Goodput,
+            socket_buffer: None,
         }
     }
 
@@ -133,6 +139,11 @@ impl TcpTestConfig {
 
     pub fn with_accounting(mut self, accounting: ThroughputAccounting) -> Self {
         self.accounting = accounting;
+        self
+    }
+
+    pub fn with_socket_buffer(mut self, socket_buffer: Option<usize>) -> Self {
+        self.socket_buffer = socket_buffer;
         self
     }
 }
@@ -233,6 +244,11 @@ pub struct UdpTestConfig {
     /// roadmap.
     #[serde(default)]
     pub target_rate_bps: u64,
+    /// Per-direction UDP socket buffer size override, in bytes. `None`
+    /// (default) uses the enlarged 8 MiB default — UDP has no kernel
+    /// autotuning, so a large buffer is always right.
+    #[serde(default)]
+    pub socket_buffer: Option<usize>,
 }
 
 impl UdpTestConfig {
@@ -282,6 +298,7 @@ impl UdpTestConfig {
             warmup: DEFAULT_WARMUP,
             accounting: ThroughputAccounting::Goodput,
             target_rate_bps: 0,
+            socket_buffer: None,
         }
     }
 
@@ -297,6 +314,11 @@ impl UdpTestConfig {
 
     pub fn with_target_rate_bps(mut self, target_rate_bps: u64) -> Self {
         self.target_rate_bps = target_rate_bps;
+        self
+    }
+
+    pub fn with_socket_buffer(mut self, socket_buffer: Option<usize>) -> Self {
+        self.socket_buffer = socket_buffer;
         self
     }
 }

@@ -22,20 +22,18 @@ pub const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Enlarge a UDP socket's send and receive buffers in place. Best-effort: a
 /// platform that rejects or clamps the request keeps whatever it granted; we
-/// log the outcome at debug and never fail a test over it.
-pub fn tune_socket_buffers(socket: &UdpSocket) {
+/// never fail a test over it, but a clamp is surfaced once as an actionable
+/// warning (sysctl hint) because it silently caps measurable throughput.
+pub fn tune_socket_buffers(socket: &UdpSocket, requested: usize) {
     let sock = SockRef::from(socket);
-    if let Err(e) = sock.set_recv_buffer_size(SOCKET_BUFFER_BYTES) {
-        debug!("UDP set_recv_buffer_size({SOCKET_BUFFER_BYTES}) failed: {e}");
+    if let Err(e) = sock.set_recv_buffer_size(requested) {
+        debug!("UDP set_recv_buffer_size({requested}) failed: {e}");
     }
-    if let Err(e) = sock.set_send_buffer_size(SOCKET_BUFFER_BYTES) {
-        debug!("UDP set_send_buffer_size({SOCKET_BUFFER_BYTES}) failed: {e}");
+    if let Err(e) = sock.set_send_buffer_size(requested) {
+        debug!("UDP set_send_buffer_size({requested}) failed: {e}");
     }
-    if tracing::enabled!(tracing::Level::DEBUG) {
-        let rcv = sock.recv_buffer_size().unwrap_or(0);
-        let snd = sock.send_buffer_size().unwrap_or(0);
-        debug!(
-            "UDP socket buffers granted: recv={rcv} B, send={snd} B (requested {SOCKET_BUFFER_BYTES} B each)"
-        );
-    }
+    let rcv = sock.recv_buffer_size().unwrap_or(0);
+    let snd = sock.send_buffer_size().unwrap_or(0);
+    debug!("UDP socket buffers granted: recv={rcv} B, send={snd} B (requested {requested} B each)");
+    crate::utils::net::warn_once_on_clamp("UDP socket buffers", requested, rcv, snd);
 }

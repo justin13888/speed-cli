@@ -114,6 +114,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
     let duration = Duration::from_secs(config.duration);
     let warmup = config.warmup;
     let target_rate = config.target_rate_bps;
+    let socket_buffer = config.socket_buffer.unwrap_or(super::SOCKET_BUFFER_BYTES);
 
     match config.test_type {
         TestType::LatencyOnly => {
@@ -122,6 +123,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                 duration,
                 warmup,
                 Duration::from_millis(100),
+                socket_buffer,
                 "latency",
             )
             .await?;
@@ -142,6 +144,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                 baseline,
                 Duration::ZERO,
                 STRESS_PROBE_INTERVAL,
+                socket_buffer,
                 "idle baseline",
             )
             .await?;
@@ -154,6 +157,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                     load,
                     Duration::ZERO,
                     STRESS_PROBE_INTERVAL,
+                    socket_buffer,
                     "under load",
                 ),
                 run_download(
@@ -163,6 +167,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                     Duration::ZERO,
                     target_rate,
                     config.parallel_streams,
+                    socket_buffer,
                     false
                 ),
                 run_upload(
@@ -172,6 +177,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                     Duration::ZERO,
                     target_rate,
                     config.parallel_streams,
+                    socket_buffer,
                     false
                 ),
             );
@@ -190,6 +196,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         warmup,
                         target_rate,
                         config.parallel_streams,
+                        socket_buffer,
                         true,
                     )
                     .await?,
@@ -207,6 +214,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         warmup,
                         target_rate,
                         config.parallel_streams,
+                        socket_buffer,
                         true,
                     )
                     .await?,
@@ -222,6 +230,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                     warmup,
                     target_rate,
                     config.parallel_streams,
+                    socket_buffer,
                     true,
                 )
                 .await?;
@@ -232,6 +241,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                     warmup,
                     target_rate,
                     config.parallel_streams,
+                    socket_buffer,
                     true,
                 )
                 .await?;
@@ -249,6 +259,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         warmup,
                         target_rate,
                         config.parallel_streams,
+                        socket_buffer,
                         true
                     ),
                     run_upload(
@@ -258,6 +269,7 @@ pub async fn run_udp_client(config: UdpTestConfig) -> Result<TestReport> {
                         warmup,
                         target_rate,
                         config.parallel_streams,
+                        socket_buffer,
                         true
                     ),
                 );
@@ -320,6 +332,7 @@ async fn run_latency(
     duration: Duration,
     warmup: Duration,
     probe_interval: Duration,
+    socket_buffer: usize,
     label: &str,
 ) -> Result<Option<LatencyResult>> {
     tracing::info!("Measuring UDP latency ({label}) for {duration:?}...");
@@ -327,7 +340,7 @@ async fn run_latency(
 
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(server_addr).await?;
-    tune_socket_buffers(&socket);
+    tune_socket_buffers(&socket, socket_buffer);
 
     let start = Instant::now();
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
@@ -492,6 +505,7 @@ fn collect_udp_streams(
     (streams, agg)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_download(
     server_addr: &str,
     payload_size: usize,
@@ -499,6 +513,7 @@ async fn run_download(
     warmup: Duration,
     target_rate_bps: u64,
     parallel_streams: usize,
+    socket_buffer: usize,
     show_progress: bool,
 ) -> Result<ThroughputResult> {
     let parallel_streams = parallel_streams.max(1);
@@ -535,7 +550,7 @@ async fn run_download(
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await?;
-            tune_socket_buffers(&socket);
+            tune_socket_buffers(&socket, socket_buffer);
             // GRO: the kernel coalesces several arriving datagrams into one
             // recv, slashing per-packet syscall overhead. The socket only ever
             // *sends* small control packets here, so the don't-fragment bit
@@ -667,6 +682,7 @@ async fn run_download(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_upload(
     server_addr: &str,
     payload_size: usize,
@@ -674,6 +690,7 @@ async fn run_upload(
     warmup: Duration,
     target_rate_bps: u64,
     parallel_streams: usize,
+    socket_buffer: usize,
     show_progress: bool,
 ) -> Result<ThroughputResult> {
     let parallel_streams = parallel_streams.max(1);
@@ -708,7 +725,7 @@ async fn run_upload(
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await?;
-            tune_socket_buffers(&socket);
+            tune_socket_buffers(&socket, socket_buffer);
             send_start(
                 &socket,
                 server,

@@ -6,7 +6,6 @@ use rand::{prelude::*, rng};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::time::sleep;
 use tracing::trace;
 
@@ -22,6 +21,7 @@ use crate::{
         PeerIdentity, Sample, StreamSamples, TcpTestConfig, TestReport, ThroughputResult,
     },
     utils::format::format_bytes,
+    utils::net::connect_tcp,
 };
 
 /// Run a full-duplex test on `parallel_connections` TCP connections,
@@ -38,6 +38,7 @@ async fn run_full_duplex_test(
     duration: Duration,
     read_buffer_size: usize,
     warmup: Duration,
+    socket_buffer: Option<usize>,
 ) -> Result<(ThroughputResult, ThroughputResult)> {
     tracing::info!(
         "Starting TCP full-duplex test with {} payload size and {} parallel connections...",
@@ -65,7 +66,7 @@ async fn run_full_duplex_test(
             let mut ul_local: Vec<Sample> = Vec::new();
             let addr = format!("{server}:{port}");
 
-            let stream = match TcpStream::connect(&addr).await {
+            let stream = match connect_tcp(&addr, socket_buffer).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!("TCP full-duplex connect error on conn {i}: {e}");
@@ -285,7 +286,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
     let connect_start = Instant::now();
     let (preflight_local, preflight_peer) = match tokio::time::timeout(
         Duration::from_secs(5),
-        TcpStream::connect(&server_addr),
+        connect_tcp(&server_addr, config.socket_buffer),
     )
     .await
     {
@@ -337,6 +338,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.duration,
                         config.read_buffer_size,
                         config.warmup,
+                        config.socket_buffer,
                     )
                     .await?,
                 );
@@ -353,6 +355,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.duration,
                         config.warmup,
+                        config.socket_buffer,
                     )
                     .await?,
                 );
@@ -371,6 +374,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.duration,
                         config.read_buffer_size,
                         config.warmup,
+                        config.socket_buffer,
                     )
                     .await?,
                 );
@@ -383,6 +387,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.duration,
                         config.warmup,
+                        config.socket_buffer,
                     )
                     .await?,
                 );
@@ -400,6 +405,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         config.duration,
                         config.read_buffer_size,
                         config.warmup,
+                        config.socket_buffer,
                     ),
                     run_upload_test(
                         &config.server,
@@ -408,6 +414,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                         *payload_size,
                         config.duration,
                         config.warmup,
+                        config.socket_buffer,
                     )
                 );
 
@@ -425,6 +432,7 @@ pub async fn run_tcp_client(config: TcpTestConfig) -> Result<TestReport> {
                     config.duration,
                     config.read_buffer_size,
                     config.warmup,
+                    config.socket_buffer,
                 )
                 .await?;
                 result.download.insert(*payload_size, down);
@@ -466,7 +474,7 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     let start = Instant::now();
     let (stats_collector, tx) = LatencyStatsCollector::new(progress_bar.clone(), start, duration);
 
-    let mut stream = match TcpStream::connect(&addr).await {
+    let mut stream = match connect_tcp(&addr, config.socket_buffer).await {
         Ok(s) => s,
         Err(e) => {
             return Err(eyre::eyre!(
@@ -555,6 +563,7 @@ async fn measure_tcp_latency(config: &TcpTestConfig) -> Result<Option<LatencyRes
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_download_test(
     server: &str,
     port: u16,
@@ -563,6 +572,7 @@ async fn run_download_test(
     duration: Duration,
     read_buffer_size: usize,
     warmup: Duration,
+    socket_buffer: Option<usize>,
 ) -> Result<ThroughputResult> {
     tracing::info!(
         "Starting TCP download test with {} payload size and {} parallel connections...",
@@ -585,7 +595,7 @@ async fn run_download_test(
             let addr = format!("{server}:{port}");
             let mut local_samples: Vec<Sample> = Vec::new();
 
-            match TcpStream::connect(&addr).await {
+            match connect_tcp(&addr, socket_buffer).await {
                 Ok(mut stream) => {
                     if let Err(e) = stream.set_nodelay(true) {
                         tracing::debug!("TCP set_nodelay failed on download conn {i}: {e}");
@@ -666,6 +676,7 @@ async fn run_download_test(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_upload_test(
     server: &str,
     port: u16,
@@ -673,6 +684,7 @@ async fn run_upload_test(
     payload_size: usize,
     duration: Duration,
     warmup: Duration,
+    socket_buffer: Option<usize>,
 ) -> Result<ThroughputResult> {
     tracing::info!(
         "Starting TCP upload test with {} payload size and {} parallel connections...",
@@ -712,7 +724,7 @@ async fn run_upload_test(
             // can't busy-loop if the server is gone.
             let mut reconnects_remaining: u32 = 5;
             'outer: while start_time.elapsed() < duration {
-                let mut stream = match TcpStream::connect(&addr).await {
+                let mut stream = match connect_tcp(&addr, socket_buffer).await {
                     Ok(s) => s,
                     Err(e) => {
                         let now = Instant::now();

@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
             accounting,
             target_rate_mbps,
             congestion,
+            socket_buffer,
         } => {
             if warmup >= duration {
                 return Err(eyre::eyre!(
@@ -136,7 +137,8 @@ async fn main() -> Result<()> {
                         test_sizes,
                     )
                     .with_warmup(warmup)
-                    .with_accounting(accounting);
+                    .with_accounting(accounting)
+                    .with_socket_buffer(socket_buffer);
                     run_tcp_client(config).await?
                 }
                 ClientMode::UDP => {
@@ -150,7 +152,8 @@ async fn main() -> Result<()> {
                     )
                     .with_warmup(warmup)
                     .with_accounting(accounting)
-                    .with_target_rate_bps(target_rate_bps);
+                    .with_target_rate_bps(target_rate_bps)
+                    .with_socket_buffer(socket_buffer);
                     run_udp_client(config).await?
                 }
                 ClientMode::QUIC => {
@@ -222,6 +225,7 @@ async fn main() -> Result<()> {
             quic_bbr_port,
             cert,
             key,
+            socket_buffer,
         } => {
             use speed_cli::cli::ServerProtocol;
             let has = |p: ServerProtocol| all || protocols.contains(&p);
@@ -274,7 +278,16 @@ async fn main() -> Result<()> {
                 max_upload_size: MAX_HTTP_UPLOAD_SIZE,
                 buffer_size: DEFAULT_TCP_READ_BUFFER,
                 tls,
+                socket_buffer,
             };
+
+            // Surface OS-level tuning hints once at startup; they also
+            // travel inside every report's environment snapshot.
+            if let Some(linux) = speed_cli::utils::env::Environment::capture().linux {
+                for hint in linux.tuning_hints() {
+                    info!("tuning hint: {hint}");
+                }
+            }
             let overrides = PortOverrides {
                 tcp: tcp_port,
                 udp: udp_port,
@@ -486,6 +499,7 @@ async fn main() -> Result<()> {
             no_tls,
             accounting,
             congestion,
+            socket_buffer,
             export,
         } => {
             if warmup >= duration {
@@ -511,6 +525,7 @@ async fn main() -> Result<()> {
                 },
                 include_tls: !no_tls,
                 congestion,
+                socket_buffer,
                 // `server` plus the shared I/O-size defaults come from `new`.
                 ..SuiteConfig::new(server)
             };

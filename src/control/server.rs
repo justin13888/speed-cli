@@ -35,8 +35,10 @@ pub async fn run_control_server(
         .with_state(manifest);
 
     tracing::info!("Control endpoint listening on {}", config.bind_addr);
-    let listener = tokio::net::TcpListener::bind(config.bind_addr)
-        .await
+    // The control port is the one fixed, user-chosen port; SO_REUSEADDR
+    // (set by the helper on Unix) lets a restarted server rebind it
+    // while old connections sit in TIME_WAIT.
+    let listener = crate::utils::net::bind_tcp_listener(config.bind_addr, None)
         .wrap_err_with(|| format!("Failed to bind control endpoint on {}", config.bind_addr))?;
 
     axum::serve(listener, app)

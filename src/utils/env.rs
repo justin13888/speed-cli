@@ -36,6 +36,43 @@ pub struct LinuxNetEnv {
     pub netdev_max_backlog: Option<u64>,
 }
 
+impl LinuxNetEnv {
+    /// Actionable tuning suggestions derived from the captured sysctls.
+    /// Shown in the environment section of reports and logged at server
+    /// startup, so "why isn't this saturating the link?" comes with an
+    /// answer attached.
+    pub fn tuning_hints(&self) -> Vec<String> {
+        // The buffer size the UDP tests (and quinn internally) ask for.
+        let wanted = crate::performance::udp::SOCKET_BUFFER_BYTES as u64;
+        let mut hints = Vec::new();
+        if let Some(r) = self.rmem_max
+            && r < wanted
+        {
+            hints.push(format!(
+                "net.core.rmem_max ({r} B) caps receive buffers below the {wanted} B the \
+                 UDP/QUIC tests request; raise it: sudo sysctl -w net.core.rmem_max={wanted}"
+            ));
+        }
+        if let Some(w) = self.wmem_max
+            && w < wanted
+        {
+            hints.push(format!(
+                "net.core.wmem_max ({w} B) caps send buffers below the {wanted} B the \
+                 UDP/QUIC tests request; raise it: sudo sysctl -w net.core.wmem_max={wanted}"
+            ));
+        }
+        if let Some(cc) = &self.tcp_congestion_control
+            && cc != "bbr"
+        {
+            hints.push(format!(
+                "TCP tests use the OS congestion controller ({cc}); QUIC tests can opt \
+                 into BBR with --congestion bbr"
+            ));
+        }
+        hints
+    }
+}
+
 impl Environment {
     /// Capture what we can, swallowing per-field errors so a missing
     /// `/proc` entry doesn't tank the report.
@@ -127,7 +164,53 @@ impl Display for Environment {
             if let Some(b) = linux.netdev_max_backlog {
                 writeln!(f, "  netdev_max_backlog: {b}")?;
             }
+            for hint in linux.tuning_hints() {
+                writeln!(f, "  hint:   {hint}")?;
+            }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LinuxNetEnv;
+
+    #[test]
+    fn tuning_hints_flag_low_rmem_max() {
+        let env = LinuxNetEnv {
+            tcp_congestion_control: Some("bbr".to_string()),
+            rmem_max: Some(212_992),
+            wmem_max: Some(64 * 1024 * 1024),
+            netdev_max_backlog: Some(1000),
+        };
+        let hints = env.tuning_hints();
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("net.core.rmem_max"));
+        assert!(hints[0].contains("sysctl"));
+    }
+
+    #[test]
+    fn tuning_hints_quiet_when_tuned() {
+        let env = LinuxNetEnv {
+            tcp_congestion_control: Some("bbr".to_string()),
+            rmem_max: Some(64 * 1024 * 1024),
+            wmem_max: Some(64 * 1024 * 1024),
+            netdev_max_backlog: Some(1000),
+        };
+        assert!(env.tuning_hints().is_empty());
+    }
+
+    #[test]
+    fn tuning_hints_mention_quic_bbr_option() {
+        let env = LinuxNetEnv {
+            tcp_congestion_control: Some("cubic".to_string()),
+            rmem_max: None,
+            wmem_max: None,
+            netdev_max_backlog: None,
+        };
+        let hints = env.tuning_hints();
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("--congestion bbr"));
     }
 }

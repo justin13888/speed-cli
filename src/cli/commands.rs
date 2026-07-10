@@ -93,6 +93,14 @@ pub enum Commands {
         /// and reject `bbr`.
         #[arg(long, value_enum, default_value_t = CongestionAlgorithm::Cubic)]
         congestion: CongestionAlgorithm,
+
+        /// Fixed SO_RCVBUF/SO_SNDBUF for test sockets, in bytes.
+        /// Default: unset, which keeps kernel autotuning (usually
+        /// better for TCP). UDP always enlarges its buffers to 8 MiB
+        /// unless this overrides it. QUIC/HTTP sockets are managed by
+        /// their stacks and ignore this.
+        #[arg(long)]
+        socket_buffer: Option<usize>,
     },
 
     /// Run as server.
@@ -153,6 +161,12 @@ pub enum Commands {
         /// TLS private key file path (*.pem).
         #[arg(long)]
         key: Option<PathBuf>,
+
+        /// Fixed SO_RCVBUF/SO_SNDBUF for test listeners, in bytes
+        /// (accepted TCP sockets inherit it). Default: unset = kernel
+        /// autotuning for TCP, 8 MiB for the UDP blaster.
+        #[arg(long)]
+        socket_buffer: Option<usize>,
     },
 
     /// Print previously saved results
@@ -213,6 +227,11 @@ pub enum Commands {
         /// OS controller.
         #[arg(long, value_enum, default_value_t = CongestionAlgorithm::Cubic)]
         congestion: CongestionAlgorithm,
+
+        /// Fixed SO_RCVBUF/SO_SNDBUF for the TCP/UDP phases, in bytes.
+        /// Default: unset = kernel autotuning for TCP, 8 MiB for UDP.
+        #[arg(long)]
+        socket_buffer: Option<usize>,
 
         /// Export the suite report to file. `.cbor` (or no extension)
         /// writes the raw CBOR data report; `.html` writes a rendered

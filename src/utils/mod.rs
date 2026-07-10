@@ -4,6 +4,7 @@ pub mod file;
 pub mod format;
 pub mod import;
 pub mod logging;
+pub mod net;
 pub mod progress;
 pub mod sparkline;
 pub mod tls;

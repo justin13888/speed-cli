@@ -19,6 +19,7 @@ use crate::performance::http::server::{
 use crate::performance::quic::server::{QuicServerConfig, bind_quic, run_quic_server};
 use crate::performance::tcp::server::run_tcp_server_on;
 use crate::performance::udp::server::BlasterServer;
+use crate::utils::net::{bind_std_tcp_listener, bind_tcp_listener};
 use crate::utils::tls::TlsMaterial;
 
 /// Which test protocols to expose. `http` enables *both* the HTTP/1.1
@@ -58,6 +59,10 @@ pub struct ServerRuntime {
     pub max_upload_size: usize,
     pub buffer_size: usize,
     pub tls: TlsMaterial,
+    /// Fixed SO_RCVBUF/SO_SNDBUF for test sockets, in bytes. `None`
+    /// keeps kernel autotuning for TCP and the enlarged default for
+    /// UDP. Listener-level for TCP: accepted sockets inherit it.
+    pub socket_buffer: Option<usize>,
 }
 
 /// A test listener whose socket is already bound but not yet serving.
@@ -110,8 +115,7 @@ pub async fn bind_all(
     };
 
     if enabled.tcp {
-        let l = TcpListener::bind(addr(rt.bind, overrides.tcp))
-            .await
+        let l = bind_tcp_listener(addr(rt.bind, overrides.tcp), rt.socket_buffer)
             .wrap_err("binding TCP test listener")?;
         let port = l.local_addr()?.port();
         push(
@@ -125,7 +129,7 @@ pub async fn bind_all(
     }
 
     if enabled.udp {
-        let server = BlasterServer::new(addr(rt.bind, overrides.udp))
+        let server = BlasterServer::new(addr(rt.bind, overrides.udp), rt.socket_buffer)
             .await
             .wrap_err("binding UDP blaster listener")?;
         let port = server.local_addr()?.port();
@@ -140,8 +144,7 @@ pub async fn bind_all(
     }
 
     if enabled.http {
-        let h1 = TcpListener::bind(addr(rt.bind, overrides.http1))
-            .await
+        let h1 = bind_tcp_listener(addr(rt.bind, overrides.http1), rt.socket_buffer)
             .wrap_err("binding HTTP/1.1 test listener")?;
         let h1_port = h1.local_addr()?.port();
         push(
@@ -153,8 +156,7 @@ pub async fn bind_all(
             &mut entries,
         );
 
-        let h2c = TcpListener::bind(addr(rt.bind, overrides.h2c))
-            .await
+        let h2c = bind_tcp_listener(addr(rt.bind, overrides.h2c), rt.socket_buffer)
             .wrap_err("binding h2c test listener")?;
         let h2c_port = h2c.local_addr()?.port();
         push(
@@ -168,7 +170,7 @@ pub async fn bind_all(
     }
 
     if enabled.https {
-        let l = std::net::TcpListener::bind(addr(rt.bind, overrides.https))
+        let l = bind_std_tcp_listener(addr(rt.bind, overrides.https), rt.socket_buffer)
             .wrap_err("binding HTTPS test listener")?;
         let port = l.local_addr()?.port();
         push(

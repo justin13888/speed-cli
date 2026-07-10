@@ -69,9 +69,13 @@ pub struct BlasterServer {
 }
 
 impl BlasterServer {
-    pub async fn new(addr: impl ToSocketAddrs) -> Result<Self> {
+    /// `socket_buffer` overrides the default per-direction buffer size
+    /// ([`super::SOCKET_BUFFER_BYTES`]); `None` keeps the default.
+    /// Unlike TCP, UDP sockets have no kernel autotuning, so the
+    /// enlarged default is always applied.
+    pub async fn new(addr: impl ToSocketAddrs, socket_buffer: Option<usize>) -> Result<Self> {
         let socket = UdpSocket::bind(&addr).await?;
-        super::tune_socket_buffers(&socket);
+        super::tune_socket_buffers(&socket, socket_buffer.unwrap_or(super::SOCKET_BUFFER_BYTES));
         Ok(Self {
             socket: Arc::new(socket),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -385,7 +389,7 @@ async fn download_sender(
 
 /// Convenience entry point used from `main.rs`.
 pub async fn run_udp_server(addr: impl ToSocketAddrs, cancel: CancellationToken) -> Result<()> {
-    let server = BlasterServer::new(addr).await?;
+    let server = BlasterServer::new(addr, None).await?;
     server.run(cancel).await
 }
 
