@@ -71,6 +71,20 @@ socket2 = "0.5"
 # uses. Safe API; pulled in transitively by quinn already. The `tracing`
 # feature routes its internal logs through our subscriber.
 quinn-udp = { version = "0.5", features = ["tracing"] }
+# Global allocator for the binary (feature `mimalloc`, default-on). Builds its
+# vendored C source with `cc` (no CMake). The `#[global_allocator]` attribute
+# is safe code; the unsafe lives inside this crate, so `unsafe_code = "forbid"`
+# is unaffected. Especially load-bearing if musl targets land (musl's default
+# malloc is slow under multithreaded allocation) — see ROADMAP.md.
+mimalloc = { version = "0.1.52", optional = true }
+
+[features]
+# mimalloc as the global allocator (binary only). Default-on so release
+# binaries, Homebrew, and `cargo install` all ship the fast configuration;
+# disable with `--no-default-features` (e.g. for allocator A/B runs — see
+# docs/PROFILING.md).
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
 criterion = "0.8.2"

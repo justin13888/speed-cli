@@ -30,6 +30,14 @@ use speed_cli::utils::import::{LoadedReport, import_any_report_cbor};
 use speed_cli::utils::progress::with_progress_counter;
 use speed_cli::utils::tls::TlsMaterial;
 
+/// mimalloc as the global allocator (feature `mimalloc`, on by default).
+/// Binary-only on purpose: the library must not impose an allocator on
+/// embedders or integration tests. Opt out with `--no-default-features`
+/// for allocator A/B runs (docs/PROFILING.md).
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();

@@ -26,6 +26,7 @@ machete       = { run = "cargo machete", description = "Find unused dependencies
 spell         = { run = "typos", description = "Spell-check the source" }
 test          = { run = ["cargo nextest run --all-features", "cargo test --doc"], description = "Run tests + doctests" }
 bench         = { run = "cargo bench", description = "Run criterion benchmarks" }
-check         = { depends = ["fmt-check", "lint", "spell", "machete"], description = "All static checks" }
+check-no-default = { run = "cargo check --no-default-features --all-targets", description = "Ensure the binary builds without mimalloc" }
+check         = { depends = ["fmt-check", "lint", "spell", "machete", "check-no-default"], description = "All static checks" }
 ci            = { depends = ["check", "test"], description = "Full CI gate (checks + tests)" }
 setup         = { run = "hk install", description = "Install git hooks" }
